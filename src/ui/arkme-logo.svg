@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" aria-hidden="true">
+  <defs>
+    <linearGradient id="arkme-logo-gradient" x1="2" y1="2" x2="14" y2="14" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4169e1" />
+      <stop offset="1" stop-color="#7857d8" />
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="14" height="14" rx="4" fill="url(#arkme-logo-gradient)" />
+</svg>

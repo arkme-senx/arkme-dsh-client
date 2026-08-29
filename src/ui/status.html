@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>arkme</title>
+    <link rel="stylesheet" href="./status.css" />
+  </head>
+  <body>
+    <main class="status-card" aria-live="polite">
+      <div class="brand" aria-label="arkme">
+        <img class="brand-logo" src="./arkme-logo.svg" alt="" />
+        <span id="brand-name">arkme</span>
+        <span id="environment-badge" class="environment-badge" hidden>测试环境</span>
+      </div>
+
+      <div id="spinner" class="spinner" aria-hidden="true"></div>
+      <div id="failure-icon" class="failure-icon" aria-hidden="true" hidden>!</div>
+
+      <h1 id="title">正在启动…</h1>
+      <p id="message" class="message">正在启动本地 Harness 服务</p>
+      <p id="failure-suggestion" class="failure-suggestion" hidden></p>
+      <p id="technical-details" class="technical-details" hidden></p>
+      <p id="workspace-row" class="workspace-row" hidden>
+        <span>项目</span>
+        <code id="workspace"></code>
+      </p>
+
+      <section id="runtime-progress" class="runtime-progress" aria-label="运行环境安装进度" hidden>
+        <div id="download-stage" class="runtime-stage" data-status="pending">
+          <span class="stage-indicator" aria-hidden="true"></span>
+          <span>下载运行组件</span>
+        </div>
+        <div id="download-details" class="download-details">
+          <div class="progress-row">
+            <div class="progress-label"><span>Harness</span><span id="harness-progress-label">0%</span></div>
+            <progress id="harness-progress" max="100" value="0"></progress>
+          </div>
+          <div class="progress-row">
+            <div class="progress-label"><span>Arkme 插件</span><span id="plugin-progress-label">等待下载</span></div>
+            <progress id="plugin-progress" max="100" value="0"></progress>
+          </div>
+        </div>
+        <div id="verify-stage" class="runtime-stage" data-status="pending">
+          <span class="stage-indicator" aria-hidden="true"></span>
+          <span>校验文件完整性</span>
+        </div>
+        <div id="install-stage" class="runtime-stage" data-status="pending">
+          <span class="stage-indicator" aria-hidden="true"></span>
+          <span>安装并启动</span>
+        </div>
+      </section>
+
+      <nav id="actions" class="actions" aria-label="错误恢复操作" hidden>
+        <a id="retry-action" class="button primary" href="app-action://retry">重试</a>
+        <a id="reload-runtime-action" class="button primary" href="app-action://reload-runtime" hidden>重新加载当前环境</a>
+        <a id="choose-workspace-action" class="button" href="app-action://choose-workspace">选择其他项目</a>
+        <a class="button subtle" href="app-action://open-logs">打开日志</a>
+      </nav>
+    </main>
+    <script src="./status.js"></script>
+  </body>
+</html>

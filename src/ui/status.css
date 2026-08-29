@@ -1,0 +1,315 @@
+:root {
+  color-scheme: light dark;
+  font-family:
+    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI",
+    sans-serif;
+  background: #f5f7fa;
+  color: #172033;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  padding: 40px;
+  background:
+    radial-gradient(circle at 50% 10%, rgb(77 116 255 / 12%), transparent 42%),
+    #f5f7fa;
+}
+
+.status-card {
+  width: min(620px, 100%);
+  padding: 44px;
+  text-align: center;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 54px;
+  color: #4d5870;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.brand-logo {
+  width: 14px;
+  height: 14px;
+  filter: drop-shadow(0 3px 6px rgb(78 94 213 / 24%));
+}
+
+.environment-badge {
+  padding: 3px 7px;
+  border: 1px solid rgb(65 105 225 / 28%);
+  border-radius: 999px;
+  color: #3458c7;
+  background: rgb(65 105 225 / 8%);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.spinner,
+.failure-icon {
+  width: 42px;
+  height: 42px;
+  margin: 0 auto 24px;
+}
+
+.spinner {
+  border: 3px solid rgb(65 105 225 / 16%);
+  border-top-color: #4169e1;
+  border-radius: 50%;
+  animation: spin 850ms linear infinite;
+}
+
+.failure-icon {
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: #d84b4b;
+  font-size: 24px;
+  font-weight: 700;
+}
+
+h1 {
+  margin: 0;
+  font-size: 25px;
+  font-weight: 680;
+  letter-spacing: -0.02em;
+}
+
+.message {
+  max-height: 170px;
+  margin: 12px auto 0;
+  overflow: auto;
+  color: #647087;
+  font-size: 14px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.failure-suggestion {
+  width: min(460px, 100%);
+  margin: 14px auto 0;
+  color: #4f5b70;
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.technical-details {
+  width: min(520px, 100%);
+  margin: 18px auto 0;
+  color: #929bad;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.workspace-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 24px 0 0;
+  color: #7c8699;
+  font-size: 12px;
+}
+
+.workspace-row code {
+  max-width: 440px;
+  overflow: hidden;
+  color: #4f5b70;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-progress {
+  display: grid;
+  gap: 18px;
+  width: min(460px, 100%);
+  margin: 30px auto 0;
+  text-align: left;
+}
+
+.runtime-stage {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #8993a5;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.stage-indicator {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  border: 2px solid #d8deea;
+  border-radius: 50%;
+  font-size: 12px;
+}
+
+.runtime-stage[data-status="complete"] {
+  color: #4f5b70;
+}
+
+.runtime-stage[data-status="complete"] .stage-indicator {
+  border-color: #4caf74;
+  color: #fff;
+  background: #4caf74;
+}
+
+.runtime-stage[data-status="complete"] .stage-indicator::before {
+  content: "✓";
+}
+
+.runtime-stage[data-status="current"] {
+  color: #35415a;
+}
+
+.runtime-stage[data-status="current"] .stage-indicator {
+  border-color: #4169e1;
+  box-shadow: inset 0 0 0 5px #f5f7fa;
+  background: #4169e1;
+}
+
+.download-details {
+  display: grid;
+  gap: 14px;
+  padding-left: 32px;
+}
+
+.progress-label {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 7px;
+  color: #59657a;
+  font-size: 13px;
+}
+
+.progress-row progress {
+  width: 100%;
+  height: 7px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  background: #e5e9f2;
+}
+
+.progress-row progress::-webkit-progress-bar {
+  border-radius: 999px;
+  background: #e5e9f2;
+}
+
+.progress-row progress::-webkit-progress-value {
+  border-radius: 999px;
+  background: #4169e1;
+}
+
+.actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 32px;
+}
+
+.button {
+  padding: 9px 15px;
+  border: 1px solid #d8deea;
+  border-radius: 9px;
+  color: #3d485e;
+  background: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: transform 120ms ease, border-color 120ms ease;
+}
+
+.button:hover {
+  border-color: #aeb9cf;
+  transform: translateY(-1px);
+}
+
+.button.primary {
+  border-color: #4169e1;
+  color: #fff;
+  background: #4169e1;
+}
+
+.button.subtle {
+  border-color: transparent;
+  background: transparent;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    background: #11141b;
+    color: #f3f5fa;
+  }
+
+  body {
+    background:
+      radial-gradient(circle at 50% 10%, rgb(83 118 255 / 18%), transparent 42%),
+      #11141b;
+  }
+
+  .brand,
+  .message,
+  .failure-suggestion,
+  .workspace-row {
+    color: #939db2;
+  }
+
+  .environment-badge {
+    border-color: rgb(119 145 255 / 38%);
+    color: #aebeff;
+    background: rgb(83 118 255 / 14%);
+  }
+
+  .workspace-row code {
+    color: #b8c0d1;
+  }
+
+  .runtime-stage[data-status="complete"],
+  .runtime-stage[data-status="current"] {
+    color: #cbd2df;
+  }
+
+  .runtime-stage[data-status="current"] .stage-indicator {
+    box-shadow: inset 0 0 0 5px #11141b;
+  }
+
+  .button {
+    border-color: #3a4150;
+    color: #e1e5ee;
+    background: #202530;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 2s;
+  }
+}
