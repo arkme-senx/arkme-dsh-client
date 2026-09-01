@@ -219,6 +219,21 @@ describe("desktop notification preload", () => {
     expect(Object.isFrozen(desktop)).toBe(true);
   });
 
+  it("treats the renderer's first legacy update check as a status read and preserves later manual checks", async () => {
+    const { exposed, invokeCalls } = await executePreload("0.1.0-rc.8");
+    const desktop = exposed.arkmeDesktop as {
+      update: { check(): Promise<unknown> };
+    };
+
+    await desktop.update.check();
+    await desktop.update.check();
+
+    expect(invokeCalls.filter(call => call.channel.startsWith("arkme-app-update:"))).toEqual([
+      { channel: "arkme-app-update:status", args: [] },
+      { channel: "arkme-app-update:check", args: [] }
+    ]);
+  });
+
   it("freezes the notification facade and validates typed activation events", async () => {
     const { emit, exposed, invokeCalls, sendCalls, syncCalls } = await executePreload("0.1.0-rc.8", {
       notificationPermission: "default",

@@ -1,13 +1,14 @@
 import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   BadRuntimeReleaseBlockedError,
   ElectronRuntimeManager
 } from "../src/runtime/manager.js";
 import { deriveElectronRuntimeReleaseId, type ElectronRuntimeManifest } from "../src/runtime/manifest.js";
 import { RuntimeArtifactValidationError } from "../src/runtime/errors.js";
+import { AUTOMATIC_UPDATE_CHECK_INTERVAL_MS } from "../src/update-check-policy.js";
 
 const temporaryDirectories: string[] = [];
 const manifestContext = { os: "darwin", arch: "arm64", shellVersion: "0.2.0", electronMajor: 43, modulesAbi: 148 } as const;
@@ -72,6 +73,208 @@ function dshEntry(root: string, releaseId: string): string {
 }
 
 describe("ElectronRuntimeManager", () => {
+  test("counts the bootstrap manifest request toward the background update cooldown", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "electron-runtime-bootstrap-cooldown-"));
+    temporaryDirectories.push(root);
+    let nowMillis = Date.parse("2026-08-27T00:00:00Z");
+    let latest = release("electron-runtime-v1-bootstrap", 1, 1);
+    let fetches = 0;
+    const manager = new ElectronRuntimeManager({
+      root,
+      environment: "prod",
+      manifestContext,
+      fetchManifest: async () => {
+        fetches += 1;
+        return latest;
+      },
+      installRelease: installFixture,
+      validateRelease: async () => undefined,
+      now: () => new Date(nowMillis)
+    });
+
+    await manager.prepareForLaunch();
+    await manager.completeCandidate();
+    expect(await manager.stageLatestIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS)).toBe("throttled");
+    expect(fetches).toBe(1);
+
+    latest = release("electron-runtime-v1-newer", 2, 1);
+    nowMillis += 30 * 60_000 - 1;
+    expect(await manager.stageLatestIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS)).toBe("throttled");
+    expect(fetches).toBe(1);
+
+    nowMillis += 1;
+    expect(await manager.stageLatestIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS)).toBe("staged");
+    expect(fetches).toBe(2);
+  });
+
+  test("coalesces concurrent stale checks into one Release Set request", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "electron-runtime-single-flight-"));
+    temporaryDirectories.push(root);
+    let nowMillis = Date.parse("2026-08-27T00:00:00Z");
+    const current = release("electron-runtime-v1-current", 1, 1);
+    let fetches = 0;
+    let finishRequest: ((manifest: ElectronRuntimeManifest) => void) | undefined;
+    const manager = new ElectronRuntimeManager({
+      root,
+      environment: "prod",
+      manifestContext,
+      fetchManifest: async () => {
+        fetches += 1;
+        if (fetches === 1) return current;
+        return await new Promise<ElectronRuntimeManifest>(resolve => { finishRequest = resolve; });
+      },
+      installRelease: installFixture,
+      validateRelease: async () => undefined,
+      now: () => new Date(nowMillis)
+    });
+
+    await manager.prepareForLaunch();
+    await manager.completeCandidate();
+    nowMillis += AUTOMATIC_UPDATE_CHECK_INTERVAL_MS;
+    const first = manager.stageLatestIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS);
+    const second = manager.stageLatestIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS);
+    await vi.waitFor(() => expect(fetches).toBe(2));
+
+    finishRequest?.(current);
+    await expect(Promise.all([first, second])).resolves.toEqual(["current", "current"]);
+    expect(fetches).toBe(2);
+  });
+
+  test("does not stage a Release Set while launch preparation is validating a candidate", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "electron-runtime-prepare-single-flight-"));
+    temporaryDirectories.push(root);
+    let latest = release("electron-runtime-v1-current", 1, 1);
+    const seed = new ElectronRuntimeManager({
+      root,
+      environment: "prod",
+      manifestContext,
+      fetchManifest: async () => latest,
+      installRelease: installFixture,
+      validateRelease: async () => undefined
+    });
+    await seed.prepareForLaunch();
+    await seed.completeCandidate();
+    latest = release("electron-runtime-v1-candidate", 2, 1);
+    await seed.stageLatest();
+
+    let validationCalls = 0;
+    let releaseValidation: (() => void) | undefined;
+    const validationGate = new Promise<void>(resolve => { releaseValidation = resolve; });
+    let manifestFetches = 0;
+    const manager = new ElectronRuntimeManager({
+      root,
+      environment: "prod",
+      manifestContext,
+      fetchManifest: async () => {
+        manifestFetches += 1;
+        return latest;
+      },
+      installRelease: installFixture,
+      validateRelease: async () => {
+        validationCalls += 1;
+        await validationGate;
+      }
+    });
+
+    const preparing = manager.prepareForLaunch();
+    await vi.waitFor(() => expect(validationCalls).toBe(1));
+    const focusCheck = manager.stageLatestIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS);
+    releaseValidation?.();
+
+    await expect(preparing).resolves.toMatchObject({ releaseId: latest.releaseId, probation: true });
+    await expect(focusCheck).resolves.toBe("throttled");
+    expect(manifestFetches).toBe(0);
+  });
+
+  test("counts a failed Release Set request toward the cooldown", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "electron-runtime-failed-cooldown-"));
+    temporaryDirectories.push(root);
+    let nowMillis = Date.parse("2026-08-27T00:00:00Z");
+    const current = release("electron-runtime-v1-current", 1, 1);
+    let fetches = 0;
+    const manager = new ElectronRuntimeManager({
+      root,
+      environment: "prod",
+      manifestContext,
+      fetchManifest: async () => {
+        fetches += 1;
+        if (fetches > 1) throw new Error("offline");
+        return current;
+      },
+      installRelease: installFixture,
+      validateRelease: async () => undefined,
+      now: () => new Date(nowMillis)
+    });
+
+    await manager.prepareForLaunch();
+    await manager.completeCandidate();
+    nowMillis += AUTOMATIC_UPDATE_CHECK_INTERVAL_MS;
+    await expect(manager.stageLatestIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS)).rejects.toThrow("offline");
+    nowMillis += 10_000;
+    expect(await manager.stageLatestIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS)).toBe("throttled");
+    expect(fetches).toBe(2);
+  });
+
+  test("counts failures before the Manifest request toward the cooldown", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "electron-runtime-pre-manifest-failure-"));
+    temporaryDirectories.push(root);
+    let nowMillis = Date.parse("2026-08-27T00:00:00Z");
+    const current = release("electron-runtime-v1-current", 1, 1);
+    let fetches = 0;
+    const manager = new ElectronRuntimeManager({
+      root,
+      environment: "prod",
+      manifestContext,
+      fetchManifest: async () => {
+        fetches += 1;
+        return current;
+      },
+      installRelease: installFixture,
+      validateRelease: async () => undefined,
+      now: () => new Date(nowMillis)
+    });
+
+    await manager.prepareForLaunch();
+    await manager.completeCandidate();
+    const statePath = path.join(root, "state.json");
+    const validState = await readFile(statePath, "utf8");
+    await writeFile(statePath, "not json");
+    nowMillis += AUTOMATIC_UPDATE_CHECK_INTERVAL_MS;
+
+    await expect(manager.stageLatestIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS)).rejects.toThrow();
+    nowMillis += 10_000;
+    await expect(manager.stageLatestIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS)).resolves.toBe("throttled");
+    expect(fetches).toBe(1);
+    await writeFile(statePath, validState);
+  });
+
+  test("rechecks after the wall clock moves backward", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "electron-runtime-clock-rollback-"));
+    temporaryDirectories.push(root);
+    let nowMillis = Date.parse("2026-08-27T00:00:00Z");
+    const current = release("electron-runtime-v1-current", 1, 1);
+    let fetches = 0;
+    const manager = new ElectronRuntimeManager({
+      root,
+      environment: "prod",
+      manifestContext,
+      fetchManifest: async () => {
+        fetches += 1;
+        return current;
+      },
+      installRelease: installFixture,
+      validateRelease: async () => undefined,
+      now: () => new Date(nowMillis)
+    });
+
+    await manager.prepareForLaunch();
+    await manager.completeCandidate();
+    nowMillis -= 1_000;
+
+    await expect(manager.stageLatestIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS)).resolves.toBe("current");
+    expect(fetches).toBe(2);
+  });
+
   test("installs the first online release, stages updates, and activates them only on the next start", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "electron-runtime-manager-"));
     temporaryDirectories.push(root);

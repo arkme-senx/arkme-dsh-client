@@ -254,6 +254,7 @@ reportDesktopNotificationPermission(currentDesktopNotificationPermission());
 const attentionCapabilities = parseDesktopAttentionCapabilities(
   ipcRenderer.sendSync("arkme-desktop:attention-capabilities") as unknown
 );
+let initialAppUpdateCheck = true;
 
 contextBridge.exposeInMainWorld(
   "arkmeDesktop",
@@ -265,7 +266,13 @@ contextBridge.exposeInMainWorld(
     attention: Object.freeze(attentionCapabilities),
     update: Object.freeze({
       status: async () => await ipcRenderer.invoke("arkme-app-update:status"),
-      check: async () => await ipcRenderer.invoke("arkme-app-update:check"),
+      check: async () => {
+        if (initialAppUpdateCheck) {
+          initialAppUpdateCheck = false;
+          return await ipcRenderer.invoke("arkme-app-update:status");
+        }
+        return await ipcRenderer.invoke("arkme-app-update:check");
+      },
       download: async () => await ipcRenderer.invoke("arkme-app-update:download"),
       showInFolder: async () => await ipcRenderer.invoke("arkme-app-update:show-in-folder")
     })

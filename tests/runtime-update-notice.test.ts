@@ -207,7 +207,7 @@ describe("stageRuntimeUpdateInBackground", () => {
   });
 
   it("does not show the lightweight notice when no background installation starts", async () => {
-    for (const result of ["current", "stale", "bad", "deferred"] as const) {
+    for (const result of ["current", "stale", "bad", "deferred", "throttled"] as const) {
       const { coordinator } = fixture();
       await expect(stageRuntimeUpdateInBackground({
         attemptId: `attempt-${result}`,
