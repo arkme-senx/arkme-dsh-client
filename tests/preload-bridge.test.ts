@@ -70,6 +70,9 @@ async function executePreload(
     attention?: unknown;
     notificationPermission?: NotificationPermission;
     requestedNotificationPermission?: NotificationPermission;
+    now?: () => number;
+    platform?: NodeJS.Platform;
+    userActivation?: () => boolean;
   } = {}
 ): Promise<{
   document: FakeDocument;
@@ -148,6 +151,7 @@ async function executePreload(
     crypto: {
       randomUUID: () => `00000000-0000-4000-8000-${String(++preloadUuidSequence).padStart(12, "0")}`
     },
+    Date: { now: options.now ?? Date.now },
     document,
     Notification: {
       get permission() { return notificationPermission; },
@@ -158,6 +162,12 @@ async function executePreload(
     },
     exports: {},
     module: { exports: {} },
+    navigator: {
+      userActivation: {
+        get isActive() { return options.userActivation?.() ?? false; }
+      }
+    },
+    process: { platform: options.platform ?? "darwin" },
     require: (specifier: string) => {
       if (specifier === "electron") return electron;
       throw new Error(`Unexpected preload dependency: ${specifier}`);
@@ -470,5 +480,109 @@ describe("desktop notification preload", () => {
 
     expect(findByText(document.documentElement, "新版本已安装，重启后激活。")).toBeDefined();
     expect(findByText(document.documentElement, "已检测到新版，正在后台安装…")).toBeUndefined();
+  });
+});
+
+describe("desktop location preload", () => {
+  it("exposes the fixed read/request/settings contract", async () => {
+    const { exposed } = await executePreload("0.1.0-rc.8");
+    const bridge = exposed.arkmeDesktopLocation as Record<string, unknown>;
+
+    expect(Object.keys(bridge).sort()).toEqual([
+      "openSettings",
+      "permissionState",
+      "requestPermission"
+    ]);
+    expect(Object.isFrozen(bridge)).toBe(true);
+  });
+
+  it("does not shadow the existing browser location path outside macOS", async () => {
+    for (const platform of ["win32", "linux"] as const) {
+      const { exposed } = await executePreload("0.1.0-rc.8", { platform });
+      expect(exposed.arkmeDesktopLocation).toBeUndefined();
+    }
+  });
+
+  it("allows status without activation but blocks permission mutations", async () => {
+    const { exposed, invokeCalls } = await executePreload("0.1.0-rc.8");
+    const bridge = exposed.arkmeDesktopLocation as {
+      permissionState(): Promise<unknown>;
+      requestPermission(): Promise<unknown>;
+      openSettings(): Promise<boolean>;
+    };
+
+    await bridge.permissionState();
+    await expect(bridge.requestPermission()).resolves.toEqual({
+      schemaVersion: 1,
+      state: "unavailable"
+    });
+    await expect(bridge.openSettings()).resolves.toBe(false);
+    expect(invokeCalls.filter(call => call.channel.startsWith("arkme:desktop-location"))).toEqual([
+      { channel: "arkme:desktop-location:permission-state", args: [] }
+    ]);
+  });
+
+  it("carries one real activation across the status IPC roundtrip and consumes the lease", async () => {
+    let active = true;
+    let now = 1_000;
+    const { exposed, invokeCalls } = await executePreload("0.1.0-rc.8", {
+      now: () => now,
+      userActivation: () => active
+    });
+    const bridge = exposed.arkmeDesktopLocation as {
+      permissionState(): Promise<unknown>;
+      requestPermission(): Promise<unknown>;
+    };
+
+    await bridge.permissionState();
+    active = false;
+    now += 100;
+    await bridge.requestPermission();
+    await expect(bridge.requestPermission()).resolves.toEqual({
+      schemaVersion: 1,
+      state: "unavailable"
+    });
+    expect(invokeCalls).toContainEqual({
+      channel: "arkme:desktop-location:request-permission",
+      args: [{ userActivation: true }]
+    });
+    expect(invokeCalls.filter(call => call.channel === "arkme:desktop-location:request-permission"))
+      .toHaveLength(1);
+  });
+
+  it("expires the activation lease after a bounded IPC allowance", async () => {
+    let active = true;
+    let now = 10_000;
+    const { exposed, invokeCalls } = await executePreload("0.1.0-rc.8", {
+      now: () => now,
+      userActivation: () => active
+    });
+    const bridge = exposed.arkmeDesktopLocation as {
+      permissionState(): Promise<unknown>;
+      requestPermission(): Promise<unknown>;
+    };
+
+    await bridge.permissionState();
+    active = false;
+    now += 2_001;
+    await expect(bridge.requestPermission()).resolves.toEqual({
+      schemaVersion: 1,
+      state: "unavailable"
+    });
+    expect(invokeCalls.some(call => call.channel === "arkme:desktop-location:request-permission"))
+      .toBe(false);
+  });
+
+  it("allows a directly activated settings request", async () => {
+    const { exposed, invokeCalls } = await executePreload("0.1.0-rc.8", {
+      userActivation: () => true
+    });
+    const bridge = exposed.arkmeDesktopLocation as { openSettings(): Promise<boolean> };
+
+    await expect(bridge.openSettings()).resolves.toBe(true);
+    expect(invokeCalls).toContainEqual({
+      channel: "arkme:desktop-location:open-settings",
+      args: [{ userActivation: true }]
+    });
   });
 });

@@ -3,6 +3,13 @@ export interface MacCodeSigningDetails {
   teamIdentifier: string;
 }
 
+const requiredMainProcessEntitlements = [
+  "com.apple.security.cs.allow-jit",
+  "com.apple.security.cs.allow-unsigned-executable-memory",
+  "com.apple.security.cs.disable-library-validation",
+  "com.apple.security.personal-information.location"
+] as const;
+
 export function validateMacCodeSigningDetails(output: string): MacCodeSigningDetails {
   const identifier = detailValue(output, "Identifier");
   if (identifier !== "cc.jiwo.arkme") {
@@ -21,6 +28,24 @@ export function validateMacCodeSigningDetails(output: string): MacCodeSigningDet
   }
 
   return { identifier, teamIdentifier };
+}
+
+export function validateMacMainProcessEntitlements(output: string): void {
+  for (const entitlement of requiredMainProcessEntitlements) {
+    const escaped = entitlement.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (!new RegExp(`<key>\\s*${escaped}\\s*</key>\\s*<true\\s*/>`).test(output)) {
+      throw new Error(`Signed Harness main process is missing entitlement ${entitlement}`);
+    }
+  }
+}
+
+export function validateMacLocationUsageDescriptions(values: {
+  location: string;
+  whenInUse: string;
+}): void {
+  if (values.location.trim() === "" || values.whenInUse.trim() === "") {
+    throw new Error("Signed Harness requires non-empty macOS location usage descriptions");
+  }
 }
 
 function detailValue(output: string, name: string): string | undefined {

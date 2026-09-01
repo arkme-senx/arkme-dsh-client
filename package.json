@@ -92,6 +92,11 @@
     "mac": {
       "category": "public.app-category.developer-tools",
       "icon": "build/icon.icns",
+      "entitlements": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSLocationUsageDescription": "Arkme 仅在你开启位置记录后，将当前位置写入你发送的快记快照。",
+        "NSLocationWhenInUseUsageDescription": "Arkme 仅在你开启位置记录后，将当前位置写入你发送的快记快照。"
+      },
       "forceCodeSigning": true,
       "x64ArchFiles": "**/{*darwin-arm64*,*darwin-x64*}/**/*",
       "target": [
@@ -149,6 +154,7 @@
   "dependencies": {
     "ali-oss": "6.23.0",
     "electron-updater": "^6.8.9",
+    "koffi": "3.1.5",
     "semver": "7.8.5",
     "tar-stream": "3.1.7"
   },

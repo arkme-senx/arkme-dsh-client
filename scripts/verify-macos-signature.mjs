@@ -1,6 +1,10 @@
 import { spawnSync } from "node:child_process";
 import path from "node:path";
-import { validateMacCodeSigningDetails } from "../dist/macos-signature.js";
+import {
+  validateMacCodeSigningDetails,
+  validateMacLocationUsageDescriptions,
+  validateMacMainProcessEntitlements
+} from "../dist/macos-signature.js";
 
 const appPath = path.resolve(process.argv[2] ?? "release/mac-arm64/arkme.app");
 const appExecutable = path.join(
@@ -43,8 +47,43 @@ if (inspection.error !== undefined || inspection.status !== 0) {
 }
 
 const details = validateMacCodeSigningDetails(`${inspection.stdout ?? ""}${inspection.stderr ?? ""}`);
+const entitlementInspection = spawnSync(
+  "/usr/bin/codesign",
+  ["-d", "--entitlements", ":-", appPath],
+  { encoding: "utf8" }
+);
+if (entitlementInspection.error !== undefined || entitlementInspection.status !== 0) {
+  const detail = `${entitlementInspection.stdout ?? ""}${entitlementInspection.stderr ?? ""}`.trim();
+  throw new Error(`Unable to inspect Harness entitlements: ${detail || entitlementInspection.error?.message}`);
+}
+validateMacMainProcessEntitlements(
+  `${entitlementInspection.stdout ?? ""}${entitlementInspection.stderr ?? ""}`
+);
+
+const infoPlist = path.join(appPath, "Contents", "Info.plist");
+validateMacLocationUsageDescriptions({
+  location: readPlistString(infoPlist, "NSLocationUsageDescription"),
+  whenInUse: readPlistString(infoPlist, "NSLocationWhenInUseUsageDescription")
+});
+
 verifyNestedNativeModule(notificationPermissionModule, appExecutable);
-console.log(`Verified signed Harness ${details.identifier} (TeamIdentifier=${details.teamIdentifier})`);
+console.log(
+  `Verified signed Harness ${details.identifier} `
+  + `(TeamIdentifier=${details.teamIdentifier}, CoreLocation=enabled, notification-permission=enabled)`
+);
+
+function readPlistString(plistPath, key) {
+  const inspection = spawnSync(
+    "/usr/bin/plutil",
+    ["-extract", key, "raw", plistPath],
+    { encoding: "utf8" }
+  );
+  if (inspection.error !== undefined || inspection.status !== 0) {
+    const detail = `${inspection.stdout ?? ""}${inspection.stderr ?? ""}`.trim();
+    throw new Error(`Unable to read ${key} from Harness Info.plist: ${detail || inspection.error?.message}`);
+  }
+  return inspection.stdout ?? "";
+}
 
 function verifyNestedNativeModule(modulePath, executablePath) {
   const moduleVerification = spawnSync(
