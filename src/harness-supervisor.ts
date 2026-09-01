@@ -80,6 +80,12 @@ interface SupervisorConfig {
   managedRestart?: { helperPath: string; planPath: string; releaseId?: string };
   optionalExtensionRecovery?: OptionalExtensionRecoveryConfig;
   directoryPickerBridge?: { url: string; token: string };
+  desktopCapabilityBridge?: {
+    url: string;
+    token: string;
+    activateSession(sessionId: string): void;
+    deactivateSession(sessionId: string): void;
+  };
 }
 
 interface StartOptions {
@@ -125,6 +131,7 @@ interface RunningHarness {
   startupError: Error | null;
   tail: string;
   workspacePath: string;
+  desktopBridgeSessionId?: string;
 }
 
 // Windows can spend several seconds loading the bundled Electron/Node runtime,
@@ -441,40 +448,59 @@ export class HarnessProcessSupervisor {
       this.config.execPath,
       this.config.packageManagerCliPath
     );
-    const child = this.dependencies.spawn(
-      this.config.execPath,
-      [
-        "--expose-internals",
-        this.config.dshBinPath,
-        "web",
-        "--no-open",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        String(port)
-      ],
-      {
-        cwd: workspacePath,
-        detached: true,
-        env: {
-          ...inheritedEnv,
-          DSH_HOME: this.config.dshHome,
-          DSH_PROFILE_FIRST_BUNDLES: "@senguoyun/dsh-arkme",
-          DSH_INSTALLED_MODULE_BASE_PATH: this.config.dshBinPath,
-          ELECTRON_RUN_AS_NODE: "1",
-          ...(this.config.managedRestart === undefined ? {} : {
-            ARKME_DESKTOP_MANAGED_RESTART: "1",
-            ARKME_DESKTOP_MANAGED_RESTART_PLAN_PATH: this.config.managedRestart.planPath
-          }),
-          ARKME_HARNESS_LOG_PATH: this.config.logPath,
-          ...(this.config.directoryPickerBridge === undefined ? {} : {
-            ARKME_DIRECTORY_PICKER_BRIDGE_URL: this.config.directoryPickerBridge.url,
-            ARKME_DIRECTORY_PICKER_BRIDGE_TOKEN: this.config.directoryPickerBridge.token
-          })
-        },
-        stdio: ["ignore", "pipe", "pipe"]
+    const desktopBridgeSessionId = this.config.desktopCapabilityBridge === undefined
+      ? undefined
+      : randomUUID();
+    if (desktopBridgeSessionId !== undefined) {
+      this.config.desktopCapabilityBridge?.activateSession(desktopBridgeSessionId);
+    }
+    let child: ManagedChild;
+    try {
+      child = this.dependencies.spawn(
+        this.config.execPath,
+        [
+          "--expose-internals",
+          this.config.dshBinPath,
+          "web",
+          "--no-open",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          String(port)
+        ],
+        {
+          cwd: workspacePath,
+          detached: true,
+          env: {
+            ...inheritedEnv,
+            DSH_HOME: this.config.dshHome,
+            DSH_PROFILE_FIRST_BUNDLES: "@senguoyun/dsh-arkme",
+            DSH_INSTALLED_MODULE_BASE_PATH: this.config.dshBinPath,
+            ELECTRON_RUN_AS_NODE: "1",
+            ...(this.config.managedRestart === undefined ? {} : {
+              ARKME_DESKTOP_MANAGED_RESTART: "1",
+              ARKME_DESKTOP_MANAGED_RESTART_PLAN_PATH: this.config.managedRestart.planPath
+            }),
+            ARKME_HARNESS_LOG_PATH: this.config.logPath,
+            ...(this.config.directoryPickerBridge === undefined ? {} : {
+              ARKME_DIRECTORY_PICKER_BRIDGE_URL: this.config.directoryPickerBridge.url,
+              ARKME_DIRECTORY_PICKER_BRIDGE_TOKEN: this.config.directoryPickerBridge.token
+            }),
+            ...(this.config.desktopCapabilityBridge === undefined || desktopBridgeSessionId === undefined ? {} : {
+              ARKME_DESKTOP_BRIDGE_URL: this.config.desktopCapabilityBridge.url,
+              ARKME_DESKTOP_BRIDGE_TOKEN: this.config.desktopCapabilityBridge.token,
+              ARKME_DESKTOP_BRIDGE_SESSION_ID: desktopBridgeSessionId
+            })
+          },
+          stdio: ["ignore", "pipe", "pipe"]
+        }
+      );
+    } catch (error) {
+      if (desktopBridgeSessionId !== undefined) {
+        this.config.desktopCapabilityBridge?.deactivateSession(desktopBridgeSessionId);
       }
-    );
+      throw error;
+    }
     const running: RunningHarness = {
       child,
       expectedStop: false,
@@ -483,7 +509,8 @@ export class HarnessProcessSupervisor {
       logClose: null,
       startupError: null,
       tail: "",
-      workspacePath
+      workspacePath,
+      ...(desktopBridgeSessionId === undefined ? {} : { desktopBridgeSessionId })
     };
     this.current = running;
     this.attachProcessListeners(running);
@@ -654,6 +681,7 @@ export class HarnessProcessSupervisor {
     try {
       running.expectedStop = true;
       this.current = null;
+      this.releaseDesktopBridgeSession(running);
       await this.closeRunningLog(running);
       if (generation !== this.lifecycleGeneration || abort.signal.aborted) return;
       await this.startInternal(running.workspacePath, {}, abort.signal);
@@ -680,6 +708,7 @@ export class HarnessProcessSupervisor {
   ): void {
     if (running.expectedStop || this.current !== running) return;
     this.current = null;
+    this.releaseDesktopBridgeSession(running);
     void this.closeRunningLog(running);
     const exitDescription = signal === null ? `code ${code ?? "unknown"}` : `signal ${signal}`;
     const message = this.failureMessage(
@@ -759,6 +788,10 @@ export class HarnessProcessSupervisor {
 
   private async stopRunningProcess(running: RunningHarness, markExpected: boolean): Promise<void> {
     running.expectedStop = markExpected || running.expectedStop;
+    // Revoke native capabilities before asking the child to stop. This closes
+    // the race where a shutting-down or wedged Harness could still write badge
+    // or notification state after shutdown began.
+    this.releaseDesktopBridgeSession(running);
     const pid = running.child.pid;
     if (pid !== undefined && running.exit === null) {
       this.recordLifecycle(running, "process-stop-requested", {
@@ -770,12 +803,29 @@ export class HarnessProcessSupervisor {
       if (!exited) {
         this.recordLifecycle(running, "process-force-stop-requested", { pid });
         await this.dependencies.signalProcessGroup(pid, "SIGKILL");
-        await this.dependencies.waitForExit(running.child, FORCE_EXIT_TIMEOUT_MS);
+        const forceExited = await this.dependencies.waitForExit(
+          running.child,
+          FORCE_EXIT_TIMEOUT_MS
+        );
+        if (!forceExited) {
+          throw new Error(`Harness process ${pid} did not exit after SIGKILL`);
+        }
       }
     }
 
+    // Only discard the process handle after termination is confirmed. If a
+    // signal or wait operation failed, the exception above leaves `current`
+    // intact so a later stop can retry the same detached child. Its lease stays
+    // revoked because releaseDesktopBridgeSession() is intentionally idempotent.
     if (this.current === running) this.current = null;
     await this.closeRunningLog(running);
+  }
+
+  private releaseDesktopBridgeSession(running: RunningHarness): void {
+    const sessionId = running.desktopBridgeSessionId;
+    if (sessionId === undefined) return;
+    delete running.desktopBridgeSessionId;
+    this.config.desktopCapabilityBridge?.deactivateSession(sessionId);
   }
 
   private async closeRunningLog(running: RunningHarness): Promise<void> {

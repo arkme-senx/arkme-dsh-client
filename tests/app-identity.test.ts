@@ -17,4 +17,12 @@ describe("Arkme application identity", () => {
       protocol: "arkme-test"
     });
   });
+
+  test("isolates the local signed test from installed production and test apps", () => {
+    expect(resolveArkmeAppIdentity("prod", true)).toEqual({
+      appId: "cc.jiwo.arkme.local-test",
+      appName: "arkme Local Test",
+      protocol: "arkme-local-test"
+    });
+  });
 });

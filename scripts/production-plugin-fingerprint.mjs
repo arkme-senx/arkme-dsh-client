@@ -42,6 +42,7 @@ export const productionPluginFingerprint = Object.freeze({
     "transitivePeerDependencies"
   ]),
   allowBuilds: Object.freeze({
+    "@arkme/macos-notification-permission@file:native/macos-notification-permission": true,
     "@deepseek-ai/dsh-subprocess-local": true,
     "@google/genai": false,
     [`${packageName}@${dependencySpec}`]: true,

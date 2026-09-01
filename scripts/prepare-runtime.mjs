@@ -111,6 +111,19 @@ await prepareRuntimePluginTransaction({
     projectRoot
   ),
   finalizeRuntime: async () => {
+    // The desktop shell owns this addon. pnpm's legacy deploy can copy root
+    // optional dependencies into the filtered Harness tree, so remove the
+    // client-only package before runtime materialization is finalized.
+    await rm(
+      path.join(
+        runtimeRoot,
+        "node_modules",
+        "@arkme",
+        "macos-notification-permission"
+      ),
+      { recursive: true, force: true }
+    );
+
     // `pnpm deploy --legacy` leaves a workspace backlink inside the virtual
     // store. Its target is outside the copied runtime, so remove it before
     // electron-builder packages the directory.

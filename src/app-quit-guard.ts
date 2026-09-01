@@ -10,9 +10,13 @@ export interface AppQuitGuard {
 export function createAppQuitGuard(options: {
   stopHarness: () => Promise<void>;
   closeDirectoryPicker: () => Promise<void> | void;
+  closeDesktopCapabilities?: () => Promise<void> | void;
+  clearNativeBadge?: () => Promise<void> | void;
   quit: () => void;
   onStopError?: (error: unknown) => void;
   onCloseError?: (error: unknown) => void;
+  onDesktopCapabilitiesCloseError?: (error: unknown) => void;
+  onBadgeClearError?: (error: unknown) => void;
 }): AppQuitGuard {
   let shutdownStarted = false;
   let shutdownComplete = false;
@@ -29,20 +33,35 @@ export function createAppQuitGuard(options: {
       event.preventDefault();
       if (shutdownStarted) return;
       shutdownStarted = true;
-      void options.stopHarness()
-        .catch((error: unknown) => {
+      void (async () => {
+        try {
+          await options.stopHarness();
+        } catch (error) {
           options.onStopError?.(error);
-        })
-        .then(async () => {
+          // The detached Harness may still be alive. Keep the desktop process,
+          // bridges, and process handle available so a later quit request can
+          // retry shutdown instead of orphaning the child.
+          shutdownStarted = false;
+          return;
+        }
+        try {
           await options.closeDirectoryPicker();
-        })
-        .catch((error: unknown) => {
+        } catch (error) {
           options.onCloseError?.(error);
-        })
-        .finally(() => {
-          shutdownComplete = true;
-          options.quit();
-        });
+        }
+        try {
+          await options.closeDesktopCapabilities?.();
+        } catch (error) {
+          options.onDesktopCapabilitiesCloseError?.(error);
+        }
+        try {
+          await options.clearNativeBadge?.();
+        } catch (error) {
+          options.onBadgeClearError?.(error);
+        }
+        shutdownComplete = true;
+        options.quit();
+      })();
     }
   };
 }

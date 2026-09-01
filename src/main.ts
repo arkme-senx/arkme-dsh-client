@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { access, appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -8,10 +9,12 @@ import {
   dialog,
   ipcMain,
   Menu,
+  nativeImage,
   Notification,
   net,
   shell,
-  type MenuItemConstructorOptions
+  type MenuItemConstructorOptions,
+  type NativeImage
 } from "electron";
 import {
   ArkmeAppUpdateController,
@@ -32,10 +35,29 @@ import {
 import { DesktopController } from "./desktop-controller.js";
 import { resolveArkmePreloadPath } from "./desktop-capabilities.js";
 import {
+  startDesktopCapabilityBridge,
+  type DesktopCapabilityBridge
+} from "./desktop-capability-bridge.js";
+import {
+  desktopNativeNotificationAvailable,
+  desktopNotificationSettingsUrl,
+  DESKTOP_NOTIFICATION_PERMISSION_CHANGED_CHANNEL,
+  DESKTOP_NOTIFICATION_OPEN_SETTINGS_CHANNEL,
+  DESKTOP_NOTIFICATION_PERMISSION_STATE_CHANNEL,
+  DESKTOP_NOTIFICATION_REFRESH_PERMISSION_CHANNEL,
   DESKTOP_NOTIFICATION_READY_CHANNEL,
+  DESKTOP_NOTIFICATION_READY_V2_CHANNEL,
+  DESKTOP_NOTIFICATION_RESULT_V2_CHANNEL,
   DESKTOP_NOTIFICATION_SHOW_CHANNEL,
+  DESKTOP_NOTIFICATION_UNREADY_V2_CHANNEL,
+  desktopNotificationDocumentNavigationInvalidatesConsumer,
   DesktopNotificationCoordinator,
-  type HarnessNotificationWindow
+  isMacNotificationsNotAllowedError,
+  parseDesktopNotificationPermissionState,
+  rendererReportedDesktopNotificationPermission,
+  type DesktopNotificationPermissionState,
+  type HarnessNotificationWindow,
+  type NativeNotification
 } from "./desktop-notification.js";
 import { startDirectoryPickerBridge, type DirectoryPickerBridge } from "./directory-picker-bridge.js";
 import {
@@ -44,6 +66,9 @@ import {
   type HarnessState
 } from "./harness-supervisor.js";
 import { registerMacWindowDragRegionReinstall } from "./mac-window-drag.js";
+import { MacNotificationPermissionReader } from "./macos-notification-permission.js";
+import { createDesktopNativeBadgeAdapter } from "./native-badge-adapter.js";
+import { NativeBadgeCoordinator } from "./native-badge.js";
 import {
   RuntimeUpdateNoticeCoordinator,
   installRuntimeUpdateNoticeStyles,
@@ -63,6 +88,7 @@ import {
   type RuntimeManagedProfileTransaction
 } from "./plugin-profile.js";
 import {
+  readPackagedTestPluginPath,
   resolveArkmePluginPathForLaunch,
   resolveDshBinPath,
   resolveManagedExtensionRestartPaths,
@@ -78,6 +104,7 @@ import {
 } from "./settings.js";
 import { createStatusPageUrl } from "./status-url.js";
 import { lockWindowTitle } from "./window-title-policy.js";
+import { createWindowsBadgeDotImage } from "./windows-badge-icon.js";
 import {
   ElectronRuntimeManifestError,
   fetchElectronRuntimeManifest,
@@ -105,7 +132,9 @@ import {
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const runtimeServiceConfig = readPackagedRuntimeServiceConfig(moduleDirectory);
 const runtimeEnvironment = runtimeServiceConfig.environment;
-const appIdentity = resolveArkmeAppIdentity(runtimeEnvironment);
+const packagedLocalTest = app.isPackaged
+  && existsSync(path.join(process.resourcesPath, "ARKME_TEST_PLUGIN.json"));
+const appIdentity = resolveArkmeAppIdentity(runtimeEnvironment, packagedLocalTest);
 const statusHtmlPath = path.join(moduleDirectory, "ui", "status.html");
 const statusPageUrl = pathToFileURL(statusHtmlPath).href;
 const appName = appIdentity.appName;
@@ -153,10 +182,21 @@ let activeHarnessVersion: string | undefined;
 let logPath = "";
 let actionQueue: Promise<void> = Promise.resolve();
 let directoryPickerBridge: DirectoryPickerBridge | null = null;
+let desktopCapabilityBridge: DesktopCapabilityBridge | null = null;
 let appUpdateController: ArkmeAppUpdateController | null = null;
 let appQuitGuard: AppQuitGuard | null = null;
 let runtimeManager: ElectronRuntimeManager | null = null;
 let renderRuntimeProgressPage: ReturnType<typeof createRuntimeProgressPageRenderer> | null = null;
+let windowsBadgeDotImage: NativeImage | null = null;
+let nativeBadgeInitialized = false;
+let desktopNotificationPermission: DesktopNotificationPermissionState = Notification.isSupported()
+  ? "default"
+  : "unavailable";
+const macNotificationPermissionReader = new MacNotificationPermissionReader(
+  process.platform === "darwin" && app.isPackaged,
+  undefined,
+  result => { logDiagnostic("macos-notification-permission-query", result); }
+);
 const runtimeProgressRenderer = createCoalescedAsyncRenderer<RuntimeInstallProgress>(async state => {
   await renderState(state).catch(error => logDiagnostic("runtime-progress-render-failed", error));
 }, 100);
@@ -173,22 +213,48 @@ interface LaunchRuntime {
 const desktopNotifications = new DesktopNotificationCoordinator({
   getHarnessOrigin: () => activeHarnessOrigin,
   getWindow: notificationWindow,
-  diagnostic: (event, details) => { logDiagnostic(`desktop-notification-${event}`, details); },
-  createNotification: ({ title, body }) => {
-    if (!Notification.isSupported()) return undefined;
-    const notification = new Notification({ title, body });
-    return {
-      show: () => { notification.show(); },
-      close: () => { notification.close(); },
-      onClick: listener => { notification.once("click", listener); },
-      onShow: listener => { notification.once("show", listener); },
-      onFailed: listener => {
-        notification.once("failed", (_event, error) => { listener(error); });
-      },
-      onClose: listener => { notification.once("close", listener); }
-    };
-  }
+  diagnostic: (event, details) => {
+    logDiagnostic(`desktop-notification-${event}`, details);
+    if (event === "notification_failed" && isMacNotificationsNotAllowedError(details.error)) {
+      void refreshDesktopNotificationPermission("native-not-allowed");
+    }
+  },
+  createNotification: options => (
+    desktopNotificationCapability() ? createDesktopNativeNotification(options) : undefined
+  )
 });
+
+function createDesktopNativeNotification(
+  { title, body }: { title: string; body: string }
+): NativeNotification {
+  const notification = new Notification({ title, body });
+  return {
+    show: () => { notification.show(); },
+    close: () => { notification.close(); },
+    onClick: listener => { notification.once("click", listener); },
+    onShow: listener => { notification.once("show", listener); },
+    onFailed: listener => {
+      notification.once("failed", (_event, error) => { listener(error); });
+    },
+    onClose: listener => { notification.once("close", listener); }
+  };
+}
+
+const nativeBadges = new NativeBadgeCoordinator(createDesktopNativeBadgeAdapter<NativeImage>({
+  platform: process.platform,
+  setAppBadgeCount: count => app.setBadgeCount(count),
+  setMacDockBadge: text => {
+    if (app.dock === undefined) throw new Error("macOS Dock is unavailable");
+    app.dock.setBadge(text);
+  },
+  linuxBadgeSupported: () => {
+    const unityCheck = (app as typeof app & { isUnityRunning?: () => boolean }).isUnityRunning;
+    return unityCheck?.call(app) === true;
+  },
+  getWindowsWindow: () => mainWindow,
+  getWindowsDotImage: windowsBadgeDot,
+  windowsDescription: "Arkme 有未读消息"
+}));
 
 const runtimeUpdateNotices = new RuntimeUpdateNoticeCoordinator({
   getHarnessOrigin: () => activeHarnessOrigin,
@@ -222,6 +288,65 @@ ipcMain.handle(DESKTOP_NOTIFICATION_SHOW_CHANNEL, (event, request: unknown) => (
 ipcMain.on(DESKTOP_NOTIFICATION_READY_CHANNEL, event => {
   desktopNotifications.markHarnessReady(event.senderFrame?.url ?? "");
 });
+ipcMain.on(DESKTOP_NOTIFICATION_READY_V2_CHANNEL, (event, value: unknown) => {
+  const senderUrl = currentHarnessMainFrameUrl(event);
+  if (senderUrl === undefined) return;
+  desktopNotifications.markReadyV2(
+    senderUrl,
+    value
+  );
+});
+ipcMain.on(DESKTOP_NOTIFICATION_UNREADY_V2_CHANNEL, (event, value: unknown) => {
+  const senderUrl = currentHarnessMainFrameUrl(event);
+  if (senderUrl === undefined) return;
+  desktopNotifications.markUnreadyV2(
+    senderUrl,
+    value
+  );
+});
+ipcMain.on(DESKTOP_NOTIFICATION_RESULT_V2_CHANNEL, (event, value: unknown) => {
+  const senderUrl = currentHarnessMainFrameUrl(event);
+  if (senderUrl === undefined) return;
+  desktopNotifications.completeV2(
+    senderUrl,
+    value
+  );
+});
+ipcMain.on(DESKTOP_NOTIFICATION_PERMISSION_STATE_CHANNEL, (event, value: unknown) => {
+  const permission = parseDesktopNotificationPermissionState(value);
+  if (!isCurrentHarnessSender(event.sender.id, event.senderFrame?.url ?? event.sender.getURL())
+    || permission === undefined) {
+    event.returnValue = false;
+    return;
+  }
+  setDesktopNotificationPermission(rendererReportedPermission(permission), "renderer-report");
+  event.returnValue = true;
+});
+ipcMain.handle(DESKTOP_NOTIFICATION_OPEN_SETTINGS_CHANNEL, async event => {
+  if (!isCurrentHarnessSender(event.sender.id, event.senderFrame?.url ?? event.sender.getURL())) return false;
+  const settingsUrl = desktopNotificationSettingsUrl(process.platform);
+  if (settingsUrl === undefined) return false;
+  try {
+    await shell.openExternal(settingsUrl);
+    return true;
+  } catch {
+    return false;
+  }
+});
+ipcMain.handle(DESKTOP_NOTIFICATION_REFRESH_PERMISSION_CHANNEL, async event => {
+  if (!isCurrentHarnessSender(event.sender.id, event.senderFrame?.url ?? event.sender.getURL())) {
+    return "unavailable" satisfies DesktopNotificationPermissionState;
+  }
+  return await refreshDesktopNotificationPermission("renderer-refresh");
+});
+ipcMain.on("arkme-desktop:attention-capabilities", event => {
+  event.returnValue = {
+    schemaVersion: 1,
+    notificationShow: desktopNotificationCapability(),
+    notificationPermission: desktopNotificationReportedPermission(),
+    badgeMode: nativeBadges.mode
+  };
+});
 ipcMain.on("arkme-runtime:harness-version", event => {
   event.returnValue = activeHarnessVersion ?? null;
 });
@@ -242,12 +367,24 @@ function registerApplicationLifecycle(): void {
     closeDirectoryPicker: async () => {
       await directoryPickerBridge?.close();
     },
+    closeDesktopCapabilities: async () => {
+      await desktopCapabilityBridge?.close();
+    },
+    clearNativeBadge: () => {
+      nativeBadges.clearNative();
+    },
     quit: () => app.quit(),
     onStopError: (error: unknown) => {
       console.error("Failed to stop Harness cleanly", error);
     },
     onCloseError: (error: unknown) => {
       console.error("Failed to close directory picker bridge", error);
+    },
+    onDesktopCapabilitiesCloseError: (error: unknown) => {
+      console.error("Failed to close desktop capability bridge", error);
+    },
+    onBadgeClearError: (error: unknown) => {
+      console.error("Failed to clear the native badge", error);
     }
   });
 
@@ -264,6 +401,10 @@ function registerApplicationLifecycle(): void {
       logDiagnostic("deep-link-accepted", { source: "second-instance" });
     }
     focusMainWindow();
+  });
+
+  app.on("activate", () => {
+    void refreshDesktopNotificationPermission("app-activate");
   });
 
   app.on("window-all-closed", () => {
@@ -320,8 +461,21 @@ async function deliverPendingDeepLink(): Promise<void> {
 
 async function bootstrap(): Promise<void> {
   logDiagnostic("bootstrap-start");
+  await refreshDesktopNotificationPermission("bootstrap");
   app.setAppUserModelId(appIdentity.appId);
   if (mainWindow === null) createMainWindow();
+  if (!nativeBadgeInitialized) {
+    nativeBadgeInitialized = true;
+    nativeBadges.clearNative();
+  }
+  if (desktopCapabilityBridge === null) {
+    desktopCapabilityBridge = await startDesktopCapabilityBridge({
+      notifications: desktopNotifications,
+      notificationSupported: desktopNotificationCapability,
+      badges: nativeBadges
+    });
+    logDiagnostic("desktop-capability-bridge-started", { badgeMode: nativeBadges.mode });
+  }
   const userDataPath = app.getPath("userData");
   const settingsPath = path.join(userDataPath, "settings.json");
   logPath = diagnosticLogPath;
@@ -334,6 +488,67 @@ async function bootstrap(): Promise<void> {
   }
   runtime = await launchHarnessRuntime(runtime, { userDataPath, settingsPath, dshHome });
   finishRuntimeBootstrap(userDataPath);
+}
+
+function desktopNotificationCapability(): boolean {
+  return desktopNativeNotificationAvailable(
+    process.platform,
+    Notification.isSupported(),
+    desktopNotificationPermission,
+    app.isPackaged
+  );
+}
+
+function desktopNotificationReportedPermission(): DesktopNotificationPermissionState {
+  return process.platform === "darwin" && !app.isPackaged
+    ? "unavailable"
+    : desktopNotificationPermission;
+}
+
+function rendererReportedPermission(
+  permission: DesktopNotificationPermissionState
+): DesktopNotificationPermissionState {
+  return rendererReportedDesktopNotificationPermission(
+    process.platform,
+    desktopNotificationPermission,
+    permission
+  );
+}
+
+function setDesktopNotificationPermission(
+  permission: DesktopNotificationPermissionState,
+  source: string
+): void {
+  if (!Notification.isSupported()) permission = "unavailable";
+  if (permission === desktopNotificationPermission) return;
+  desktopNotificationPermission = permission;
+  logDiagnostic("desktop-notification-permission", { permission, source });
+  const window = mainWindow;
+  if (window !== null && !window.isDestroyed()) {
+    window.webContents.send(DESKTOP_NOTIFICATION_PERMISSION_CHANGED_CHANNEL, permission);
+  }
+}
+
+async function refreshDesktopNotificationPermission(
+  source: string
+): Promise<DesktopNotificationPermissionState> {
+  if (process.platform !== "darwin") return desktopNotificationPermission;
+  const permission = await macNotificationPermissionReader.refresh();
+  setDesktopNotificationPermission(permission, source);
+  return permission;
+}
+
+function isCurrentHarnessSender(webContentsId: number, senderUrl: string): boolean {
+  if (activeHarnessOrigin === null || mainWindow === null || mainWindow.isDestroyed()
+    || mainWindow.webContents.id !== webContentsId) return false;
+  try { return new URL(senderUrl).origin === activeHarnessOrigin; }
+  catch { return false; }
+}
+
+function currentHarnessMainFrameUrl(event: Electron.IpcMainEvent): string | undefined {
+  const senderFrame = event.senderFrame;
+  if (senderFrame === null || senderFrame !== event.sender.mainFrame) return undefined;
+  return isCurrentHarnessSender(event.sender.id, senderFrame.url) ? senderFrame.url : undefined;
 }
 
 async function launchHarnessRuntime(
@@ -434,6 +649,18 @@ async function resolveLaunchRuntime(userDataPath: string): Promise<LaunchRuntime
     return {
       dshBinPath,
       arkmePluginPath: await resolveArkmePluginPathForLaunch(false, process.resourcesPath, import.meta.url),
+      packageManagerBinPath,
+      packageManagerCliPath: path.join(packageManagerBinPath, "..", "pnpm", "bin", "pnpm.cjs"),
+      runtimeManaged: false
+    };
+  }
+  const packagedTestPluginPath = await readPackagedTestPluginPath(process.resourcesPath);
+  if (packagedTestPluginPath !== undefined) {
+    const dshBinPath = resolveDshBinPath(true, process.resourcesPath, import.meta.url);
+    const packageManagerBinPath = resolvePnpmBinDirectory(true, process.resourcesPath, import.meta.url);
+    return {
+      dshBinPath,
+      arkmePluginPath: packagedTestPluginPath,
       packageManagerBinPath,
       packageManagerCliPath: path.join(packageManagerBinPath, "..", "pnpm", "bin", "pnpm.cjs"),
       runtimeManaged: false
@@ -559,7 +786,8 @@ async function initializeHarnessRuntime(
       environment: runtimeEnvironment,
       ...(runtime.release === undefined ? {} : { runtimeReleaseId: runtime.release.releaseId })
     },
-    ...(directoryPickerBridge === null ? {} : { directoryPickerBridge })
+    ...(directoryPickerBridge === null ? {} : { directoryPickerBridge }),
+    ...(desktopCapabilityBridge === null ? {} : { desktopCapabilityBridge })
   });
   controller = new DesktopController(supervisor, {
     chooseWorkspace,
@@ -597,6 +825,7 @@ async function readDshPackageVersion(dshBinPath: string): Promise<string | undef
 }
 
 function installAppUpdateController(): void {
+  if (packagedLocalTest) return;
   const target = resolveSupportedAppUpdateTarget(process.platform, process.arch);
   if (target === null) return;
   appUpdateController = new ArkmeAppUpdateController({
@@ -668,6 +897,10 @@ function createMainWindow(): void {
   });
   mainWindow.webContents.on("did-start-loading", () => {
     logDiagnostic("did-start-loading");
+  });
+  mainWindow.webContents.on("did-start-navigation", (_event, url, isInPlace, isMainFrame) => {
+    if (!desktopNotificationDocumentNavigationInvalidatesConsumer(isInPlace, isMainFrame)) return;
+    logDiagnostic("did-start-main-frame-navigation", { url });
     desktopNotifications.markHarnessLoading();
   });
   mainWindow.webContents.on("did-finish-load", () => {
@@ -694,6 +927,15 @@ function createMainWindow(): void {
   mainWindow.on("closed", () => {
     mainWindow = null;
     renderRuntimeProgressPage = null;
+  });
+  mainWindow.on("focus", () => {
+    void refreshDesktopNotificationPermission("window-focus");
+  });
+  mainWindow.once("ready-to-show", () => {
+    const result = nativeBadges.replay();
+    if (!result.accepted && result.outcome === "native-failed") {
+      logDiagnostic("native-badge-replay-failed", { mode: nativeBadges.mode });
+    }
   });
 }
 
@@ -764,8 +1006,16 @@ function notificationWindow(): HarnessNotificationWindow | null {
     restore: () => { window.restore(); },
     show: () => { window.show(); },
     focus: () => { window.focus(); },
-    send: (channel, sourceRef) => { window.webContents.send(channel, sourceRef); }
+    send: (channel, sourceRef) => { window.webContents.send(channel, sourceRef); },
+    sendActivation: (channel, activation) => { window.webContents.send(channel, activation); },
+    sendActivationV2: (channel, activation) => { window.webContents.send(channel, activation); }
   };
+}
+
+function windowsBadgeDot(): NativeImage {
+  if (windowsBadgeDotImage !== null) return windowsBadgeDotImage;
+  windowsBadgeDotImage = createWindowsBadgeDotImage(nativeImage);
+  return windowsBadgeDotImage;
 }
 
 function runtimeUpdateNoticeWindow(): RuntimeUpdateNoticeWindow | null {
