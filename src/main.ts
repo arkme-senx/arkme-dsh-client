@@ -18,8 +18,7 @@ import {
 } from "electron";
 import {
   ArkmeAppUpdateController,
-  resolveSupportedAppUpdateTarget,
-  shouldForceDevAppUpdate
+  resolveSupportedAppUpdateTarget
 } from "./app-update.js";
 import { resolveArkmeAppIdentity } from "./app-identity.js";
 import { createAppQuitGuard, type AppQuitGuard } from "./app-quit-guard.js";
@@ -141,6 +140,12 @@ import {
   isDeterministicRuntimeArtifactError,
   runtimeArtifactFailureCode
 } from "./runtime/errors.js";
+import {
+  AUTOMATIC_UPDATE_CHECK_INTERVAL_MS,
+  isAutomaticUpdateCheckEnabled,
+  UPDATE_CHECK_ENABLED_ENV,
+  withStartupUpdateCheckEnvironment
+} from "./update-check-policy.js";
 
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -148,6 +153,13 @@ const runtimeServiceConfig = readPackagedRuntimeServiceConfig(moduleDirectory);
 const runtimeEnvironment = runtimeServiceConfig.environment;
 const packagedLocalTest = app.isPackaged
   && existsSync(path.join(process.resourcesPath, "ARKME_TEST_PLUGIN.json"));
+const startupEnvironment = withStartupUpdateCheckEnvironment(
+  process.env,
+  app.isPackaged,
+  packagedLocalTest
+);
+process.env[UPDATE_CHECK_ENABLED_ENV] = startupEnvironment[UPDATE_CHECK_ENABLED_ENV] ?? "1";
+const automaticUpdateChecksEnabled = isAutomaticUpdateCheckEnabled(process.env);
 const appIdentity = resolveArkmeAppIdentity(runtimeEnvironment, packagedLocalTest);
 const statusHtmlPath = path.join(moduleDirectory, "ui", "status.html");
 const statusPageUrl = pathToFileURL(statusHtmlPath).href;
@@ -186,6 +198,7 @@ logDiagnostic("process-start", {
   platform: process.platform,
   arch: process.arch,
   packaged: app.isPackaged,
+  automaticUpdateChecksEnabled,
   resourcesPath: process.resourcesPath
 });
 
@@ -223,6 +236,8 @@ let desktopLocationPermission: DesktopLocationPermissionService | null = null;
 const runtimeProgressRenderer = createCoalescedAsyncRenderer<RuntimeInstallProgress>(async state => {
   await renderState(state).catch(error => logDiagnostic("runtime-progress-render-failed", error));
 }, 100);
+
+type AutomaticUpdateCheckSource = "startup" | "window-focus";
 
 interface LaunchRuntime {
   dshBinPath: string;
@@ -542,6 +557,8 @@ async function bootstrap(): Promise<void> {
     diagnostic: (event, error) => { logDiagnostic(`desktop-location-${event}`, error); }
   });
   if (mainWindow === null) createMainWindow();
+  if (appUpdateController === null) installAppUpdateController();
+  checkAppUpdateIfStale("startup");
   if (!nativeBadgeInitialized) {
     nativeBadgeInitialized = true;
     nativeBadges.clearNative();
@@ -691,6 +708,7 @@ async function switchAccountScopeRuntime(): Promise<void> {
   lastHarnessReadyState = null;
   const scope = await store.launch();
   activeAccountScope = scope;
+  logPath = scope.logPath;
   await recoverRuntimeManagedProfileTransaction(scope.dshHome, runtimeEnvironment);
   activeLaunchRuntime = await launchHarnessRuntime(
     runtime,
@@ -848,21 +866,9 @@ async function launchHarnessRuntime(
 
 function finishRuntimeBootstrap(harnessLogPath: string): void {
   logPath = harnessLogPath;
-  installAppUpdateController();
   installApplicationMenu();
   void refreshAccountScopeMenu().catch(error => logDiagnostic("account-scope-menu-failed", error));
-  if (runtimeManager !== null) {
-    const manager = runtimeManager;
-    void stageRuntimeUpdateInBackground({
-      attemptId: randomUUID(),
-      coordinator: runtimeUpdateNotices,
-      stageLatest: progress => manager.stageLatest(progress)
-    }).then(result => {
-      logDiagnostic("runtime-background-check-complete", { result });
-    }).catch(error => {
-      logDiagnostic("runtime-background-check-failed", error);
-    });
-  }
+  checkRuntimeUpdateIfStale("startup");
 }
 
 async function resolveLaunchRuntime(userDataPath: string): Promise<LaunchRuntime> {
@@ -968,7 +974,7 @@ async function initializeHarnessRuntime(
   }
   activeHarnessVersion = runtime.release?.manifest.artifacts.harness.version ?? dshVersion;
   const packageManagerEnvironment = withBundledPackageManagerEnvironment(
-    process.env,
+    startupEnvironment,
     runtime.packageManagerBinPath,
     process.execPath,
     runtime.packageManagerCliPath
@@ -1071,11 +1077,73 @@ function installAppUpdateController(): void {
       app.getPath("downloads")
     )
   });
-  if (app.isPackaged || shouldForceDevAppUpdate(app.isPackaged)) {
-    void appUpdateController.checkNow().catch((error: unknown) => {
-      logDiagnostic("app-update-background-check-failed", error);
-    });
+}
+
+function checkAutomaticUpdates(source: AutomaticUpdateCheckSource): void {
+  checkAppUpdateIfStale(source);
+  checkRuntimeUpdateIfStale(source);
+}
+
+function checkAppUpdateIfStale(source: AutomaticUpdateCheckSource): void {
+  if (!automaticUpdateChecksEnabled) {
+    logDiagnostic("app-update-background-check-disabled", { source });
+    return;
   }
+  const updateController = appUpdateController;
+  if (updateController === null) {
+    logDiagnostic("app-update-background-check-unavailable", { source });
+    return;
+  }
+  const before = updateController.snapshotNow();
+  const task = updateController.checkIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS);
+  const after = updateController.snapshotNow();
+  const outcome = after.status === "checking"
+    ? before.status === "checking" ? "joined" : "started"
+    : before.status === "downloading" || before.status === "downloaded"
+      ? "download-state-skipped"
+      : "cooldown-skipped";
+  logDiagnostic("app-update-background-check-scheduled", { source, outcome, status: after.status });
+  if (outcome.endsWith("-skipped")) return;
+  void task.then(snapshot => {
+    logDiagnostic("app-update-background-check-complete", { source, status: snapshot.status });
+  }).catch((error: unknown) => {
+    logDiagnostic("app-update-background-check-failed", {
+      source,
+      error: error instanceof Error ? error.stack ?? error.message : String(error)
+    });
+  });
+}
+
+function checkRuntimeUpdateIfStale(source: AutomaticUpdateCheckSource): void {
+  if (!automaticUpdateChecksEnabled) {
+    logDiagnostic("runtime-background-check-disabled", { source });
+    return;
+  }
+  const manager = runtimeManager;
+  if (manager === null) {
+    logDiagnostic("runtime-background-check-unavailable", { source });
+    return;
+  }
+  void stageRuntimeUpdateInBackground({
+    attemptId: randomUUID(),
+    coordinator: runtimeUpdateNotices,
+    stageLatest: progress => manager.stageLatestIfStale(
+      AUTOMATIC_UPDATE_CHECK_INTERVAL_MS,
+      progress
+    )
+  }).then(result => {
+    logDiagnostic(
+      result === "throttled"
+        ? "runtime-background-check-cooldown-skipped"
+        : "runtime-background-check-complete",
+      { source, result }
+    );
+  }).catch(error => {
+    logDiagnostic("runtime-background-check-failed", {
+      source,
+      error: error instanceof Error ? error.stack ?? error.message : String(error)
+    });
+  });
 }
 
 ipcMain.handle("arkme-app-update:status", () => appUpdateController?.snapshotNow() ?? null);
@@ -1170,6 +1238,7 @@ function createMainWindow(): void {
   });
   mainWindow.on("focus", () => {
     void refreshDesktopNotificationPermission("window-focus");
+    checkAutomaticUpdates("window-focus");
   });
   mainWindow.once("ready-to-show", () => {
     const result = nativeBadges.replay();

@@ -154,4 +154,17 @@ describe("DSH account scope store", () => {
     await writeFile(join(pluginPath, "package.json"), JSON.stringify({ version: "0.1.35" }));
     expect(await arkmePluginSupportsDesktopAccountScope(pluginPath)).toBe(false);
   });
+
+  test("switches the visible Harness log together with the account container", async () => {
+    const source = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
+    const start = source.indexOf("async function switchAccountScopeRuntime");
+    const end = source.indexOf("function accountScopeLaunchPaths", start);
+    const switchBlock = source.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(switchBlock).toContain("logPath = scope.logPath");
+    expect(switchBlock.indexOf("logPath = scope.logPath"))
+      .toBeLessThan(switchBlock.indexOf("launchHarnessRuntime("));
+  });
 });

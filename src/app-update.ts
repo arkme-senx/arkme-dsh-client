@@ -40,14 +40,8 @@ type ArkmeAppUpdateControllerOptions = {
   downloadsDirectory: string;
   fetchImpl?: typeof fetch;
   updater?: unknown;
+  now?: () => number;
 };
-
-export function shouldForceDevAppUpdate(
-  isPackaged: boolean,
-  environment: { ARKME_FORCE_DEV_APP_UPDATE?: string } = process.env,
-): boolean {
-  return !isPackaged && environment.ARKME_FORCE_DEV_APP_UPDATE === "1";
-}
 
 function origin(raw: string): string {
   const value = new URL(raw);
@@ -85,19 +79,53 @@ export class ArkmeAppUpdateController {
   private snapshot: ArkmeAppUpdateSnapshot;
   private readonly feedURL: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly now: () => number;
   private downloadURL?: string;
+  private checkInFlight: Promise<ArkmeAppUpdateSnapshot> | undefined;
+  private lastCheckStartedAtMillis?: number;
 
   constructor(private readonly options: ArkmeAppUpdateControllerOptions) {
     this.snapshot = { status: "idle", currentVersion: options.currentVersion };
     this.feedURL = appUpdateFeedURL(options.serviceBaseUrl, options.platform, options.arch);
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.now = options.now ?? Date.now;
   }
 
   snapshotNow(): ArkmeAppUpdateSnapshot {
     return { ...this.snapshot };
   }
 
-  async checkNow(): Promise<ArkmeAppUpdateSnapshot> {
+  checkNow(): Promise<ArkmeAppUpdateSnapshot> {
+    return this.startCheck();
+  }
+
+  checkIfStale(minimumIntervalMs: number): Promise<ArkmeAppUpdateSnapshot> {
+    if (this.checkInFlight !== undefined) return this.checkInFlight;
+    if (this.isDownloadStateActive()) {
+      return Promise.resolve(this.snapshotNow());
+    }
+    if (this.lastCheckStartedAtMillis !== undefined) {
+      const elapsedMillis = this.now() - this.lastCheckStartedAtMillis;
+      if (elapsedMillis >= 0 && elapsedMillis < minimumIntervalMs) {
+        return Promise.resolve(this.snapshotNow());
+      }
+    }
+    return this.startCheck();
+  }
+
+  private startCheck(): Promise<ArkmeAppUpdateSnapshot> {
+    if (this.checkInFlight !== undefined) return this.checkInFlight;
+    this.lastCheckStartedAtMillis = this.now();
+    const task = this.performCheck();
+    this.checkInFlight = task;
+    const clear = () => {
+      if (this.checkInFlight === task) this.checkInFlight = undefined;
+    };
+    void task.then(clear, clear);
+    return task;
+  }
+
+  private async performCheck(): Promise<ArkmeAppUpdateSnapshot> {
     const { error: _error, ...checkingSnapshot } = this.snapshot;
     this.snapshot = { ...checkingSnapshot, status: "checking" };
     try {
@@ -105,12 +133,13 @@ export class ArkmeAppUpdateController {
         redirect: "error",
         signal: AbortSignal.timeout(10_000),
       });
+      if (this.isDownloadStateActive()) return this.snapshotNow();
       if (response.status === 404) {
         return this.snapshot = {
           ...this.snapshot,
           status: "current",
           noUpdateAvailable: true,
-          checkedAtMillis: Date.now(),
+          checkedAtMillis: this.now(),
         };
       }
       if (!response.ok) throw new Error(`更新服务返回 HTTP ${response.status}`);
@@ -122,6 +151,7 @@ export class ArkmeAppUpdateController {
       if (typeof body.version !== "string" || typeof body.downloadUrl !== "string" || new URL(body.downloadUrl).protocol !== "https:") {
         throw new Error("更新服务返回格式无效");
       }
+      if (this.isDownloadStateActive()) return this.snapshotNow();
       this.downloadURL = body.downloadUrl;
       const releaseNotes = typeof body.releaseNotes === "string" ? body.releaseNotes : undefined;
       const { releaseNotes: _previousReleaseNotes, ...releaseSnapshot } = this.snapshot;
@@ -129,23 +159,28 @@ export class ArkmeAppUpdateController {
         ? {
           ...releaseSnapshot,
           status: "current",
-          checkedAtMillis: Date.now(),
+          checkedAtMillis: this.now(),
           ...(releaseNotes === undefined ? {} : { releaseNotes }),
         }
         : {
           ...releaseSnapshot,
           status: "available",
           latestVersion: body.version,
-          checkedAtMillis: Date.now(),
+          checkedAtMillis: this.now(),
           ...(releaseNotes === undefined ? {} : { releaseNotes }),
         };
     } catch (error) {
+      if (this.isDownloadStateActive()) return this.snapshotNow();
       return this.snapshot = {
         ...this.snapshot,
         status: "failed",
         error: error instanceof Error ? error.message : String(error),
       };
     }
+  }
+
+  private isDownloadStateActive(): boolean {
+    return this.snapshot.status === "downloading" || this.snapshot.status === "downloaded";
   }
 
   async download(): Promise<ArkmeAppUpdateSnapshot> {
