@@ -8,19 +8,19 @@ import {
 describe("validateMacCodeSigningDetails", () => {
   it("accepts a team-signed Harness bundle", () => {
     expect(validateMacCodeSigningDetails(`
-Identifier=cc.jiwo.arkme
+Identifier=com.senx.arkme.harness
 Authority=Developer ID Application: Jotmo (ABCDE12345)
 TeamIdentifier=ABCDE12345
 Sealed Resources version=2 rules=13 files=42
 `)).toEqual({
-      identifier: "cc.jiwo.arkme",
+      identifier: "com.senx.arkme.harness",
       teamIdentifier: "ABCDE12345"
     });
   });
 
   it("rejects the ad-hoc signature produced without an Apple signing identity", () => {
     expect(() => validateMacCodeSigningDetails(`
-Identifier=cc.jiwo.arkme
+Identifier=com.senx.arkme.harness
 Signature=adhoc
 TeamIdentifier=not set
 `)).toThrow(/Apple code-signing identity/);
@@ -31,7 +31,7 @@ TeamIdentifier=not set
 Identifier=Electron
 Authority=Apple Development: Developer (ABCDE12345)
 TeamIdentifier=ABCDE12345
-`)).toThrow(/cc\.jiwo\.arkme/);
+`)).toThrow(/com\.senx\.arkme\.harness/);
   });
 });
 
