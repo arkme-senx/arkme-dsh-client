@@ -29,16 +29,23 @@ async function fixture(options: { timeoutMs?: number; notificationSupported?: bo
   const applySnapshot = vi.fn(() => ({ accepted: true, outcome: "accepted" } as const));
   const beginSession = vi.fn(() => ({ accepted: true, outcome: "accepted" } as const));
   const endSession = vi.fn(() => ({ accepted: true, outcome: "accepted" } as const));
+  const accountScopes = {
+    attest: vi.fn(async () => ({ status: "ready" as const })),
+    prepare: vi.fn(async () => ({ transitionRef: "transition-1" })),
+    commit: vi.fn(async () => ({ status: "relaunch" as const })),
+    abort: vi.fn(async () => ({ status: "ready" as const }))
+  };
   const bridge = await startDesktopCapabilityBridge({
     notifications: { submit },
     notificationSupported: () => options.notificationSupported ?? true,
     badges: { mode: "count", beginSession, endSession, applySnapshot },
+    accountScopes,
     randomToken: () => "test_desktop_bridge_token_0123456789abcdef",
     ...(options.timeoutMs === undefined ? {} : { requestTimeoutMs: options.timeoutMs })
   });
   bridges.push(bridge);
   bridge.activateSession("session-1");
-  return { applySnapshot, beginSession, bridge, endSession, submit };
+  return { accountScopes, applySnapshot, beginSession, bridge, endSession, submit };
 }
 
 async function rpc(
@@ -98,7 +105,8 @@ describe("desktop capability bridge", () => {
         sessionId: "session-1",
         capabilities: {
           notificationShow: true,
-          badgeApplySnapshot: { mode: "count" }
+          badgeApplySnapshot: { mode: "count" },
+          accountScope: { version: 1 }
         }
       }
     });
@@ -146,6 +154,31 @@ describe("desktop capability bridge", () => {
       body: { ok: true, value: { accepted: true, outcome: "accepted" } }
     });
     expect(applySnapshot).toHaveBeenCalledWith(badgePayload);
+  });
+
+  test("routes bounded account-scope transitions through the active Host lease", async () => {
+    const { accountScopes, bridge } = await fixture();
+    const identity = { kind: "account", userId: 42, claimCurrentGuest: false };
+
+    expect(await rpc(bridge, action("account.scope.attest", identity))).toMatchObject({
+      status: 200, body: { ok: true, value: { status: "ready" } }
+    });
+    expect(await rpc(bridge, action("account.scope.prepare", identity))).toMatchObject({
+      status: 200, body: { ok: true, value: { transitionRef: "transition-1" } }
+    });
+    expect(await rpc(bridge, action("account.scope.commit", { transitionRef: "transition-1" }))).toMatchObject({
+      status: 200, body: { ok: true, value: { status: "relaunch" } }
+    });
+    expect(await rpc(bridge, action("account.scope.abort", { transitionRef: "transition-1" }))).toMatchObject({
+      status: 200, body: { ok: true, value: { status: "ready" } }
+    });
+    expect(accountScopes.attest).toHaveBeenCalledWith(identity);
+    expect(accountScopes.prepare).toHaveBeenCalledWith(identity);
+    expect(accountScopes.commit).toHaveBeenCalledWith("transition-1");
+    expect(accountScopes.abort).toHaveBeenCalledWith("transition-1");
+
+    expect((await rpc(bridge, action("account.scope.attest", { kind: "account", userId: 0 }))).status).toBe(400);
+    expect((await rpc(bridge, action("account.scope.commit", { transitionRef: "../scope" }))).status).toBe(400);
   });
 
   test("rotates the active Harness lease and rejects the previous process", async () => {

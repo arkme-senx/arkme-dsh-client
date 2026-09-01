@@ -96,6 +96,8 @@ describe("provisionArkmeWebProfile", () => {
     allowProduction: false
     updateCheckEnabled: false
     updateServiceBaseUrl: https://jotmo.senguo.me
+    dshRemoteFeatureEnabled: true
+    dshRemoteRealtimeBaseUrl: https://jotmo-realtime.senguo.me
 `);
     expect(patch).not.toContain("https://api.jotmo.cc");
   });

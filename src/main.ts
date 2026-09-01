@@ -36,8 +36,16 @@ import { DesktopController } from "./desktop-controller.js";
 import { resolveArkmePreloadPath } from "./desktop-capabilities.js";
 import {
   startDesktopCapabilityBridge,
+  type DesktopAccountScopeIdentity,
+  type DesktopAccountScopePort,
   type DesktopCapabilityBridge
 } from "./desktop-capability-bridge.js";
+import {
+  arkmePluginSupportsDesktopAccountScope,
+  DshAccountScopeStore,
+  type DshAccountScopeChoice,
+  type DshAccountScopeLaunch
+} from "./dsh-account-scope.js";
 import {
   DesktopLocationPermissionService,
   registerDesktopLocationIpc
@@ -189,6 +197,14 @@ let logPath = "";
 let actionQueue: Promise<void> = Promise.resolve();
 let directoryPickerBridge: DirectoryPickerBridge | null = null;
 let desktopCapabilityBridge: DesktopCapabilityBridge | null = null;
+let accountScopeStore: DshAccountScopeStore | null = null;
+let activeAccountScope: DshAccountScopeLaunch | null = null;
+let accountScopeChoices: DshAccountScopeChoice[] = [];
+let accountScopeReady = false;
+let accountScopeTransition: { ref: string; identity: DesktopAccountScopeIdentity } | null = null;
+let accountScopeRelaunchScheduled = false;
+let lastHarnessReadyState: Extract<HarnessState, { kind: "ready" }> | null = null;
+let activeLaunchRuntime: LaunchRuntime | null = null;
 let appUpdateController: ArkmeAppUpdateController | null = null;
 let appQuitGuard: AppQuitGuard | null = null;
 let runtimeManager: ElectronRuntimeManager | null = null;
@@ -216,6 +232,22 @@ interface LaunchRuntime {
   runtimeManaged: boolean;
   release?: ResolvedElectronRuntime;
 }
+
+interface HarnessLaunchPaths {
+  userDataPath: string;
+  settingsPath: string;
+  dshHome: string;
+  harnessLogPath: string;
+  runtimeScopeRef: string;
+  accountScopeRequired: boolean;
+}
+
+const desktopAccountScopes: DesktopAccountScopePort = {
+  attest: async identity => await attestDesktopAccountScope(identity),
+  prepare: async identity => await prepareDesktopAccountScope(identity),
+  commit: async transitionRef => await commitDesktopAccountScope(transitionRef),
+  abort: async transitionRef => await abortDesktopAccountScope(transitionRef)
+};
 
 const desktopNotifications = new DesktopNotificationCoordinator({
   getHarnessOrigin: () => activeHarnessOrigin,
@@ -514,26 +546,170 @@ async function bootstrap(): Promise<void> {
     nativeBadgeInitialized = true;
     nativeBadges.clearNative();
   }
+  const userDataPath = app.getPath("userData");
+  let runtime = await resolveLaunchRuntime(userDataPath);
+  await configureAccountScopeForRuntime(userDataPath, runtime);
+  lastHarnessReadyState = null;
   if (desktopCapabilityBridge === null) {
     desktopCapabilityBridge = await startDesktopCapabilityBridge({
       notifications: desktopNotifications,
       notificationSupported: desktopNotificationCapability,
-      badges: nativeBadges
+      badges: nativeBadges,
+      accountScopes: desktopAccountScopes
     });
     logDiagnostic("desktop-capability-bridge-started", { badgeMode: nativeBadges.mode });
   }
-  const userDataPath = app.getPath("userData");
-  const settingsPath = path.join(userDataPath, "settings.json");
+  const accountScope = activeAccountScope;
+  if (accountScope === null) throw new Error("DSH account scope is unavailable");
   logPath = diagnosticLogPath;
-  const dshHome = path.join(userDataPath, "dsh");
-  await recoverRuntimeManagedProfileTransaction(dshHome, runtimeEnvironment);
-  let runtime = await resolveLaunchRuntime(userDataPath);
+  await recoverRuntimeManagedProfileTransaction(accountScope.dshHome, runtimeEnvironment);
   logDiagnostic("runtime-paths", { userDataPath, ...runtime, statusHtmlPath });
   if (directoryPickerBridge === null) {
     directoryPickerBridge = await startDirectoryPickerBridge(showDirectoryDialog);
   }
-  runtime = await launchHarnessRuntime(runtime, { userDataPath, settingsPath, dshHome });
-  finishRuntimeBootstrap(userDataPath);
+  runtime = await launchHarnessRuntime(runtime, accountScopeLaunchPaths(userDataPath, accountScope));
+  activeLaunchRuntime = runtime;
+  finishRuntimeBootstrap(accountScope.logPath);
+}
+
+async function configureAccountScopeForRuntime(
+  userDataPath: string,
+  runtime: LaunchRuntime
+): Promise<void> {
+  const store = new DshAccountScopeStore(userDataPath);
+  if (await arkmePluginSupportsDesktopAccountScope(runtime.arkmePluginPath)) {
+    accountScopeStore = store;
+    activeAccountScope = await store.launch();
+    accountScopeReady = false;
+    return;
+  }
+  if (await store.configured()) {
+    throw new Error("当前 Arkme 运行环境不支持已启用的 DSH 账号会话隔离");
+  }
+  accountScopeStore = null;
+  accountScopeChoices = [];
+  activeAccountScope = await store.legacyLaunch();
+  accountScopeReady = true;
+}
+
+async function attestDesktopAccountScope(
+  identity: DesktopAccountScopeIdentity
+): Promise<{ status: "ready" | "relaunch" }> {
+  if (accountScopeTransition !== null) throw new Error("DSH account scope transition is already active");
+  const store = accountScopeStore;
+  if (store === null) throw new Error("DSH account scope store is unavailable");
+  const result = await store.reconcile(identity);
+  activeAccountScope = result.launch;
+  accountScopeReady = result.status === "ready";
+  if (accountScopeReady) {
+    await refreshAccountScopeMenu();
+    await revealAttestedHarness();
+  }
+  else {
+    await renderAccountScopeWaiting();
+    scheduleAccountScopeRelaunch();
+  }
+  return { status: result.status };
+}
+
+async function prepareDesktopAccountScope(
+  identity: DesktopAccountScopeIdentity
+): Promise<{ transitionRef: string }> {
+  if (accountScopeTransition !== null) throw new Error("DSH account scope transition is already active");
+  const transitionRef = `scope-transition-${randomUUID()}`;
+  accountScopeTransition = { ref: transitionRef, identity };
+  accountScopeReady = false;
+  await renderAccountScopeWaiting();
+  return { transitionRef };
+}
+
+async function commitDesktopAccountScope(
+  transitionRef: string
+): Promise<{ status: "ready" | "relaunch" }> {
+  const transition = accountScopeTransition;
+  const store = accountScopeStore;
+  if (transition === null || transition.ref !== transitionRef || store === null) {
+    throw new Error("DSH account scope transition is stale");
+  }
+  const result = await store.reconcile(transition.identity);
+  accountScopeTransition = null;
+  activeAccountScope = result.launch;
+  accountScopeReady = result.status === "ready";
+  if (accountScopeReady) {
+    await refreshAccountScopeMenu();
+    await revealAttestedHarness();
+  }
+  else scheduleAccountScopeRelaunch();
+  return { status: result.status };
+}
+
+async function abortDesktopAccountScope(transitionRef: string): Promise<{ status: "ready" }> {
+  if (accountScopeTransition?.ref !== transitionRef) throw new Error("DSH account scope transition is stale");
+  accountScopeTransition = null;
+  accountScopeReady = true;
+  await revealAttestedHarness();
+  return { status: "ready" };
+}
+
+async function revealAttestedHarness(): Promise<void> {
+  if (lastHarnessReadyState !== null) await renderState(lastHarnessReadyState);
+}
+
+async function renderAccountScopeWaiting(): Promise<void> {
+  const window = mainWindow;
+  if (window === null || window.isDestroyed()) return;
+  activeHarnessOrigin = null;
+  desktopNotifications.markHarnessLoading();
+  const workspacePath = lastHarnessReadyState?.workspacePath ?? controller?.getCurrentWorkspace() ?? "";
+  await window.loadURL(createStatusPageUrl(
+    statusHtmlPath,
+    { kind: "starting", workspacePath },
+    runtimeEnvironment
+  ));
+  if (!window.isVisible()) window.show();
+}
+
+function scheduleAccountScopeRelaunch(): void {
+  if (accountScopeRelaunchScheduled) return;
+  accountScopeRelaunchScheduled = true;
+  setTimeout(() => {
+    enqueueAction(async () => {
+      try { await switchAccountScopeRuntime(); }
+      finally { accountScopeRelaunchScheduled = false; }
+    });
+  }, 50);
+}
+
+async function switchAccountScopeRuntime(): Promise<void> {
+  const store = accountScopeStore;
+  const runtime = activeLaunchRuntime;
+  if (store === null || runtime === null) throw new Error("DSH account scope runtime is unavailable");
+  await controller?.stop("restart");
+  controller = null;
+  activeHarnessOrigin = null;
+  accountScopeReady = false;
+  lastHarnessReadyState = null;
+  const scope = await store.launch();
+  activeAccountScope = scope;
+  await recoverRuntimeManagedProfileTransaction(scope.dshHome, runtimeEnvironment);
+  activeLaunchRuntime = await launchHarnessRuntime(
+    runtime,
+    accountScopeLaunchPaths(app.getPath("userData"), scope)
+  );
+}
+
+function accountScopeLaunchPaths(
+  userDataPath: string,
+  scope: DshAccountScopeLaunch
+): HarnessLaunchPaths {
+  return {
+    userDataPath,
+    settingsPath: scope.settingsPath,
+    dshHome: scope.dshHome,
+    harnessLogPath: scope.logPath,
+    runtimeScopeRef: scope.runtimeScopeRef,
+    accountScopeRequired: accountScopeStore !== null
+  };
 }
 
 function desktopNotificationCapability(): boolean {
@@ -599,7 +775,7 @@ function currentHarnessMainFrameUrl(event: Electron.IpcMainEvent): string | unde
 
 async function launchHarnessRuntime(
   initialRuntime: LaunchRuntime,
-  paths: { userDataPath: string; settingsPath: string; dshHome: string },
+  paths: HarnessLaunchPaths,
   reloadingBadRelease = false
 ): Promise<LaunchRuntime> {
   let runtime = initialRuntime;
@@ -670,10 +846,11 @@ async function launchHarnessRuntime(
   throw new Error("Electron runtime fallback could not be started");
 }
 
-function finishRuntimeBootstrap(userDataPath: string): void {
-  logPath = path.join(userDataPath, "logs", "harness.log");
+function finishRuntimeBootstrap(harnessLogPath: string): void {
+  logPath = harnessLogPath;
   installAppUpdateController();
   installApplicationMenu();
+  void refreshAccountScopeMenu().catch(error => logDiagnostic("account-scope-menu-failed", error));
   if (runtimeManager !== null) {
     const manager = runtimeManager;
     void stageRuntimeUpdateInBackground({
@@ -771,7 +948,7 @@ function launchRuntimeFromRelease(release: ResolvedElectronRuntime): LaunchRunti
 
 async function initializeHarnessRuntime(
   runtime: LaunchRuntime,
-  paths: { userDataPath: string; settingsPath: string; dshHome: string },
+  paths: HarnessLaunchPaths,
   onProfileTransaction: (transaction: RuntimeManagedProfileTransaction | undefined) => void
 ): Promise<void> {
   const packageManagerCommand = path.join(
@@ -785,6 +962,10 @@ async function initializeHarnessRuntime(
     access(runtime.packageManagerCliPath)
   ]);
   const dshVersion = await readDshPackageVersion(runtime.dshBinPath);
+  const supportsAccountScope = await arkmePluginSupportsDesktopAccountScope(runtime.arkmePluginPath);
+  if (supportsAccountScope !== paths.accountScopeRequired) {
+    throw new Error("Harness fallback changed the DSH account-scope capability");
+  }
   activeHarnessVersion = runtime.release?.manifest.artifacts.harness.version ?? dshVersion;
   const packageManagerEnvironment = withBundledPackageManagerEnvironment(
     process.env,
@@ -813,12 +994,16 @@ async function initializeHarnessRuntime(
     execPath: process.execPath,
     dshBinPath: runtime.dshBinPath,
     dshHome: paths.dshHome,
-    logPath: path.join(paths.userDataPath, "logs", "harness.log"),
+    logPath: paths.harnessLogPath,
     packageManagerBinPath: runtime.packageManagerBinPath,
     packageManagerCliPath: runtime.packageManagerCliPath,
     inheritedEnv: {
       ...packageManagerEnvironment,
       ARKME_APP_VERSION: app.getVersion(),
+      ...(paths.accountScopeRequired ? {
+        ARKME_ACCOUNT_SCOPE_REQUIRED: "1",
+        ARKME_DSH_RUNTIME_SCOPE_REF: paths.runtimeScopeRef
+      } : {}),
       ...(runtime.runtimeManaged ? { ARKME_RUNTIME_MANAGED: "1" } : {}),
       ...(runtime.release === undefined ? {} : { ARKME_RUNTIME_RELEASE_ID: runtime.release.releaseId })
     },
@@ -1026,6 +1211,11 @@ async function renderState(state: HarnessState | RuntimeInstallProgress): Promis
   if (window === null || window.isDestroyed()) return;
 
   if (state.kind === "ready") {
+    lastHarnessReadyState = state;
+    if (!accountScopeReady) {
+      await renderAccountScopeWaiting();
+      return;
+    }
     activeHarnessOrigin = new URL(state.url).origin;
     logDiagnostic("render-ready", { url: state.url });
     const intent = deepLinks.peek();
@@ -1142,6 +1332,15 @@ function installApplicationMenu(): void {
         { role: "close" }
       ]
     },
+    ...(accountScopeChoices.length > 1 ? [{
+      label: "会话空间",
+      submenu: accountScopeChoices.map((choice, index) => ({
+        label: `本机会话空间 ${String(index + 1)}`,
+        type: "radio" as const,
+        checked: choice.active,
+        click: () => enqueueAction(async () => { await activateDesktopAccountContainer(choice.containerRef); })
+      }))
+    } satisfies MenuItemConstructorOptions] : []),
     {
       label: "编辑",
       submenu: [
@@ -1165,6 +1364,20 @@ function installApplicationMenu(): void {
     }
   ];
   installApplicationMenuForPlatform(process.platform, Menu, template);
+}
+
+async function refreshAccountScopeMenu(): Promise<void> {
+  accountScopeChoices = accountScopeStore === null ? [] : await accountScopeStore.accountContainers();
+  installApplicationMenu();
+}
+
+async function activateDesktopAccountContainer(containerRef: string): Promise<void> {
+  const store = accountScopeStore;
+  if (store === null) throw new Error("DSH account scope store is unavailable");
+  accountScopeReady = false;
+  await renderAccountScopeWaiting();
+  activeAccountScope = await store.activate(containerRef);
+  scheduleAccountScopeRelaunch();
 }
 
 function enqueueAction(action: () => Promise<void>): void {
@@ -1202,24 +1415,25 @@ async function reloadCurrentRuntimeEnvironment(): Promise<void> {
     throw new Error("当前客户端没有可重新加载的运行环境");
   }
   const userDataPath = app.getPath("userData");
-  const paths = {
-    userDataPath,
-    settingsPath: path.join(userDataPath, "settings.json"),
-    dshHome: path.join(userDataPath, "dsh")
-  };
-  await recoverRuntimeManagedProfileTransaction(paths.dshHome, runtimeEnvironment);
   let release: ResolvedElectronRuntime;
   try {
     release = await runtimeManager.reloadCurrentEnvironment(state => runtimeProgressRenderer.schedule(state));
   } finally {
     await runtimeProgressRenderer.flush();
   }
+  const runtime = launchRuntimeFromRelease(release);
+  await configureAccountScopeForRuntime(userDataPath, runtime);
+  const accountScope = activeAccountScope;
+  if (accountScope === null) throw new Error("DSH account scope is unavailable");
+  lastHarnessReadyState = null;
+  const paths = accountScopeLaunchPaths(userDataPath, accountScope);
+  await recoverRuntimeManagedProfileTransaction(paths.dshHome, runtimeEnvironment);
   logDiagnostic("runtime-manual-reload", {
     environment: runtimeEnvironment,
     releaseId: release.releaseId,
     serviceBaseUrl: runtimeServiceConfig.serviceBaseUrl
   });
-  await launchHarnessRuntime(launchRuntimeFromRelease(release), paths, true);
+  activeLaunchRuntime = await launchHarnessRuntime(runtime, paths, true);
 }
 
 async function showActionError(error: unknown): Promise<void> {
