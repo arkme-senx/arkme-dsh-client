@@ -49,7 +49,7 @@ describe("application manifest", () => {
       await readFile(path.join(projectRoot, "package.json"), "utf8")
     ) as { build: { appId: string } };
 
-    expect(manifest.build.appId).toBe("cc.jiwo.arkme");
+    expect(manifest.build.appId).toBe("com.senx.arkme.harness");
   });
 
   test("registers the arkme URL protocol for packaged macOS and Windows clients", async () => {
@@ -290,7 +290,7 @@ describe("application manifest", () => {
     const testBuild = testConfigModule.default as typeof manifest.build;
 
     expect(manifest.build).toMatchObject({
-      appId: "cc.jiwo.arkme",
+      appId: "com.senx.arkme.harness",
       productName: "arkme",
       protocols: [{ schemes: ["arkme"] }]
     });

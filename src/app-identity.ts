@@ -3,7 +3,7 @@ import type { RuntimeEnvironment } from "./runtime/service-config.js";
 export type ArkmeProtocol = "arkme" | "arkme-test" | "arkme-local-test";
 
 export interface ArkmeAppIdentity {
-  appId: "cc.jiwo.arkme" | "cc.jiwo.arkme.test" | "cc.jiwo.arkme.local-test";
+  appId: "com.senx.arkme.harness" | "cc.jiwo.arkme.test" | "cc.jiwo.arkme.local-test";
   appName: "arkme" | "arkme Test" | "arkme Local Test";
   protocol: ArkmeProtocol;
 }
@@ -26,7 +26,7 @@ export function resolveArkmeAppIdentity(
       protocol: "arkme-test"
     }
     : {
-      appId: "cc.jiwo.arkme",
+      appId: "com.senx.arkme.harness",
       appName: "arkme",
       protocol: "arkme"
     };
