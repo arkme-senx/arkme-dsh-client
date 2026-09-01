@@ -54,6 +54,9 @@ export interface RuntimeCandidateFailure {
   reason: string;
 }
 
+export type ElectronRuntimeStageLatestResult = "current" | "stale" | "bad" | "deferred" | "staged";
+export type ElectronRuntimeStageLatestIfStaleResult = ElectronRuntimeStageLatestResult | "throttled";
+
 export class BadRuntimeReleaseBlockedError extends Error {
   readonly displayTitle = "当前运行环境无法使用";
   readonly suggestion = "重新加载只会下载当前环境的运行组件，不会删除项目、设置、市集插件或其他用户数据。";
@@ -101,6 +104,9 @@ export class ElectronRuntimeManager {
   private readonly legacyUnmarkedReleaseIds = new Set<string>();
   private discardExistingRuntime = false;
   private stateNeedsPersistence = false;
+  private prepareForLaunchInFlight: Promise<ResolvedElectronRuntime> | undefined;
+  private stageLatestInFlight: Promise<ElectronRuntimeStageLatestResult> | undefined;
+  private lastManifestCheckStartedAtMillis?: number;
 
   constructor(private readonly options: RuntimeManagerOptions) {
     this.statePath = path.join(options.root, "state.json");
@@ -111,7 +117,20 @@ export class ElectronRuntimeManager {
     this.validateRelease = options.validateRelease ?? validateInstalledElectronRuntime;
   }
 
-  async prepareForLaunch(
+  prepareForLaunch(
+    progress?: (state: RuntimeInstallProgress) => void
+  ): Promise<ResolvedElectronRuntime> {
+    if (this.prepareForLaunchInFlight !== undefined) return this.prepareForLaunchInFlight;
+    const task = this.performPrepareForLaunch(progress);
+    this.prepareForLaunchInFlight = task;
+    const clear = () => {
+      if (this.prepareForLaunchInFlight === task) this.prepareForLaunchInFlight = undefined;
+    };
+    void task.then(clear, clear);
+    return task;
+  }
+
+  private async performPrepareForLaunch(
     progress?: (state: RuntimeInstallProgress) => void
   ): Promise<ResolvedElectronRuntime> {
     await this.ensureDirectories();
@@ -149,7 +168,7 @@ export class ElectronRuntimeManager {
     const active = await this.resolveActiveReleaseOrRecover(state);
     if (active !== undefined) return active;
 
-    const manifest = await this.options.fetchManifest();
+    const manifest = await this.fetchLatestManifest();
     const bad = state.badReleases.find(item => item.releaseId === manifest.releaseId);
     if (bad !== undefined) {
       throw new BadRuntimeReleaseBlockedError(manifest.releaseId, this.options.environment, bad.reason);
@@ -185,9 +204,44 @@ export class ElectronRuntimeManager {
     }
   }
 
-  async stageLatest(
+  stageLatest(
     progress?: (state: RuntimeInstallProgress) => void
-  ): Promise<"current" | "stale" | "bad" | "deferred" | "staged"> {
+  ): Promise<ElectronRuntimeStageLatestResult> {
+    if (this.stageLatestInFlight !== undefined) return this.stageLatestInFlight;
+    const task = this.performStageLatest(progress);
+    this.stageLatestInFlight = task;
+    const clear = () => {
+      if (this.stageLatestInFlight === task) this.stageLatestInFlight = undefined;
+    };
+    void task.then(clear, clear);
+    return task;
+  }
+
+  stageLatestIfStale(
+    minimumIntervalMs: number,
+    progress?: (state: RuntimeInstallProgress) => void
+  ): Promise<ElectronRuntimeStageLatestIfStaleResult> {
+    if (this.prepareForLaunchInFlight !== undefined) {
+      return this.prepareForLaunchInFlight.then(
+        () => "throttled" as const,
+        () => "throttled" as const
+      );
+    }
+    if (this.stageLatestInFlight !== undefined) return this.stageLatestInFlight;
+    const nowMillis = this.now().getTime();
+    if (this.lastManifestCheckStartedAtMillis !== undefined) {
+      const elapsedMillis = nowMillis - this.lastManifestCheckStartedAtMillis;
+      if (elapsedMillis >= 0 && elapsedMillis < minimumIntervalMs) {
+        return Promise.resolve("throttled");
+      }
+    }
+    this.lastManifestCheckStartedAtMillis = nowMillis;
+    return this.stageLatest(progress);
+  }
+
+  private async performStageLatest(
+    progress?: (state: RuntimeInstallProgress) => void
+  ): Promise<ElectronRuntimeStageLatestResult> {
     await this.ensureDirectories();
     const state = await this.readState();
     await this.persistMigratedStateIfNeeded(state);
@@ -201,7 +255,7 @@ export class ElectronRuntimeManager {
         await this.handleCandidateValidationFailure(state, candidateId, error);
       }
     }
-    const candidate = await this.options.fetchManifest();
+    const candidate = await this.fetchLatestManifest();
     const decision = compareElectronRuntimeCandidate(baseline.manifest, candidate);
     if (decision === "current" && state.candidateReleaseId === candidate.releaseId) return "staged";
     if (decision !== "newer") return decision;
@@ -212,6 +266,11 @@ export class ElectronRuntimeManager {
     beginRuntimeCandidate(state, candidate.releaseId);
     await this.writeState(state);
     return "staged";
+  }
+
+  private fetchLatestManifest(): Promise<ElectronRuntimeManifest> {
+    this.lastManifestCheckStartedAtMillis = this.now().getTime();
+    return this.options.fetchManifest();
   }
 
   async completeCandidate(): Promise<void> {
