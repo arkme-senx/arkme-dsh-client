@@ -20,6 +20,17 @@ export function buildTestPackagingCommands(options: {
   environment?: Record<string, string>;
 }): readonly DevelopmentCommand[];
 
+export function buildTestAppAdHocSigningCommands(options: {
+  projectRoot: string;
+  appPath: string;
+  environment?: Record<string, string>;
+}): readonly DevelopmentCommand[];
+
+export function buildTestPackagingSpawnEnvironment(
+  commandEnvironment: Record<string, string> | undefined,
+  inheritedEnvironment?: Record<string, string | undefined>
+): Record<string, string | undefined> | undefined;
+
 export function writePackagedTestPluginMarker(options: {
   appPath: string;
   plugin: Pick<DevelopmentPlugin, "path" | "version">;

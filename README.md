@@ -38,6 +38,7 @@ Harness 运行环境覆盖上述全部目标。桌面客户端内置的更新检
 
 - Node.js 24 或更高版本
 - pnpm 11.19.0
+- macOS 开发与打包需要 Xcode Command Line Tools，用于构建系统通知权限查询模块
 - 已配置 GitHub SSH 访问；生产插件依赖通过 Git SSH 固定到经过审查的 Commit
 
 安装依赖并启动开发客户端：
@@ -102,7 +103,7 @@ pnpm run pack:test
 ARKME_PLUGIN_PATH=/absolute/path/to/arkme-dsh-plugin pnpm run pack:test
 ```
 
-输出为 `release-test/mac-arm64/arkme.app`。该应用会直接引用当前机器上的插件仓库，不会复制插件，因此不能作为分发包使用。
+输出为 `release-test/mac-arm64/arkme Local Test.app`。该应用使用独立 Bundle ID 和协议，并直接引用当前机器上的插件仓库，因此不能作为分发包使用。
 
 ### 构建 Harness 运行环境
 

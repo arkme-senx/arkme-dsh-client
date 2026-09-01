@@ -112,6 +112,21 @@ describe("application manifest", () => {
     expect(manifest.build.mac.forceCodeSigning).toBe(true);
   });
 
+  test("packages the macOS notification permission addon outside ASAR", async () => {
+    const manifest = JSON.parse(
+      await readFile(path.join(projectRoot, "package.json"), "utf8")
+    ) as {
+      optionalDependencies?: Record<string, string>;
+      build: { asarUnpack?: string[] };
+    };
+
+    expect(manifest.optionalDependencies?.["@arkme/macos-notification-permission"])
+      .toBe("file:./native/macos-notification-permission");
+    expect(manifest.build.asarUnpack).toContain(
+      "node_modules/@arkme/macos-notification-permission/build/Release/*.node"
+    );
+  });
+
   test("provides an isolated unsigned macOS package command for the test runtime service", async () => {
     const manifest = JSON.parse(
       await readFile(path.join(projectRoot, "package.json"), "utf8")

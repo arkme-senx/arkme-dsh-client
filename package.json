@@ -81,7 +81,8 @@
     ],
     "asar": true,
     "asarUnpack": [
-      "dist/preload.cjs"
+      "dist/preload.cjs",
+      "node_modules/@arkme/macos-notification-permission/build/Release/*.node"
     ],
     "files": [
       "dist/**/*",
@@ -150,5 +151,8 @@
     "electron-updater": "^6.8.9",
     "semver": "7.8.5",
     "tar-stream": "3.1.7"
+  },
+  "optionalDependencies": {
+    "@arkme/macos-notification-permission": "file:./native/macos-notification-permission"
   }
 }

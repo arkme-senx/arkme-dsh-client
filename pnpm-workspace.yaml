@@ -20,6 +20,7 @@ supportedArchitectures:
     - glibc
 
 allowBuilds:
+  '@arkme/macos-notification-permission@file:native/macos-notification-permission': true
   '@deepseek-ai/dsh-subprocess-local': true
   '@google/genai': false
   '@senguoyun/dsh-arkme@git+ssh://git@github.com/arkme-senx/arkme-dsh-plugin.git#e817cb21e3923c8e903d68d442f3227c9e6c78ef': true

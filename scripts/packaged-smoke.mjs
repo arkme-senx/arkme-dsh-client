@@ -1,5 +1,5 @@
 import { execFile, spawn, spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -39,10 +39,38 @@ const layout = packagedAppLayoutFromRoot(
   packagedEnvironment.environment === "test" ? "arkme Test" : "arkme"
 );
 assertRuntimeFreePaths([...packagedFiles]);
-for (const requiredFile of ["/dist/main.js", "/dist/preload.cjs", "/dist/desktop-capabilities.js", "/dist/runtime/manager.js"]) {
+const requiredPackagedFiles = [
+  "/dist/main.js",
+  "/dist/macos-notification-permission.js",
+  "/dist/preload.cjs",
+  "/dist/desktop-capabilities.js",
+  "/dist/desktop-capability-bridge.js",
+  "/dist/native-badge.js",
+  "/dist/native-badge-adapter.js",
+  "/dist/windows-badge-icon.js",
+  "/dist/runtime/manager.js",
+  ...(platform === "darwin" ? [
+    "/node_modules/@arkme/macos-notification-permission/build/Release/arkme_notification_permission.node"
+  ] : [])
+];
+for (const requiredFile of requiredPackagedFiles) {
   if (!packagedFiles.has(requiredFile)) throw new Error(`Packaged app is missing ${requiredFile}`);
 }
 await assertRuntimeFreeResources(layout.resources);
+if (platform === "darwin") {
+  const nativePermissionModule = path.join(
+    layout.resources,
+    "node_modules",
+    "@arkme",
+    "macos-notification-permission",
+    "build",
+    "Release",
+    "arkme_notification_permission.node"
+  );
+  if (!(await lstat(nativePermissionModule)).isFile()) {
+    throw new Error("Packaged macOS notification permission module is not a file");
+  }
+}
 const preloadProbe = spawnSync(
   electronBinary,
   [path.resolve("scripts/preload-smoke.cjs"), path.join(layout.appAsar, "dist/preload.cjs")],

@@ -33,7 +33,7 @@ export interface ArkmeAppUpdateSnapshot {
 
 type ArkmeAppUpdateControllerOptions = {
   currentVersion: string;
-  applicationName?: "arkme" | "arkme Test";
+  applicationName?: "arkme" | "arkme Test" | "arkme Local Test";
   serviceBaseUrl: string;
   platform: UpdatePlatform;
   arch: UpdateArch;

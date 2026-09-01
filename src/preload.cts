@@ -3,10 +3,88 @@ import { contextBridge, ipcRenderer } from "electron";
 interface DesktopNotificationRequest {
   eventUid: string;
   sourceRef: string;
+  sourceKey?: string;
   sourceKind: "private_chat" | "group_chat";
   title: string;
   body: string;
   eventAtMillis: number;
+}
+
+interface DesktopNotificationActivation {
+  kind: "chat-source";
+  sourceRef: string;
+  sourceKey?: string;
+}
+
+interface DesktopNotificationActivationV2 extends DesktopNotificationActivation {
+  activationId: string;
+}
+
+type DesktopNotificationActivationV2Outcome =
+  | "resolved"
+  | "not-found"
+  | "failed"
+  | "superseded";
+
+interface DesktopAttentionCapabilities {
+  schemaVersion: 1;
+  notificationShow: boolean;
+  notificationPermission: DesktopNotificationPermission;
+  badgeMode: "count" | "dot" | "unsupported";
+}
+
+type DesktopNotificationPermission = NotificationPermission | "unavailable";
+const DESKTOP_NOTIFICATION_PERMISSION_STATE_CHANNEL = "arkme:desktop-notification:permission-state";
+const DESKTOP_NOTIFICATION_OPEN_SETTINGS_CHANNEL = "arkme:desktop-notification:open-settings";
+const DESKTOP_NOTIFICATION_REFRESH_PERMISSION_CHANNEL = "arkme:desktop-notification:refresh-permission";
+const DESKTOP_NOTIFICATION_PERMISSION_CHANGED_CHANNEL = "arkme:desktop-notification:permission-changed";
+const DESKTOP_NOTIFICATION_READY_V2_CHANNEL = "arkme:desktop-notification:ready-v2";
+const DESKTOP_NOTIFICATION_UNREADY_V2_CHANNEL = "arkme:desktop-notification:unready-v2";
+const DESKTOP_NOTIFICATION_ACTIVATED_V2_CHANNEL = "arkme:desktop-notification:activated-v2";
+const DESKTOP_NOTIFICATION_RESULT_V2_CHANNEL = "arkme:desktop-notification:result-v2";
+const desktopNotificationConsumerId = createDesktopNotificationConsumerId();
+const desktopNotificationActivationV2Listeners = new Set<(
+  activation: Readonly<DesktopNotificationActivationV2>
+) => void>();
+let desktopNotificationActivationV2HandlerInstalled = false;
+const desktopNotificationActivationV2Handler = (
+  _event: Electron.IpcRendererEvent,
+  value: unknown
+) => {
+  const activation = parseDesktopNotificationActivationV2(value);
+  if (activation === undefined) return;
+  const frozenActivation = Object.freeze(activation);
+  for (const listener of desktopNotificationActivationV2Listeners) listener(frozenActivation);
+};
+
+function currentDesktopNotificationPermission(): DesktopNotificationPermission {
+  if (typeof Notification === "undefined") return "unavailable";
+  const permission = Notification.permission;
+  return permission === "default" || permission === "granted" || permission === "denied"
+    ? permission
+    : "unavailable";
+}
+
+function reportDesktopNotificationPermission(
+  permission: DesktopNotificationPermission
+): DesktopNotificationPermission {
+  ipcRenderer.sendSync(DESKTOP_NOTIFICATION_PERMISSION_STATE_CHANNEL, permission);
+  return permission;
+}
+
+async function requestDesktopNotificationPermission(): Promise<DesktopNotificationPermission> {
+  if (typeof Notification === "undefined" || typeof Notification.requestPermission !== "function") {
+    return reportDesktopNotificationPermission("unavailable");
+  }
+  try {
+    const permission = await Notification.requestPermission();
+    reportDesktopNotificationPermission(permission);
+    return parseDesktopNotificationPermission(
+      await ipcRenderer.invoke(DESKTOP_NOTIFICATION_REFRESH_PERMISSION_CHANNEL)
+    );
+  } catch {
+    return reportDesktopNotificationPermission("unavailable");
+  }
 }
 
 interface RuntimeInstallProgress {
@@ -172,6 +250,10 @@ const harnessVersionValue = ipcRenderer.sendSync("arkme-runtime:harness-version"
 const harnessVersion = typeof harnessVersionValue === "string" && harnessVersionValue.trim() !== ""
   ? harnessVersionValue.trim()
   : undefined;
+reportDesktopNotificationPermission(currentDesktopNotificationPermission());
+const attentionCapabilities = parseDesktopAttentionCapabilities(
+  ipcRenderer.sendSync("arkme-desktop:attention-capabilities") as unknown
+);
 
 contextBridge.exposeInMainWorld(
   "arkmeDesktop",
@@ -180,6 +262,7 @@ contextBridge.exposeInMainWorld(
     appUpdate: true as const,
     runtimeManaged: true as const,
     ...(harnessVersion === undefined ? {} : { harnessVersion }),
+    attention: Object.freeze(attentionCapabilities),
     update: Object.freeze({
       status: async () => await ipcRenderer.invoke("arkme-app-update:status"),
       check: async () => await ipcRenderer.invoke("arkme-app-update:check"),
@@ -189,7 +272,37 @@ contextBridge.exposeInMainWorld(
   })
 );
 
-contextBridge.exposeInMainWorld("arkmeDesktopNotifications", {
+contextBridge.exposeInMainWorld("arkmeDesktopNotifications", Object.freeze({
+  permission(): DesktopNotificationPermission {
+    return parseDesktopAttentionCapabilities(
+      ipcRenderer.sendSync("arkme-desktop:attention-capabilities") as unknown
+    ).notificationPermission;
+  },
+  async requestPermission(): Promise<DesktopNotificationPermission> {
+    const current = parseDesktopAttentionCapabilities(
+      ipcRenderer.sendSync("arkme-desktop:attention-capabilities") as unknown
+    );
+    if (current.notificationPermission !== "default") return current.notificationPermission;
+    await requestDesktopNotificationPermission();
+    return parseDesktopAttentionCapabilities(
+      ipcRenderer.sendSync("arkme-desktop:attention-capabilities") as unknown
+    ).notificationPermission;
+  },
+  async refreshPermission(): Promise<DesktopNotificationPermission> {
+    return parseDesktopNotificationPermission(
+      await ipcRenderer.invoke(DESKTOP_NOTIFICATION_REFRESH_PERMISSION_CHANNEL)
+    );
+  },
+  async openSettings(): Promise<boolean> {
+    return await ipcRenderer.invoke(DESKTOP_NOTIFICATION_OPEN_SETTINGS_CHANNEL) as boolean;
+  },
+  onPermissionChanged(listener: (permission: DesktopNotificationPermission) => void): () => void {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+      listener(parseDesktopNotificationPermission(value));
+    };
+    ipcRenderer.on(DESKTOP_NOTIFICATION_PERMISSION_CHANGED_CHANNEL, handler);
+    return () => { ipcRenderer.removeListener(DESKTOP_NOTIFICATION_PERMISSION_CHANGED_CHANNEL, handler); };
+  },
   show(request: DesktopNotificationRequest): Promise<{ shown: boolean }> {
     return ipcRenderer.invoke("arkme:desktop-notification:show", request) as Promise<{ shown: boolean }>;
   },
@@ -200,8 +313,59 @@ contextBridge.exposeInMainWorld("arkmeDesktopNotifications", {
     ipcRenderer.on("arkme:desktop-notification:activated", handler);
     ipcRenderer.send("arkme:desktop-notification:ready");
     return () => { ipcRenderer.removeListener("arkme:desktop-notification:activated", handler); };
+  },
+  onActivation(listener: (activation: Readonly<DesktopNotificationActivation>) => void): () => void {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+      const activation = parseDesktopNotificationActivation(value);
+      if (activation !== undefined) listener(Object.freeze(activation));
+    };
+    ipcRenderer.on("arkme:desktop-notification:activated-v1", handler);
+    ipcRenderer.send("arkme:desktop-notification:ready");
+    return () => { ipcRenderer.removeListener("arkme:desktop-notification:activated-v1", handler); };
+  },
+  onActivationV2(listener: (activation: Readonly<DesktopNotificationActivationV2>) => void): () => void {
+    let disposed = false;
+    desktopNotificationActivationV2Listeners.add(listener);
+    if (!desktopNotificationActivationV2HandlerInstalled) {
+      ipcRenderer.on(DESKTOP_NOTIFICATION_ACTIVATED_V2_CHANNEL, desktopNotificationActivationV2Handler);
+      desktopNotificationActivationV2HandlerInstalled = true;
+      ipcRenderer.send(
+        DESKTOP_NOTIFICATION_READY_V2_CHANNEL,
+        Object.freeze({ consumerId: desktopNotificationConsumerId })
+      );
+    }
+    return () => {
+      if (disposed) return;
+      disposed = true;
+      desktopNotificationActivationV2Listeners.delete(listener);
+      if (!desktopNotificationActivationV2HandlerInstalled
+        || desktopNotificationActivationV2Listeners.size > 0) return;
+      ipcRenderer.removeListener(
+        DESKTOP_NOTIFICATION_ACTIVATED_V2_CHANNEL,
+        desktopNotificationActivationV2Handler
+      );
+      desktopNotificationActivationV2HandlerInstalled = false;
+      ipcRenderer.send(
+        DESKTOP_NOTIFICATION_UNREADY_V2_CHANNEL,
+        Object.freeze({ consumerId: desktopNotificationConsumerId })
+      );
+    };
+  },
+  completeActivationV2(
+    activationId: string,
+    outcome: DesktopNotificationActivationV2Outcome
+  ): boolean {
+    if (!boundedNonBlankString(activationId, 128) || !isDesktopNotificationActivationV2Outcome(outcome)) {
+      return false;
+    }
+    ipcRenderer.send(DESKTOP_NOTIFICATION_RESULT_V2_CHANNEL, Object.freeze({
+      consumerId: desktopNotificationConsumerId,
+      activationId,
+      outcome
+    }));
+    return true;
   }
-});
+}));
 
 contextBridge.exposeInMainWorld("arkmeRuntimeStatus", Object.freeze({
   onProgress(listener: (progress: RuntimeInstallProgress) => void): () => void {
@@ -252,4 +416,110 @@ function parseRuntimeInstallProgress(value: unknown): RuntimeInstallProgress | u
 
 function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, Math.floor(value)));
+}
+
+function parseDesktopAttentionCapabilities(value: unknown): DesktopAttentionCapabilities {
+  if (typeof value !== "object" || value === null) {
+    return {
+      schemaVersion: 1,
+      notificationShow: false,
+      notificationPermission: "unavailable",
+      badgeMode: "unsupported"
+    };
+  }
+  const candidate = value as Record<string, unknown>;
+  const notificationPermission = candidate.notificationPermission;
+  return {
+    schemaVersion: 1,
+    notificationShow: candidate.schemaVersion === 1 && candidate.notificationShow === true,
+    notificationPermission: candidate.schemaVersion === 1
+      && (notificationPermission === "default" || notificationPermission === "granted"
+        || notificationPermission === "denied" || notificationPermission === "unavailable")
+      ? notificationPermission
+      : "unavailable",
+    badgeMode: candidate.schemaVersion === 1
+      && (candidate.badgeMode === "count" || candidate.badgeMode === "dot")
+      ? candidate.badgeMode
+      : "unsupported"
+  };
+}
+
+function parseDesktopNotificationPermission(value: unknown): DesktopNotificationPermission {
+  return value === "default" || value === "granted" || value === "denied" || value === "unavailable"
+    ? value
+    : "unavailable";
+}
+
+function parseDesktopNotificationActivation(value: unknown): DesktopNotificationActivation | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const candidate = value as Record<string, unknown>;
+  const hasSourceKey = Object.prototype.hasOwnProperty.call(candidate, "sourceKey");
+  if (
+    (Object.keys(candidate).length !== 2 && Object.keys(candidate).length !== 3)
+    || candidate.kind !== "chat-source"
+    || typeof candidate.sourceRef !== "string"
+    || candidate.sourceRef.length === 0
+    || candidate.sourceRef.length > 4_096
+    || (hasSourceKey && (
+      typeof candidate.sourceKey !== "string"
+      || candidate.sourceKey.trim().length === 0
+      || candidate.sourceKey.length > 512
+    ))
+    || (!hasSourceKey && Object.keys(candidate).length !== 2)
+  ) return undefined;
+  return {
+    kind: "chat-source",
+    sourceRef: candidate.sourceRef,
+    ...(hasSourceKey ? { sourceKey: candidate.sourceKey as string } : {})
+  };
+}
+
+function parseDesktopNotificationActivationV2(
+  value: unknown
+): DesktopNotificationActivationV2 | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const candidate = value as Record<string, unknown>;
+  const hasSourceKey = Object.prototype.hasOwnProperty.call(candidate, "sourceKey");
+  const expectedKeyCount = hasSourceKey ? 4 : 3;
+  if (
+    Object.keys(candidate).length !== expectedKeyCount
+    || !boundedNonBlankString(candidate.activationId, 128)
+    || candidate.kind !== "chat-source"
+    || !boundedNonBlankString(candidate.sourceRef, 4_096)
+    || (hasSourceKey && !boundedNonBlankString(candidate.sourceKey, 512))
+  ) return undefined;
+  return {
+    activationId: candidate.activationId,
+    kind: "chat-source",
+    sourceRef: candidate.sourceRef,
+    ...(hasSourceKey ? { sourceKey: candidate.sourceKey as string } : {})
+  };
+}
+
+function createDesktopNotificationConsumerId(): string {
+  try {
+    const value = globalThis.crypto?.randomUUID?.();
+    if (boundedNonBlankString(value, 96)) return `preload-${value}`;
+  } catch {
+    // Fall through to the document-local entropy source below.
+  }
+  const timestamp = Date.now().toString(36);
+  const entropy = Math.random().toString(36).slice(2, 18);
+  return `preload-${timestamp}-${entropy}`;
+}
+
+function isDesktopNotificationActivationV2Outcome(
+  value: unknown
+): value is DesktopNotificationActivationV2Outcome {
+  return value === "resolved"
+    || value === "not-found"
+    || value === "failed"
+    || value === "superseded";
+}
+
+function boundedNonBlankString(value: unknown, maxLength: number): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= maxLength
+    && value.trim().length > 0;
 }

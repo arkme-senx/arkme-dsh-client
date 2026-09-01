@@ -122,6 +122,10 @@ importers:
       yaml:
         specifier: 2.9.0
         version: 2.9.0
+    optionalDependencies:
+      '@arkme/macos-notification-permission':
+        specifier: file:./native/macos-notification-permission
+        version: file:native/macos-notification-permission
 
   runtime:
     dependencies:
@@ -220,6 +224,10 @@ packages:
     peerDependenciesMeta:
       zod:
         optional: true
+
+  '@arkme/macos-notification-permission@file:native/macos-notification-permission':
+    resolution: {directory: native/macos-notification-permission, type: directory}
+    os: [darwin]
 
   '@aws-crypto/sha256-browser@5.2.0':
     resolution: {integrity: sha512-AXfN/lGotSQwu6HNcEsIASo7kWXZ5HYWvfOmSNKDsEqC4OashTp8alTmaz+F7TC2L083SFv5RdB+qU3Vs1kZqw==}
@@ -5364,6 +5372,9 @@ snapshots:
       json-schema-to-ts: 3.1.1
     optionalDependencies:
       zod: 4.4.3
+
+  '@arkme/macos-notification-permission@file:native/macos-notification-permission':
+    optional: true
 
   '@aws-crypto/sha256-browser@5.2.0':
     dependencies:

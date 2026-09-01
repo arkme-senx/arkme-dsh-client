@@ -50,6 +50,7 @@ async function createHarness(overrides: {
   useRealWorkspaceRegistration?: boolean;
   registerWorkspace?: (url: string, workspacePath: string, signal: AbortSignal) => Promise<void>;
   waitForExit?: () => Promise<boolean>;
+  signalProcessGroup?: (pid: number, signal: NodeJS.Signals) => Promise<void>;
   sleep?: (milliseconds: number) => Promise<void>;
   closeLog?: () => Promise<void>;
   managedRestartPlanExists?: () => Promise<boolean>;
@@ -67,6 +68,8 @@ async function createHarness(overrides: {
   const children = [child];
   const states: HarnessState[] = [];
   const signals: NodeJS.Signals[] = [];
+  const activateDesktopSession = vi.fn();
+  const deactivateDesktopSession = vi.fn();
   let spawnIndex = 0;
   const spawn = vi.fn((_command: string, _args: string[], _options: SpawnOptions) => {
     const spawned = children[spawnIndex] ?? new FakeChild();
@@ -99,7 +102,13 @@ async function createHarness(overrides: {
           ...overrides.optionalExtensionRecovery
         }
       }),
-      directoryPickerBridge: { url: "http://127.0.0.1:41235/choose-directory", token: "test-token" }
+      directoryPickerBridge: { url: "http://127.0.0.1:41235/choose-directory", token: "test-token" },
+      desktopCapabilityBridge: {
+        url: "http://127.0.0.1:41236/v1/actions",
+        token: "desktop-bridge-token",
+        activateSession: activateDesktopSession,
+        deactivateSession: deactivateDesktopSession
+      }
     },
     {
       allocatePort: async () => overrides.port ?? 41234,
@@ -112,9 +121,9 @@ async function createHarness(overrides: {
       }),
       sleep,
       now: () => now,
-      signalProcessGroup: async (_pid, signal) => {
+      signalProcessGroup: overrides.signalProcessGroup ?? (async (_pid, signal) => {
         signals.push(signal);
-      },
+      }),
       waitForExit: overrides.waitForExit ?? (async () => true),
       ...(overrides.useRealWorkspaceRegistration ? {} : {
         registerWorkspace: overrides.registerWorkspace ?? (async () => undefined)
@@ -130,7 +139,18 @@ async function createHarness(overrides: {
   );
   supervisor.onState((state) => states.push(state));
 
-  return { child, children, dshHome, root, signals, spawn, states, supervisor };
+  return {
+    activateDesktopSession,
+    child,
+    children,
+    deactivateDesktopSession,
+    dshHome,
+    root,
+    signals,
+    spawn,
+    states,
+    supervisor
+  };
 }
 
 async function writeBrokenOptionalExtensionProfile(dshHome: string): Promise<{
@@ -195,7 +215,14 @@ describe("HarnessProcessSupervisor", () => {
   });
 
   test("starts dsh web without opening an external browser and reports readiness", async () => {
-    const { dshHome, root, spawn, states, supervisor } = await createHarness();
+    const {
+      activateDesktopSession,
+      dshHome,
+      root,
+      spawn,
+      states,
+      supervisor
+    } = await createHarness();
 
     await supervisor.start("/Users/test/project");
 
@@ -219,6 +246,9 @@ describe("HarnessProcessSupervisor", () => {
           ELECTRON_RUN_AS_NODE: "1",
           ARKME_DIRECTORY_PICKER_BRIDGE_URL: "http://127.0.0.1:41235/choose-directory",
           ARKME_DIRECTORY_PICKER_BRIDGE_TOKEN: "test-token",
+          ARKME_DESKTOP_BRIDGE_URL: "http://127.0.0.1:41236/v1/actions",
+          ARKME_DESKTOP_BRIDGE_TOKEN: "desktop-bridge-token",
+          ARKME_DESKTOP_BRIDGE_SESSION_ID: expect.any(String),
           ARKME_NODE_EXEC_PATH: "/Applications/arkme.app/Contents/MacOS/arkme",
           ARKME_PNPM_CLI_PATH: "/runtime/node_modules/pnpm/bin/pnpm.cjs",
           ARKME_DESKTOP_MANAGED_RESTART: "1",
@@ -234,6 +264,8 @@ describe("HarnessProcessSupervisor", () => {
         })
       })
     );
+    const spawnedEnvironment = spawn.mock.calls[0]?.[2].env as NodeJS.ProcessEnv;
+    expect(activateDesktopSession).toHaveBeenCalledWith(spawnedEnvironment.ARKME_DESKTOP_BRIDGE_SESSION_ID);
     expect(states).toEqual([
       { kind: "starting", workspacePath: "/Users/test/project" },
       {
@@ -242,6 +274,51 @@ describe("HarnessProcessSupervisor", () => {
         url: "http://127.0.0.1:41234/"
       }
     ]);
+  });
+
+  test("invalidates the exact desktop bridge lease when Harness stops", async () => {
+    const {
+      activateDesktopSession,
+      deactivateDesktopSession,
+      spawn,
+      supervisor
+    } = await createHarness();
+    await supervisor.start("/Users/test/project");
+    const sessionId = (spawn.mock.calls[0]?.[2].env as NodeJS.ProcessEnv).ARKME_DESKTOP_BRIDGE_SESSION_ID;
+
+    await supervisor.stop("quit");
+
+    expect(activateDesktopSession).toHaveBeenCalledWith(sessionId);
+    expect(deactivateDesktopSession).toHaveBeenCalledWith(sessionId);
+  });
+
+  test("keeps the same revoked child available for a second stop when signaling fails", async () => {
+    let harness!: Awaited<ReturnType<typeof createHarness>>;
+    let signalAttempts = 0;
+    const closeLog = vi.fn(async () => undefined);
+    harness = await createHarness({
+      closeLog,
+      signalProcessGroup: async () => {
+        signalAttempts += 1;
+        expect(harness.deactivateDesktopSession).toHaveBeenCalledOnce();
+        if (signalAttempts === 1) throw new Error("signal failed");
+      }
+    });
+    await harness.supervisor.start("/Users/test/project");
+    const sessionId = (harness.spawn.mock.calls[0]?.[2].env as NodeJS.ProcessEnv)
+      .ARKME_DESKTOP_BRIDGE_SESSION_ID;
+
+    await expect(harness.supervisor.stop("quit")).rejects.toThrow("signal failed");
+    expect(harness.deactivateDesktopSession).toHaveBeenCalledOnce();
+    expect(harness.deactivateDesktopSession).toHaveBeenCalledWith(sessionId);
+    expect(closeLog).not.toHaveBeenCalled();
+    expect(harness.spawn).toHaveBeenCalledTimes(1);
+
+    await expect(harness.supervisor.stop("quit")).resolves.toBeUndefined();
+    expect(signalAttempts).toBe(2);
+    expect(harness.deactivateDesktopSession).toHaveBeenCalledOnce();
+    expect(closeLog).toHaveBeenCalledOnce();
+    expect(harness.spawn).toHaveBeenCalledTimes(1);
   });
 
   test("waits for a complete DSH API response before registering the startup workspace", async () => {
@@ -621,9 +698,17 @@ describe("HarnessProcessSupervisor", () => {
     }
   });
 
-  test("reports stderr when the process exits after becoming ready", async () => {
-    const { child, states, supervisor } = await createHarness();
+  test("reports stderr and revokes native capabilities when the process exits after becoming ready", async () => {
+    const {
+      child,
+      deactivateDesktopSession,
+      spawn,
+      states,
+      supervisor
+    } = await createHarness();
     await supervisor.start("/Users/test/project");
+    const sessionId = (spawn.mock.calls[0]?.[2].env as NodeJS.ProcessEnv)
+      .ARKME_DESKTOP_BRIDGE_SESSION_ID;
 
     expect(child.stderr.listenerCount("data")).toBe(1);
     child.stderr.emit("data", Buffer.from("provider crashed\n"));
@@ -635,6 +720,7 @@ describe("HarnessProcessSupervisor", () => {
       workspacePath: "/Users/test/project",
       message: expect.stringContaining("provider crashed")
     });
+    expect(deactivateDesktopSession).toHaveBeenCalledWith(sessionId);
   });
 
   test("automatically replaces a Harness process that requests a supervised restart", async () => {
