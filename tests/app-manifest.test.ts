@@ -73,6 +73,51 @@ describe("application manifest", () => {
     expect(icon.subarray(0, 4).toString("ascii")).toBe("icns");
   });
 
+  test("declares the macOS location usage shown before recording a snapshot location", async () => {
+    const manifest = JSON.parse(
+      await readFile(path.join(projectRoot, "package.json"), "utf8")
+    ) as {
+      build: {
+        mac: {
+          entitlements?: string;
+          entitlementsInherit?: string;
+          extendInfo?: {
+            NSLocationUsageDescription?: string;
+            NSLocationWhenInUseUsageDescription?: string;
+          };
+        };
+      };
+    };
+
+    const expected = "Arkme 仅在你开启位置记录后，将当前位置写入你发送的快记快照。";
+    expect(manifest.build.mac.extendInfo).toEqual({
+      NSLocationUsageDescription: expected,
+      NSLocationWhenInUseUsageDescription: expected
+    });
+    expect(manifest.build.mac.entitlements).toBe("build/entitlements.mac.plist");
+    expect(manifest.build.mac.entitlementsInherit).toBeUndefined();
+    const entitlements = await readFile(
+      path.join(projectRoot, "build", "entitlements.mac.plist"),
+      "utf8"
+    );
+    for (const key of [
+      "com.apple.security.cs.allow-jit",
+      "com.apple.security.cs.allow-unsigned-executable-memory",
+      "com.apple.security.cs.disable-library-validation",
+      "com.apple.security.personal-information.location"
+    ]) {
+      expect(entitlements).toContain(`<key>${key}</key>\n  <true/>`);
+    }
+  });
+
+  test("pins the browser-process CoreLocation FFI as a production dependency", async () => {
+    const manifest = JSON.parse(
+      await readFile(path.join(projectRoot, "package.json"), "utf8")
+    ) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+    expect(manifest.dependencies?.koffi).toBe("3.1.5");
+    expect(manifest.devDependencies?.koffi).toBeUndefined();
+  });
+
   test("packages a runtime-free shell and gates distributable builds on dynamic runtime smoke", async () => {
     const manifest = JSON.parse(
       await readFile(path.join(projectRoot, "package.json"), "utf8")

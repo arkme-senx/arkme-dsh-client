@@ -108,6 +108,44 @@ interface RuntimeUpdateNoticeSnapshot {
   visible: boolean;
 }
 
+type DesktopLocationPermissionState =
+  | "granted"
+  | "prompt"
+  | "denied"
+  | "restricted"
+  | "services-disabled"
+  | "unavailable";
+
+interface DesktopLocationPermissionSnapshot {
+  readonly schemaVersion: 1;
+  readonly state: DesktopLocationPermissionState;
+}
+
+const DESKTOP_LOCATION_ACTIVATION_LEASE_MILLIS = 2_000;
+const DESKTOP_LOCATION_UNAVAILABLE: DesktopLocationPermissionSnapshot = Object.freeze({
+  schemaVersion: 1,
+  state: "unavailable"
+});
+let desktopLocationActivationAt = Number.NEGATIVE_INFINITY;
+
+function rememberDesktopLocationUserActivation(): boolean {
+  let active = false;
+  try {
+    active = navigator.userActivation?.isActive === true;
+  } catch {
+    active = false;
+  }
+  if (active) desktopLocationActivationAt = Date.now();
+  return active;
+}
+
+function hasDesktopLocationUserActivation(): boolean {
+  if (rememberDesktopLocationUserActivation()) return true;
+  const leased = Date.now() - desktopLocationActivationAt <= DESKTOP_LOCATION_ACTIVATION_LEASE_MILLIS;
+  desktopLocationActivationAt = Number.NEGATIVE_INFINITY;
+  return leased;
+}
+
 const RUNTIME_UPDATE_NOTICE_ROOT_ID = "arkme-runtime-update-notice";
 
 // Keep this renderer in the preload entry: sandboxed Electron preloads cannot
@@ -366,6 +404,33 @@ contextBridge.exposeInMainWorld("arkmeDesktopNotifications", Object.freeze({
     return true;
   }
 }));
+
+if (process.platform === "darwin") {
+  contextBridge.exposeInMainWorld("arkmeDesktopLocation", Object.freeze({
+    async permissionState(): Promise<DesktopLocationPermissionSnapshot> {
+      // A real activation observed here creates a short, isolated-world lease so
+      // click -> await permissionState() -> requestPermission() stays authorized.
+      rememberDesktopLocationUserActivation();
+      return await ipcRenderer.invoke(
+        "arkme:desktop-location:permission-state"
+      ) as DesktopLocationPermissionSnapshot;
+    },
+    async requestPermission(): Promise<DesktopLocationPermissionSnapshot> {
+      if (!hasDesktopLocationUserActivation()) return DESKTOP_LOCATION_UNAVAILABLE;
+      return await ipcRenderer.invoke(
+        "arkme:desktop-location:request-permission",
+        { userActivation: true }
+      ) as DesktopLocationPermissionSnapshot;
+    },
+    async openSettings(): Promise<boolean> {
+      if (!hasDesktopLocationUserActivation()) return false;
+      return await ipcRenderer.invoke(
+        "arkme:desktop-location:open-settings",
+        { userActivation: true }
+      ) as boolean;
+    }
+  }));
+}
 
 contextBridge.exposeInMainWorld("arkmeRuntimeStatus", Object.freeze({
   onProgress(listener: (progress: RuntimeInstallProgress) => void): () => void {

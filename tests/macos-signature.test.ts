@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { validateMacCodeSigningDetails } from "../src/macos-signature.js";
+import {
+  validateMacCodeSigningDetails,
+  validateMacLocationUsageDescriptions,
+  validateMacMainProcessEntitlements
+} from "../src/macos-signature.js";
 
 describe("validateMacCodeSigningDetails", () => {
   it("accepts a team-signed Harness bundle", () => {
@@ -28,5 +32,44 @@ Identifier=Electron
 Authority=Apple Development: Developer (ABCDE12345)
 TeamIdentifier=ABCDE12345
 `)).toThrow(/cc\.jiwo\.arkme/);
+  });
+});
+
+describe("validateMacMainProcessEntitlements", () => {
+  const complete = `
+<plist version="1.0"><dict>
+  <key>com.apple.security.cs.allow-jit</key><true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
+  <key>com.apple.security.personal-information.location</key><true/>
+</dict></plist>`;
+
+  it("accepts Electron runtime and main-process location entitlements", () => {
+    expect(() => validateMacMainProcessEntitlements(complete)).not.toThrow();
+  });
+
+  it("rejects a signature that cannot own the CoreLocation permission", () => {
+    expect(() => validateMacMainProcessEntitlements(
+      complete.replace("com.apple.security.personal-information.location", "missing-location")
+    )).toThrow(/personal-information\.location/);
+  });
+
+  it("rejects a location-only entitlement file that breaks Electron hardened runtime", () => {
+    expect(() => validateMacMainProcessEntitlements(`
+<plist><dict><key>com.apple.security.personal-information.location</key><true/></dict></plist>
+    `)).toThrow(/allow-jit/);
+  });
+});
+
+describe("validateMacLocationUsageDescriptions", () => {
+  it("requires both legacy and when-in-use bundle descriptions", () => {
+    expect(() => validateMacLocationUsageDescriptions({
+      location: "Arkme location",
+      whenInUse: "Arkme location"
+    })).not.toThrow();
+    expect(() => validateMacLocationUsageDescriptions({
+      location: "",
+      whenInUse: "Arkme location"
+    })).toThrow(/location usage descriptions/);
   });
 });

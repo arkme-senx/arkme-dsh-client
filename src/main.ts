@@ -39,6 +39,10 @@ import {
   type DesktopCapabilityBridge
 } from "./desktop-capability-bridge.js";
 import {
+  DesktopLocationPermissionService,
+  registerDesktopLocationIpc
+} from "./desktop-location.js";
+import {
   desktopNativeNotificationAvailable,
   desktopNotificationSettingsUrl,
   DESKTOP_NOTIFICATION_PERMISSION_CHANGED_CHANNEL,
@@ -65,8 +69,10 @@ import {
   withBundledPackageManagerEnvironment,
   type HarnessState
 } from "./harness-supervisor.js";
+import { installHarnessPermissionPolicy } from "./harness-permission-policy.js";
 import { registerMacWindowDragRegionReinstall } from "./mac-window-drag.js";
 import { MacNotificationPermissionReader } from "./macos-notification-permission.js";
+import { createMacCoreLocationDriver } from "./macos-core-location.js";
 import { createDesktopNativeBadgeAdapter } from "./native-badge-adapter.js";
 import { NativeBadgeCoordinator } from "./native-badge.js";
 import {
@@ -197,6 +203,7 @@ const macNotificationPermissionReader = new MacNotificationPermissionReader(
   undefined,
   result => { logDiagnostic("macos-notification-permission-query", result); }
 );
+let desktopLocationPermission: DesktopLocationPermissionService | null = null;
 const runtimeProgressRenderer = createCoalescedAsyncRenderer<RuntimeInstallProgress>(async state => {
   await renderState(state).catch(error => logDiagnostic("runtime-progress-render-failed", error));
 }, 100);
@@ -281,6 +288,36 @@ registerRuntimeUpdateNoticeIpc({
     ipcMain.handle(channel, (event, value: unknown) => handler({ senderFrame: event.senderFrame }, value));
   }
 }, runtimeUpdateNotices);
+
+registerDesktopLocationIpc({
+  handle(channel, handler) {
+    ipcMain.handle(channel, (event, value: unknown) => handler({
+      sender: { id: event.sender.id },
+      senderFrame: event.senderFrame === null ? null : { url: event.senderFrame.url }
+    }, value));
+  }
+}, {
+  getActiveHarnessOrigin: () => activeHarnessOrigin,
+  getMainWindow: () => {
+    const window = mainWindow;
+    if (window === null || window.isDestroyed()) return null;
+    return {
+      destroyed: false,
+      focused: window.isFocused(),
+      url: window.webContents.getURL(),
+      webContentsId: window.webContents.id
+    };
+  },
+  getService: () => desktopLocationPermission,
+  openSettings: async () => {
+    if (process.platform !== "darwin") return false;
+    await shell.openExternal(
+      "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices"
+    );
+    return true;
+  },
+  diagnostic: (event, details) => { logDiagnostic(`desktop-location-${event}`, details); }
+});
 
 ipcMain.handle(DESKTOP_NOTIFICATION_SHOW_CHANNEL, (event, request: unknown) => (
   desktopNotifications.show(event.senderFrame?.url ?? "", request)
@@ -414,6 +451,10 @@ function registerApplicationLifecycle(): void {
   app.on("before-quit", (event) => {
     appQuitGuard?.handleBeforeQuit(event);
   });
+  app.on("will-quit", () => {
+    desktopLocationPermission?.dispose();
+    desktopLocationPermission = null;
+  });
 }
 
 function registerProtocolClient(): void {
@@ -463,6 +504,11 @@ async function bootstrap(): Promise<void> {
   logDiagnostic("bootstrap-start");
   await refreshDesktopNotificationPermission("bootstrap");
   app.setAppUserModelId(appIdentity.appId);
+  desktopLocationPermission ??= new DesktopLocationPermissionService({
+    platform: process.platform,
+    createMacDriver: createMacCoreLocationDriver,
+    diagnostic: (event, error) => { logDiagnostic(`desktop-location-${event}`, error); }
+  });
   if (mainWindow === null) createMainWindow();
   if (!nativeBadgeInitialized) {
     nativeBadgeInitialized = true;
@@ -879,6 +925,15 @@ function createMainWindow(): void {
       sandbox: true,
       webSecurity: true
     }
+  });
+
+  installHarnessPermissionPolicy(mainWindow.webContents.session, {
+    getActiveHarnessOrigin: () => activeHarnessOrigin,
+    getMainWebContentsId: () => {
+      const window = mainWindow;
+      return window === null || window.isDestroyed() ? null : window.webContents.id;
+    },
+    diagnostic: details => { logDiagnostic("permission-decision", details); }
   });
 
   const statusWindow = mainWindow;
