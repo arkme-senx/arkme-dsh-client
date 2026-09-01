@@ -157,7 +157,8 @@ export class DshAccountScopeStore {
 
     const targetRef = targetOwner.kind === "account"
       ? registry.accounts[targetOwner.accountRef]
-      : undefined;
+      : Object.entries(registry.containers)
+        .find(([, container]) => container.owner.kind === "guest")?.[0];
     const containerRef = targetRef !== undefined && registry.containers[targetRef] !== undefined
       ? targetRef
       : this.newContainerRef();

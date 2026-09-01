@@ -116,6 +116,21 @@ describe("DSH account scope store", () => {
     expect(login.launch.dshHome).toBe(account.dshHome);
   });
 
+  test("repeated logout reuses the previously empty guest container", async () => {
+    const userDataPath = await makeTempDirectory("arkme-account-scope-");
+    const refs = ["scope_guest_01", "scope_guest_02"];
+    const store = new DshAccountScopeStore(userDataPath, () => refs.shift()!);
+    await store.launch();
+    await store.reconcile({ kind: "account", userId: 42 });
+    const firstLogout = await store.reconcile({ kind: "guest" });
+    await store.reconcile({ kind: "account", userId: 42, claimCurrentGuest: false });
+
+    const secondLogout = await store.reconcile({ kind: "guest" });
+
+    expect(secondLogout.launch.containerRef).toBe(firstLogout.launch.containerRef);
+    expect(refs).toEqual([]);
+  });
+
   test("lists and activates only containers owned by the current account", async () => {
     const userDataPath = await makeTempDirectory("arkme-account-scope-");
     const refs = ["scope_guest_01", "scope_guest_02"];
