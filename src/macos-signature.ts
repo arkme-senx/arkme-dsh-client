@@ -12,9 +12,9 @@ const requiredMainProcessEntitlements = [
 
 export function validateMacCodeSigningDetails(output: string): MacCodeSigningDetails {
   const identifier = detailValue(output, "Identifier");
-  if (identifier !== "cc.jiwo.arkme") {
+  if (identifier !== "com.senx.arkme.harness") {
     throw new Error(
-      `Signed Harness must use identifier cc.jiwo.arkme; received ${identifier ?? "none"}`
+      `Signed Harness must use identifier com.senx.arkme.harness; received ${identifier ?? "none"}`
     );
   }
 
