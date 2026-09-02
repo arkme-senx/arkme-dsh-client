@@ -270,12 +270,13 @@ export async function provisionArkmeWebProfile(
   const embeddedInstallationAligned = embeddedPlugin.kind === "directory"
     ? await managedPluginLinkMatches(profileDir, embeddedPlugin.path)
     : await physicalPluginMatches(installedPluginDir, embeddedPlugin.version);
-  const profileIsAligned = dependencies[PLUGIN_NAME] === expectedPluginSpecifier
+  const profileMetadataIsAligned = dependencies[PLUGIN_NAME] === expectedPluginSpecifier
     && manifest.packageManager === PACKAGE_MANAGER
+    && await lockfilePluginSpecifierMatches(profileDir, expectedPluginSpecifier);
+  const profileIsAligned = profileMetadataIsAligned
     && (selection.source !== "independent"
       ? embeddedInstallationAligned
-      : selection.health.healthy)
-    && await lockfilePluginSpecifierMatches(profileDir, expectedPluginSpecifier);
+      : selection.health.healthy);
   let runtimeTransaction: RuntimeManagedProfileTransaction | undefined;
   if (options.runtimeManaged === true) {
     if (embeddedPlugin.kind !== "directory") {
@@ -328,7 +329,11 @@ export async function provisionArkmeWebProfile(
     } else {
       await migratePluginLinkIfNeeded(profileDir);
       if (options.packageManager !== undefined && !profileIsAligned) {
-        await synchronizeProfileDependencies(profileDir, options.packageManager);
+        if (profileMetadataIsAligned && await pluginEntryIsSymlink(installedPluginDir)) {
+          await ensurePluginSymlink(profileDir, embeddedPlugin.path);
+        } else {
+          await synchronizeProfileDependencies(profileDir, options.packageManager);
+        }
         await assertPluginMaterialized(profileDir, embeddedPlugin.path);
       } else {
         await ensurePluginSymlink(profileDir, embeddedPlugin.path);
@@ -958,6 +963,15 @@ async function managedPluginLinkMatches(
     const stat = await lstat(linkPath);
     if (!stat.isSymbolicLink()) return false;
     return path.resolve(path.dirname(linkPath), await readlink(linkPath)) === path.resolve(pluginDir);
+  } catch (error) {
+    if (isMissingFile(error)) return false;
+    throw error;
+  }
+}
+
+async function pluginEntryIsSymlink(pluginDir: string): Promise<boolean> {
+  try {
+    return (await lstat(pluginDir)).isSymbolicLink();
   } catch (error) {
     if (isMissingFile(error)) return false;
     throw error;

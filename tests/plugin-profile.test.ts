@@ -792,6 +792,68 @@ describe("provisionArkmeWebProfile", () => {
     expect(await realpath(linkPath)).toBe(await realpath(fixture.pluginDir));
   });
 
+  test("rebases an aligned local plugin link after its DSH home moves into an account container", async () => {
+    const fixture = await createFixture();
+    const legacyDshHome = path.join(fixture.root, "legacy", "dsh");
+    const legacyProfileDir = path.join(legacyDshHome, "profiles", "web");
+    const legacyLinkPath = path.join(
+      legacyProfileDir,
+      "node_modules",
+      "@senguoyun",
+      "dsh-arkme"
+    );
+    const expectedSpecifier = `link:${fixture.pluginDir}`;
+    await mkdir(path.dirname(legacyLinkPath), { recursive: true });
+    await symlink(
+      path.relative(path.dirname(legacyLinkPath), fixture.pluginDir),
+      legacyLinkPath,
+      "junction"
+    );
+    await writeFile(path.join(legacyProfileDir, "package.json"), `${JSON.stringify({
+      name: "dsh-profile-web",
+      private: true,
+      packageManager: "pnpm@11.19.0",
+      dependencies: { "@senguoyun/dsh-arkme": expectedSpecifier },
+      dsh: { profile: { bundles: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@senguoyun/dsh-arkme"] } }
+    }, null, 2)}\n`);
+    await writeFile(path.join(legacyProfileDir, "pnpm-lock.yaml"), `lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      '@senguoyun/dsh-arkme':
+        specifier: ${expectedSpecifier}
+        version: link:../../embedded-plugin
+`);
+
+    const movedDshHome = path.join(fixture.root, "dsh-containers", "scope-account", "dsh");
+    await mkdir(path.dirname(movedDshHome), { recursive: true });
+    await rename(legacyDshHome, movedDshHome);
+    const movedLinkPath = path.join(
+      movedDshHome,
+      "profiles",
+      "web",
+      "node_modules",
+      "@senguoyun",
+      "dsh-arkme"
+    );
+    expect(await realpath(movedLinkPath).catch(() => null)).toBeNull();
+
+    const packageManagerCalled = path.join(fixture.root, "package-manager-called");
+    const packageManagerProbe = path.join(fixture.root, "package-manager-probe.mjs");
+    await writeFile(packageManagerProbe, `import { writeFile } from "node:fs/promises"; await writeFile(${JSON.stringify(packageManagerCalled)}, "called");\n`);
+
+    await provisionArkmeWebProfile({
+      dshHome: movedDshHome,
+      pluginDir: fixture.pluginDir,
+      packageManager: { executable: process.execPath, prefixArgs: [packageManagerProbe] }
+    });
+
+    expect(await realpath(movedLinkPath)).toBe(await realpath(fixture.pluginDir));
+    await expect(readFile(packageManagerCalled, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   test("rejects a package-manager no-op instead of masking a stale managed link", async () => {
     const fixture = await createFixture();
     const profileDir = path.join(fixture.dshHome, "profiles", "web");
