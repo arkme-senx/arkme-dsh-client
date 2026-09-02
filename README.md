@@ -142,12 +142,15 @@ Arkme 包含两条相互独立的更新链路：
 
 - `workspace/`：没有已保存项目时自动创建的默认工作区
 - `settings.json`：最近一次有效的项目目录
-- `dsh/`：Harness 设置、凭据、Profile、会话及扩展数据
+- `dsh-account-scopes.json`：当前账号与本机会话容器的不透明归属索引
+- `dsh-containers/<container-ref>/dsh/`：按游客或 Arkme 账号隔离的 Harness 设置、Profile、会话及扩展数据
 - `logs/desktop-startup.log`：桌面客户端启动与运行时诊断日志
 - `logs/harness.log`：Harness 服务的标准输出和标准错误日志
 - `runtime-manager/electron-v1/`：当前、候选、历史、暂存和下载的运行环境数据
 
 这些文件属于本机用户数据，不应提交到源码仓库。仓库的 `.gitignore` 已排除根目录 `settings.json`、环境变量文件、常见凭据文件、数据库和构建产物。
+
+从旧版本首次升级时，已有的 `dsh/` 会在 Harness 停止后的下一次启动中原子迁移：已登录时整体归入当前 Arkme 账号，未登录时归入游客空间。退出登录会切换到全新的游客容器；重新登录账号时只启动该账号拥有的容器，不会展示其他账号的会话。同一账号存在多个本机会话容器时，可通过应用菜单中的“会话空间”切换。
 
 ## 参与贡献
 

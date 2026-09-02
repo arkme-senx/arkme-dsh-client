@@ -49,6 +49,8 @@ const TEST_PROFILE_PATCH = `- id: arkme-self
     allowProduction: false
     updateCheckEnabled: false
     updateServiceBaseUrl: https://jotmo.senguo.me
+    dshRemoteFeatureEnabled: true
+    dshRemoteRealtimeBaseUrl: https://jotmo-realtime.senguo.me
 `;
 const PROFILE_WORKSPACE_TEMPLATE = `packages:
   - .

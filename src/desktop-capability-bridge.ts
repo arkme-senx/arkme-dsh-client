@@ -26,7 +26,22 @@ const DEFAULT_MAX_CONNECTIONS = 16;
 export type DesktopCapabilityAction =
   | "capabilities.get"
   | "notification.show"
-  | "badge.applySnapshot";
+  | "badge.applySnapshot"
+  | "account.scope.attest"
+  | "account.scope.prepare"
+  | "account.scope.commit"
+  | "account.scope.abort";
+
+export type DesktopAccountScopeIdentity =
+  | { kind: "guest" }
+  | { kind: "account"; userId: number; claimCurrentGuest?: boolean };
+
+export interface DesktopAccountScopePort {
+  attest(identity: DesktopAccountScopeIdentity): Promise<{ status: "ready" | "relaunch" }>;
+  prepare(identity: DesktopAccountScopeIdentity): Promise<{ transitionRef: string }>;
+  commit(transitionRef: string): Promise<{ status: "ready" | "relaunch" }>;
+  abort(transitionRef: string): Promise<{ status: "ready" }>;
+}
 
 export interface DesktopCapabilityBridge {
   readonly url: string;
@@ -45,6 +60,7 @@ interface DesktopCapabilityBridgeOptions {
   notifications: Pick<DesktopNotificationCoordinator, "submit">;
   notificationSupported(): boolean;
   badges: Pick<NativeBadgeCoordinator, "mode" | "beginSession" | "endSession" | "applySnapshot">;
+  accountScopes?: DesktopAccountScopePort;
   randomToken?: () => string;
   maxBodyBytes?: number;
   requestTimeoutMs?: number;
@@ -153,7 +169,8 @@ async function handleRequest(
           sessionId: activeSessionId,
           capabilities: {
             notificationShow: context.notificationSupported(),
-            badgeApplySnapshot: { mode: context.badges.mode }
+            badgeApplySnapshot: { mode: context.badges.mode },
+            ...(context.accountScopes === undefined ? {} : { accountScope: { version: 1 } })
           }
         }
       });
@@ -164,6 +181,24 @@ async function handleRequest(
       const notification = parseDesktopNotificationSubmission(action.payload);
       if (notification === undefined) throw new BridgeHttpError(400, "invalid_request");
       writeActionResult(response, context.notifications.submit(notification));
+      return;
+    }
+
+    if (action.action.startsWith("account.scope.")) {
+      if (context.accountScopes === undefined) throw new BridgeHttpError(501, "unsupported");
+      if (action.action === "account.scope.attest" || action.action === "account.scope.prepare") {
+        const identity = parseAccountScopeIdentity(action.payload);
+        const value = action.action === "account.scope.attest"
+          ? await context.accountScopes.attest(identity)
+          : await context.accountScopes.prepare(identity);
+        writeJson(response, 200, { ok: true, value });
+        return;
+      }
+      const transitionRef = parseTransitionRef(action.payload);
+      const value = action.action === "account.scope.commit"
+        ? await context.accountScopes.commit(transitionRef)
+        : await context.accountScopes.abort(transitionRef);
+      writeJson(response, 200, { ok: true, value });
       return;
     }
 
@@ -321,7 +356,40 @@ function isLoopbackAddress(address: string | undefined): boolean {
 function isDesktopCapabilityAction(value: unknown): value is DesktopCapabilityAction {
   return value === "capabilities.get"
     || value === "notification.show"
-    || value === "badge.applySnapshot";
+    || value === "badge.applySnapshot"
+    || value === "account.scope.attest"
+    || value === "account.scope.prepare"
+    || value === "account.scope.commit"
+    || value === "account.scope.abort";
+}
+
+function parseAccountScopeIdentity(value: Record<string, unknown>): DesktopAccountScopeIdentity {
+  if (value.kind === "guest") {
+    assertExactKeys(value, ["kind"]);
+    return { kind: "guest" };
+  }
+  assertExactKeys(value, value.claimCurrentGuest === undefined
+    ? ["kind", "userId"]
+    : ["kind", "userId", "claimCurrentGuest"]);
+  if (value.kind !== "account" || !Number.isSafeInteger(value.userId) || Number(value.userId) <= 0) {
+    throw new BridgeHttpError(400, "invalid_request");
+  }
+  if (value.claimCurrentGuest !== undefined && typeof value.claimCurrentGuest !== "boolean") {
+    throw new BridgeHttpError(400, "invalid_request");
+  }
+  return {
+    kind: "account",
+    userId: Number(value.userId),
+    ...(value.claimCurrentGuest === undefined ? {} : { claimCurrentGuest: value.claimCurrentGuest })
+  };
+}
+
+function parseTransitionRef(value: Record<string, unknown>): string {
+  assertExactKeys(value, ["transitionRef"]);
+  if (typeof value.transitionRef !== "string" || !/^[A-Za-z0-9._:-]{8,160}$/u.test(value.transitionRef)) {
+    throw new BridgeHttpError(400, "invalid_request");
+  }
+  return value.transitionRef;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
