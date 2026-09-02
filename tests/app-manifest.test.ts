@@ -1,4 +1,5 @@
 import { access, readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, test } from "vitest";
@@ -7,10 +8,58 @@ import { parse } from "yaml";
 import vitestConfig from "../vitest.config.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const require = createRequire(import.meta.url);
 const obsoleteSyncScript = ["sync", "plugin"].join(":");
 const obsoleteVendorPath = ["vendor", "arkme-dsh-plugin"].join("/");
 
 describe("application manifest", () => {
+  test("declares a positive integer Version Code and validates it before builds", async () => {
+    const manifest = JSON.parse(
+      await readFile(path.join(projectRoot, "package.json"), "utf8")
+    ) as { versionCode?: unknown; scripts: Record<string, string> };
+
+    expect(manifest.versionCode).toBe(3);
+    expect(manifest.scripts.build).toContain("node scripts/validate-app-version-code.mjs");
+  });
+
+  test("includes the package Version Code in every production artifact filename", async () => {
+    const manifest = JSON.parse(
+      await readFile(path.join(projectRoot, "package.json"), "utf8")
+    ) as { version: string; versionCode: number };
+    const electronBuilderEntry = require.resolve("electron-builder");
+    const electronBuilderRequire = createRequire(electronBuilderEntry);
+    const { getConfig } = electronBuilderRequire(
+      "app-builder-lib/out/util/config/config.js"
+    ) as {
+      getConfig: (projectDirectory: string, configPath: null, configFromOptions: null) => Promise<{ artifactName: string }>;
+    };
+    const { expandMacro } = electronBuilderRequire(
+      "app-builder-lib/out/util/macroExpander.js"
+    ) as {
+      expandMacro: (
+        pattern: string,
+        architecture: string,
+        appInfo: { productName: string; sanitizedProductName: string; version: string },
+        extra: { ext: string },
+      ) => string;
+    };
+    const config = await getConfig(projectRoot, null, null);
+    const appInfo = {
+      productName: "arkme",
+      sanitizedProductName: "arkme",
+      version: manifest.version,
+    };
+
+    for (const [architecture, extension, expected] of [
+      ["universal", "dmg", "arkme-0.2.4-vc3-universal.dmg"],
+      ["universal", "zip", "arkme-0.2.4-vc3-universal.zip"],
+      ["x64", "exe", "arkme-0.2.4-vc3-x64.exe"],
+      ["x64", "AppImage", "arkme-0.2.4-vc3-x64.AppImage"],
+    ] as const) {
+      expect(expandMacro(config.artifactName, architecture, appInfo, { ext: extension })).toBe(expected);
+    }
+  });
+
   test("uses the commit-pinned production catalog outside the vendor workspace", async () => {
     const manifest = JSON.parse(
       await readFile(path.join(projectRoot, "package.json"), "utf8")

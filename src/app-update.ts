@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { MAX_APP_VERSION_CODE } from "./app-version-code.js";
 
 type UpdatePlatform = "darwin" | "win32" | "linux";
 type UpdateArch = "arm64" | "x64";
@@ -33,6 +34,7 @@ export interface ArkmeAppUpdateSnapshot {
 
 type ArkmeAppUpdateControllerOptions = {
   currentVersion: string;
+  currentVersionCode: number;
   applicationName?: "arkme" | "arkme Test" | "arkme Local Test";
   serviceBaseUrl: string;
   platform: UpdatePlatform;
@@ -85,6 +87,9 @@ export class ArkmeAppUpdateController {
   private lastCheckStartedAtMillis?: number;
 
   constructor(private readonly options: ArkmeAppUpdateControllerOptions) {
+    if (!Number.isSafeInteger(options.currentVersionCode) || options.currentVersionCode <= 0 || options.currentVersionCode > MAX_APP_VERSION_CODE) {
+      throw new Error("Current application Version Code must be a positive integer");
+    }
     this.snapshot = { status: "idle", currentVersion: options.currentVersion };
     this.feedURL = appUpdateFeedURL(options.serviceBaseUrl, options.platform, options.arch);
     this.fetchImpl = options.fetchImpl ?? fetch;
@@ -135,8 +140,14 @@ export class ArkmeAppUpdateController {
       });
       if (this.isDownloadStateActive()) return this.snapshotNow();
       if (response.status === 404) {
+        delete this.downloadURL;
+        const {
+          latestVersion: _previousLatestVersion,
+          releaseNotes: _previousReleaseNotes,
+          ...currentSnapshot
+        } = this.snapshot;
         return this.snapshot = {
-          ...this.snapshot,
+          ...currentSnapshot,
           status: "current",
           noUpdateAvailable: true,
           checkedAtMillis: this.now(),
@@ -145,34 +156,52 @@ export class ArkmeAppUpdateController {
       if (!response.ok) throw new Error(`更新服务返回 HTTP ${response.status}`);
       const body = await response.json() as {
         version?: unknown;
+        versionCode?: unknown;
         releaseNotes?: unknown;
         downloadUrl?: unknown;
       };
       if (typeof body.version !== "string" || typeof body.downloadUrl !== "string" || new URL(body.downloadUrl).protocol !== "https:") {
         throw new Error("更新服务返回格式无效");
       }
+      if (!Number.isSafeInteger(body.versionCode) || (body.versionCode as number) < 0 || (body.versionCode as number) > MAX_APP_VERSION_CODE) {
+        throw new Error("更新服务返回的 Version Code 无效");
+      }
       if (this.isDownloadStateActive()) return this.snapshotNow();
-      this.downloadURL = body.downloadUrl;
       const releaseNotes = typeof body.releaseNotes === "string" ? body.releaseNotes : undefined;
-      const { releaseNotes: _previousReleaseNotes, ...releaseSnapshot } = this.snapshot;
-      return this.snapshot = body.version === this.snapshot.currentVersion
-        ? {
+      const {
+        releaseNotes: _previousReleaseNotes,
+        latestVersion: _previousLatestVersion,
+        noUpdateAvailable: _previousNoUpdateAvailable,
+        ...releaseSnapshot
+      } = this.snapshot;
+      if ((body.versionCode as number) <= this.options.currentVersionCode) {
+        delete this.downloadURL;
+        return this.snapshot = {
           ...releaseSnapshot,
           status: "current",
-          checkedAtMillis: this.now(),
-          ...(releaseNotes === undefined ? {} : { releaseNotes }),
-        }
-        : {
-          ...releaseSnapshot,
-          status: "available",
-          latestVersion: body.version,
+          noUpdateAvailable: true,
           checkedAtMillis: this.now(),
           ...(releaseNotes === undefined ? {} : { releaseNotes }),
         };
+      }
+      this.downloadURL = body.downloadUrl;
+      return this.snapshot = {
+        ...releaseSnapshot,
+        status: "available",
+        latestVersion: body.version,
+        checkedAtMillis: this.now(),
+        ...(releaseNotes === undefined ? {} : { releaseNotes }),
+      };
     } catch (error) {
       if (this.isDownloadStateActive()) return this.snapshotNow();
+      delete this.downloadURL;
+      const {
+        latestVersion: _previousLatestVersion,
+        noUpdateAvailable: _previousNoUpdateAvailable,
+        ...failedSnapshot
+      } = this.snapshot;
       return this.snapshot = {
-        ...this.snapshot,
+        ...failedSnapshot,
         status: "failed",
         error: error instanceof Error ? error.message : String(error),
       };

@@ -1,6 +1,7 @@
 {
   "name": "arkme",
   "version": "0.2.4",
+  "versionCode": 3,
   "private": true,
   "author": "Jotmo",
   "description": "A secure Electron desktop shell for DeepSeek Harness",
@@ -11,7 +12,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node scripts/copy-static.mjs",
+    "build": "node scripts/validate-app-version-code.mjs && tsc -p tsconfig.build.json && node scripts/copy-static.mjs",
     "build:test": "ARKME_RUNTIME_SERVICE_BASE_URL=https://jotmo.senguo.me pnpm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
@@ -69,6 +70,7 @@
     "yaml": "2.9.0"
   },
   "build": {
+    "extends": "file:electron-builder.cjs",
     "appId": "com.senx.arkme.harness",
     "productName": "arkme",
     "protocols": [
@@ -142,7 +144,6 @@
         }
       ]
     },
-    "artifactName": "${productName}-${version}-${arch}.${ext}",
     "directories": {
       "output": "release"
     },

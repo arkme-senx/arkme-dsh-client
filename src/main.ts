@@ -20,6 +20,7 @@ import {
   ArkmeAppUpdateController,
   resolveSupportedAppUpdateTarget
 } from "./app-update.js";
+import { readAppVersionCode } from "./app-version-code.js";
 import { resolveArkmeAppIdentity } from "./app-identity.js";
 import { createAppQuitGuard, type AppQuitGuard } from "./app-quit-guard.js";
 import { installApplicationMenuForPlatform } from "./application-menu.js";
@@ -525,7 +526,7 @@ async function bootstrap(): Promise<void> {
     diagnostic: (event, error) => { logDiagnostic(`desktop-location-${event}`, error); }
   });
   if (mainWindow === null) createMainWindow();
-  if (appUpdateController === null) installAppUpdateController();
+  if (appUpdateController === null) await installAppUpdateController();
   checkAppUpdateIfStale("startup");
   if (!nativeBadgeInitialized) {
     nativeBadgeInitialized = true;
@@ -875,12 +876,13 @@ async function readDshPackageVersion(dshBinPath: string): Promise<string | undef
   }
 }
 
-function installAppUpdateController(): void {
+async function installAppUpdateController(): Promise<void> {
   if (packagedLocalTest) return;
   const target = resolveSupportedAppUpdateTarget(process.platform, process.arch);
   if (target === null) return;
   appUpdateController = new ArkmeAppUpdateController({
     currentVersion: app.getVersion(),
+    currentVersionCode: await readAppVersionCode(path.join(app.getAppPath(), "package.json")),
     applicationName: appIdentity.appName,
     serviceBaseUrl: runtimeServiceConfig.serviceBaseUrl,
     platform: target.platform,
