@@ -3,19 +3,100 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import { ArkmeAppUpdateController, appUpdateFeedURL, resolveSupportedAppUpdateTarget } from "../src/app-update.js";
+import { parseAppVersionCode } from "../src/app-version-code.js";
 import { AUTOMATIC_UPDATE_CHECK_INTERVAL_MS } from "../src/update-check-policy.js";
 
 describe("ArkmeAppUpdateController", () => {
+  test.each([
+    { serverVersion: "1.1.0", serverVersionCode: 2, expectedStatus: "available" },
+    { serverVersion: "9.0.0", serverVersionCode: 1, expectedStatus: "current" },
+    { serverVersion: "9.0.0", serverVersionCode: 0, expectedStatus: "current" },
+    { serverVersion: "1.2.0", serverVersionCode: 2, expectedStatus: "available" },
+  ])("uses Version Code instead of the displayed version name: $serverVersion/$serverVersionCode", async ({
+    serverVersion,
+    serverVersionCode,
+    expectedStatus,
+  }) => {
+    const controller = new ArkmeAppUpdateController({
+      currentVersion: "1.2.0",
+      currentVersionCode: 1,
+      serviceBaseUrl: "https://api.jotmo.cc",
+      platform: "darwin",
+      arch: "arm64",
+      downloadsDirectory: os.tmpdir(),
+      fetchImpl: async () => new Response(JSON.stringify({
+        version: serverVersion,
+        versionCode: serverVersionCode,
+        downloadUrl: "https://d.jiwo.cc/arkme.zip",
+      }), { status: 200 }),
+    });
+
+    await expect(controller.checkNow()).resolves.toMatchObject({ status: expectedStatus });
+  });
+
+  test.each([undefined, "2", -1, 1.5, 2_147_483_648])("fails closed for an invalid feed Version Code: %s", async versionCode => {
+    const controller = new ArkmeAppUpdateController({
+      currentVersion: "1.2.0",
+      currentVersionCode: 1,
+      serviceBaseUrl: "https://api.jotmo.cc",
+      platform: "darwin",
+      arch: "arm64",
+      downloadsDirectory: os.tmpdir(),
+      fetchImpl: async () => new Response(JSON.stringify({
+        version: "9.0.0",
+        ...(versionCode === undefined ? {} : { versionCode }),
+        downloadUrl: "https://d.jiwo.cc/arkme.zip",
+      }), { status: 200 }),
+    });
+
+    await expect(controller.checkNow()).resolves.toMatchObject({
+      status: "failed",
+      error: expect.stringContaining("Version Code"),
+    });
+    await expect(controller.download()).resolves.toMatchObject({ status: "failed" });
+  });
+
+  test("parses only positive integer application Version Codes", () => {
+    expect(parseAppVersionCode({ versionCode: 1 })).toBe(1);
+    for (const manifest of [{}, { versionCode: 0 }, { versionCode: -1 }, { versionCode: 1.5 }, { versionCode: "1" }, { versionCode: 2_147_483_648 }]) {
+      expect(() => parseAppVersionCode(manifest)).toThrow(/Version Code/);
+    }
+  });
+
+  test("clears a previously available download when a later feed has no Version Code", async () => {
+    let requestCount = 0;
+    const fetchImpl = vi.fn(async () => {
+      requestCount += 1;
+      return new Response(JSON.stringify(requestCount === 1
+        ? { version: "1.3.0", versionCode: 2, downloadUrl: "https://d.jiwo.cc/arkme.zip" }
+        : { version: "1.4.0", downloadUrl: "https://d.jiwo.cc/arkme-next.zip" }), { status: 200 });
+    });
+    const controller = new ArkmeAppUpdateController({
+      currentVersion: "1.2.0",
+      currentVersionCode: 1,
+      serviceBaseUrl: "https://api.jotmo.cc",
+      platform: "darwin",
+      arch: "arm64",
+      downloadsDirectory: os.tmpdir(),
+      fetchImpl,
+    });
+
+    await expect(controller.checkNow()).resolves.toMatchObject({ status: "available" });
+    await expect(controller.checkNow()).resolves.toMatchObject({ status: "failed" });
+    await expect(controller.download()).resolves.toMatchObject({ status: "failed", error: "请先检查更新" });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
   test("reads the direct JSON feed and downloads the selected package without installing it", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "arkme-app-update-"));
     const packageURL = "https://cdn.example.test/Arkme.exe";
     const fetchImpl: typeof fetch = async (input) => {
       const url = String(input);
-      if (url.endsWith("/latest")) return new Response(JSON.stringify({ version: "1.3.0", releaseNotes: "修复", downloadUrl: packageURL }), { status: 200 });
+      if (url.endsWith("/latest")) return new Response(JSON.stringify({ version: "1.3.0", versionCode: 2, releaseNotes: "修复", downloadUrl: packageURL }), { status: 200 });
       if (url === packageURL) return new Response("installer bytes", { status: 200 });
       return new Response(null, { status: 404 });
     };
-    const controller = new ArkmeAppUpdateController({ currentVersion: "1.2.0", serviceBaseUrl: "https://api.jotmo.cc", platform: "win32", arch: "x64", downloadsDirectory: path.join(root, "downloads"), fetchImpl });
+    const controller = new ArkmeAppUpdateController({ currentVersion: "1.2.0", currentVersionCode: 1, serviceBaseUrl: "https://api.jotmo.cc", platform: "win32", arch: "x64", downloadsDirectory: path.join(root, "downloads"), fetchImpl });
     await expect(controller.checkNow()).resolves.toMatchObject({ status: "available", latestVersion: "1.3.0" });
     await expect(controller.download()).resolves.toMatchObject({ status: "downloaded", downloadedFilePath: path.join(root, "downloads", "arkme-1.3.0-win32-x64.exe") });
     await expect(readFile(path.join(root, "downloads", "arkme-1.3.0-win32-x64.exe"), "utf8")).resolves.toBe("installer bytes");
@@ -25,7 +106,7 @@ describe("ArkmeAppUpdateController", () => {
   test("uses per-platform latest JSON endpoints and treats a missing release as current", async () => {
     expect(appUpdateFeedURL("https://api.jotmo.cc", "linux", "x64")).toBe("https://api.jotmo.cc/api/public/v1/arkme/app-update/linux/x64/latest");
     expect(resolveSupportedAppUpdateTarget("darwin", "x64")).toBeNull();
-    const controller = new ArkmeAppUpdateController({ currentVersion: "1.2.0", serviceBaseUrl: "https://api.jotmo.cc", platform: "darwin", arch: "arm64", downloadsDirectory: os.tmpdir(), fetchImpl: async () => new Response(null, { status: 404 }) });
+    const controller = new ArkmeAppUpdateController({ currentVersion: "1.2.0", currentVersionCode: 1, serviceBaseUrl: "https://api.jotmo.cc", platform: "darwin", arch: "arm64", downloadsDirectory: os.tmpdir(), fetchImpl: async () => new Response(null, { status: 404 }) });
     await expect(controller.checkNow()).resolves.toMatchObject({ status: "current", noUpdateAvailable: true });
   });
 
@@ -34,6 +115,7 @@ describe("ArkmeAppUpdateController", () => {
     const fetchImpl = vi.fn(async () => new Response(null, { status: 404 }));
     const controller = new ArkmeAppUpdateController({
       currentVersion: "1.2.0",
+      currentVersionCode: 1,
       serviceBaseUrl: "https://api.jotmo.cc",
       platform: "darwin",
       arch: "arm64",
@@ -60,6 +142,7 @@ describe("ArkmeAppUpdateController", () => {
     const fetchImpl = vi.fn(async () => await new Promise<Response>(resolve => { finishRequest = resolve; }));
     const controller = new ArkmeAppUpdateController({
       currentVersion: "1.2.0",
+      currentVersionCode: 1,
       serviceBaseUrl: "https://api.jotmo.cc",
       platform: "darwin",
       arch: "arm64",
@@ -83,6 +166,7 @@ describe("ArkmeAppUpdateController", () => {
     const fetchImpl = vi.fn(async () => { throw new Error("offline"); });
     const controller = new ArkmeAppUpdateController({
       currentVersion: "1.2.0",
+      currentVersionCode: 1,
       serviceBaseUrl: "https://api.jotmo.cc",
       platform: "darwin",
       arch: "arm64",
@@ -102,6 +186,7 @@ describe("ArkmeAppUpdateController", () => {
     const fetchImpl = vi.fn(async () => new Response(null, { status: 404 }));
     const controller = new ArkmeAppUpdateController({
       currentVersion: "1.2.0",
+      currentVersionCode: 1,
       serviceBaseUrl: "https://api.jotmo.cc",
       platform: "darwin",
       arch: "arm64",
@@ -122,10 +207,11 @@ describe("ArkmeAppUpdateController", () => {
     let now = 10_000;
     const packageURL = "https://d.jiwo.cc/arkme-1.3.0.zip";
     const fetchImpl = vi.fn(async input => String(input).endsWith("/latest")
-      ? new Response(JSON.stringify({ version: "1.3.0", downloadUrl: packageURL }), { status: 200 })
+      ? new Response(JSON.stringify({ version: "1.3.0", versionCode: 2, downloadUrl: packageURL }), { status: 200 })
       : new Response("package", { status: 200 }));
     const controller = new ArkmeAppUpdateController({
       currentVersion: "1.2.0",
+      currentVersionCode: 1,
       serviceBaseUrl: "https://api.jotmo.cc",
       platform: "darwin",
       arch: "arm64",
@@ -154,7 +240,7 @@ describe("ArkmeAppUpdateController", () => {
       if (String(input).endsWith("/latest")) {
         feedRequests += 1;
         if (feedRequests === 1) {
-          return new Response(JSON.stringify({ version: "1.3.0", downloadUrl: initialPackageURL }), { status: 200 });
+          return new Response(JSON.stringify({ version: "1.3.0", versionCode: 2, downloadUrl: initialPackageURL }), { status: 200 });
         }
         return await new Promise<Response>(resolve => { finishAutomaticCheck = resolve; });
       }
@@ -162,6 +248,7 @@ describe("ArkmeAppUpdateController", () => {
     };
     const controller = new ArkmeAppUpdateController({
       currentVersion: "1.2.0",
+      currentVersionCode: 1,
       serviceBaseUrl: "https://api.jotmo.cc",
       platform: "darwin",
       arch: "arm64",
@@ -177,7 +264,7 @@ describe("ArkmeAppUpdateController", () => {
     const download = controller.download();
     expect(controller.snapshotNow()).toMatchObject({ status: "downloading", latestVersion: "1.3.0" });
 
-    finishAutomaticCheck?.(new Response(JSON.stringify({ version: "1.4.0", downloadUrl: nextPackageURL }), { status: 200 }));
+    finishAutomaticCheck?.(new Response(JSON.stringify({ version: "1.4.0", versionCode: 3, downloadUrl: nextPackageURL }), { status: 200 }));
     const automaticSnapshot = await automaticCheck;
     finishDownload?.(new Response("package", { status: 200 }));
     const downloadedSnapshot = await download;
@@ -201,7 +288,7 @@ describe("ArkmeAppUpdateController", () => {
       if (String(input).endsWith("/latest")) {
         feedRequests += 1;
         if (feedRequests === 1) {
-          return new Response(JSON.stringify({ version: "1.3.0", downloadUrl: packageURL }), { status: 200 });
+          return new Response(JSON.stringify({ version: "1.3.0", versionCode: 2, downloadUrl: packageURL }), { status: 200 });
         }
         return await new Promise<Response>(resolve => { finishAutomaticCheck = resolve; });
       }
@@ -209,6 +296,7 @@ describe("ArkmeAppUpdateController", () => {
     };
     const controller = new ArkmeAppUpdateController({
       currentVersion: "1.2.0",
+      currentVersionCode: 1,
       serviceBaseUrl: "https://api.jotmo.cc",
       platform: "darwin",
       arch: "arm64",
@@ -222,7 +310,7 @@ describe("ArkmeAppUpdateController", () => {
     const automaticCheck = controller.checkIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS);
     await vi.waitFor(() => expect(feedRequests).toBe(2));
     await controller.download();
-    finishAutomaticCheck?.(new Response(JSON.stringify({ version: "1.4.0", downloadUrl: "https://d.jiwo.cc/arkme-1.4.0.zip" }), { status: 200 }));
+    finishAutomaticCheck?.(new Response(JSON.stringify({ version: "1.4.0", versionCode: 3, downloadUrl: "https://d.jiwo.cc/arkme-1.4.0.zip" }), { status: 200 }));
 
     await expect(automaticCheck).resolves.toMatchObject({
       status: "downloaded",
@@ -237,13 +325,14 @@ describe("ArkmeAppUpdateController", () => {
     const packageURL = "https://cdn.example.test/Arkme.zip";
     const controller = new ArkmeAppUpdateController({
       currentVersion: "1.2.0",
+      currentVersionCode: 1,
       serviceBaseUrl: "https://api.jotmo.cc",
       platform: "darwin",
       arch: "arm64",
       downloadsDirectory: os.tmpdir(),
       fetchImpl: async input => {
         if (String(input).endsWith("/latest")) {
-          return new Response(JSON.stringify({ version: "1.3.0", releaseNotes: "修复", downloadUrl: packageURL }), { status: 200 });
+          return new Response(JSON.stringify({ version: "1.3.0", versionCode: 2, releaseNotes: "修复", downloadUrl: packageURL }), { status: 200 });
         }
         return new Response(new ReadableStream<Uint8Array>({
           start(value) { streamController = value; },
@@ -272,6 +361,7 @@ describe("ArkmeAppUpdateController", () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "arkme-test-app-update-"));
     const controller = new ArkmeAppUpdateController({
       currentVersion: "1.2.0",
+      currentVersionCode: 1,
       applicationName: "arkme Test",
       serviceBaseUrl: "https://jotmo.senguo.me",
       platform: "darwin",
@@ -280,6 +370,7 @@ describe("ArkmeAppUpdateController", () => {
       fetchImpl: async input => String(input).endsWith("/latest")
         ? new Response(JSON.stringify({
           version: "1.3.0",
+          versionCode: 2,
           downloadUrl: "https://d.jiwo.cc/arkme-test-1.3.0.zip"
         }), { status: 200 })
         : new Response("test update bytes", { status: 200 })
