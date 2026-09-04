@@ -6,4 +6,8 @@ if (!Number.isSafeInteger(versionCode) || versionCode <= 0 || versionCode > 2_14
 
 module.exports = {
   artifactName: `\${productName}-\${version}-vc${versionCode}-\${arch}.\${ext}`,
+  publish: [{
+    provider: "generic",
+    url: "https://updates.invalid/arkme/",
+  }],
 };

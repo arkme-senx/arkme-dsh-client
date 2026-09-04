@@ -75,11 +75,13 @@ pnpm run build
 | 平台 | 命令 | 主要输出 |
 | --- | --- | --- |
 | macOS 可运行目录 | `pnpm run pack` | `release/mac-universal/arkme.app` |
-| macOS 分发包 | `pnpm run dist` | `release/` 下的 DMG 与 ZIP |
-| Windows | `pnpm run dist:win` | `release/` 下的 NSIS 安装包与 ZIP |
+| macOS 分发包 | `pnpm run dist` | `release/` 下的 DMG、ZIP、`latest-mac.yml` 与 blockmap |
+| Windows | `pnpm run dist:win` | `release/` 下的 NSIS、ZIP、`latest.yml` 与 blockmap |
 | Linux | `pnpm run dist:linux` | `release/` 下的 AppImage |
 
 macOS 和 Windows 正式构建需要可用的代码签名环境。Linux 构建生成 AppImage，不使用同一套代码签名流程。
+
+macOS/Windows 分发命令会校验更新 YAML 的版本、`vc{versionCode}` 文件名、文件大小和 SHA-512。发布流水线可设置 `ARKME_UPDATE_DOWNLOAD_URL`，额外确认管理后台的完整下载地址与 YAML 解析出的安装包地址完全一致。必须先把 YAML、安装包和 blockmap 一起上传到不可变目录，再把该目录（以 `/` 结尾）写入发布记录的 `update_feed_url` 并发布 stable。
 
 所有正式应用包都只包含 Electron 外壳。打包冒烟测试会验证应用资源中没有内置 Harness、Arkme 插件或独立 Node.js 运行时，并使用全新的应用数据目录验证动态运行环境安装与启动流程。
 

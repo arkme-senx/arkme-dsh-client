@@ -20,6 +20,11 @@ import {
   ArkmeAppUpdateController,
   resolveSupportedAppUpdateTarget
 } from "./app-update.js";
+import {
+  clearPendingAppUpdateInstall,
+  reconcilePendingAppUpdateInstall,
+  writePendingAppUpdateInstall
+} from "./app-update-install-receipt.js";
 import { readAppVersionCode } from "./app-version-code.js";
 import { resolveArkmeAppIdentity } from "./app-identity.js";
 import { createAppQuitGuard, type AppQuitGuard } from "./app-quit-guard.js";
@@ -34,6 +39,7 @@ import {
 } from "./deep-link.js";
 import { DesktopController } from "./desktop-controller.js";
 import { resolveArkmePreloadPath } from "./desktop-capabilities.js";
+import { createElectronAppUpdater } from "./electron-app-updater.js";
 import {
   startDesktopCapabilityBridge,
   type DesktopAccountScopeIdentity,
@@ -113,6 +119,7 @@ import {
   loadLastWorkspace,
   resolveArkmeAppDataPath,
   resolveAppUpdateDownloadsPath,
+  resolveAppUpdateInstallReceiptPath,
   resolveUserDataPath,
   saveLastWorkspace
 } from "./settings.js";
@@ -446,18 +453,10 @@ if (!hasSingleInstanceLock) {
 
 function registerApplicationLifecycle(): void {
   appQuitGuard = createAppQuitGuard({
-    stopHarness: async () => {
-      await controller?.stop("quit");
-    },
-    closeDirectoryPicker: async () => {
-      await directoryPickerBridge?.close();
-    },
-    closeDesktopCapabilities: async () => {
-      await desktopCapabilityBridge?.close();
-    },
-    clearNativeBadge: () => {
-      nativeBadges.clearNative();
-    },
+    stopHarness: stopHarnessForExit,
+    closeDirectoryPicker: closeDirectoryPickerForExit,
+    closeDesktopCapabilities: closeDesktopCapabilitiesForExit,
+    clearNativeBadge: clearNativeBadgeForExit,
     quit: () => app.quit(),
     onStopError: (error: unknown) => {
       console.error("Failed to stop Harness cleanly", error);
@@ -503,6 +502,22 @@ function registerApplicationLifecycle(): void {
     desktopLocationPermission?.dispose();
     desktopLocationPermission = null;
   });
+}
+
+async function stopHarnessForExit(): Promise<void> {
+  await controller?.stop("quit");
+}
+
+async function closeDirectoryPickerForExit(): Promise<void> {
+  await directoryPickerBridge?.close();
+}
+
+async function closeDesktopCapabilitiesForExit(): Promise<void> {
+  await desktopCapabilityBridge?.close();
+}
+
+function clearNativeBadgeForExit(): void {
+  nativeBadges.clearNative();
 }
 
 function registerProtocolClient(): void {
@@ -1066,9 +1081,17 @@ async function installAppUpdateController(): Promise<void> {
   if (packagedLocalTest) return;
   const target = resolveSupportedAppUpdateTarget(process.platform, process.arch);
   if (target === null) return;
+  const currentVersionCode = await readAppVersionCode(path.join(app.getAppPath(), "package.json"));
+  const receiptPath = resolveAppUpdateInstallReceiptPath(app.getPath("userData"));
+  const reconciliation = await reconcilePendingAppUpdateInstall(receiptPath, currentVersionCode);
+  if (reconciliation.outcome !== "none") {
+    logDiagnostic(`app-update-install-${reconciliation.outcome}`, reconciliation.target);
+  }
+  const inAppInstallSupported = app.isPackaged
+    && (target.platform === "darwin" || target.platform === "win32");
   appUpdateController = new ArkmeAppUpdateController({
     currentVersion: app.getVersion(),
-    currentVersionCode: await readAppVersionCode(path.join(app.getAppPath(), "package.json")),
+    currentVersionCode,
     applicationName: appIdentity.appName,
     serviceBaseUrl: runtimeServiceConfig.serviceBaseUrl,
     platform: target.platform,
@@ -1077,7 +1100,38 @@ async function installAppUpdateController(): Promise<void> {
       runtimeEnvironment,
       app.getPath("userData"),
       app.getPath("downloads")
-    )
+    ),
+    ...(reconciliation.outcome === "incomplete"
+      ? { previousInstallFailure: reconciliation.target }
+      : {}),
+    ...(inAppInstallSupported ? {
+      createUpdater: (feedURL: string, targetVersion: string) => createElectronAppUpdater(
+        target.platform as "darwin" | "win32",
+        feedURL,
+        targetVersion
+      ),
+      installUpdate: async (installTarget: { version: string; versionCode: number }, launchInstaller: () => void) => {
+        await writePendingAppUpdateInstall(receiptPath, installTarget);
+        try {
+          await stopHarnessForExit();
+          await closeDirectoryPickerForExit().catch(error => logDiagnostic("app-update-directory-picker-close-failed", error));
+          await closeDesktopCapabilitiesForExit().catch(error => logDiagnostic("app-update-desktop-capabilities-close-failed", error));
+          clearNativeBadgeForExit();
+          appQuitGuard?.allowImmediateQuit();
+          try {
+            launchInstaller();
+          } catch (error) {
+            appQuitGuard?.restoreGuardedQuit();
+            throw error;
+          }
+        } catch (error) {
+          await clearPendingAppUpdateInstall(receiptPath).catch(clearError => {
+            logDiagnostic("app-update-install-receipt-clear-failed", clearError);
+          });
+          throw error;
+        }
+      }
+    } : {})
   });
 }
 
@@ -1148,11 +1202,30 @@ function checkRuntimeUpdateIfStale(source: AutomaticUpdateCheckSource): void {
   });
 }
 
-ipcMain.handle("arkme-app-update:status", () => appUpdateController?.snapshotNow() ?? null);
-ipcMain.handle("arkme-app-update:check", async () => await appUpdateController?.checkNow() ?? null);
-ipcMain.handle("arkme-app-update:download", async () => await appUpdateController?.download() ?? null);
-ipcMain.handle("arkme-app-update:show-in-folder", async () => {
-  const downloadedFilePath = appUpdateController?.snapshotNow().downloadedFilePath;
+function isCurrentAppUpdateSender(event: Electron.IpcMainInvokeEvent): boolean {
+  const senderFrame = event.senderFrame;
+  return senderFrame !== null
+    && senderFrame === event.sender.mainFrame
+    && isCurrentHarnessSender(event.sender.id, senderFrame.url);
+}
+
+ipcMain.handle("arkme-app-update:status", event => (
+  isCurrentAppUpdateSender(event) ? appUpdateController?.snapshotNow() ?? null : null
+));
+ipcMain.handle("arkme-app-update:check", async event => (
+  isCurrentAppUpdateSender(event) ? await appUpdateController?.checkNow() ?? null : null
+));
+ipcMain.handle("arkme-app-update:download", async event => (
+  isCurrentAppUpdateSender(event) ? await appUpdateController?.download() ?? null : null
+));
+ipcMain.handle("arkme-app-update:install", async event => (
+  isCurrentAppUpdateSender(event) ? await appUpdateController?.install() ?? null : null
+));
+ipcMain.handle("arkme-app-update:show-in-folder", async event => {
+  if (!isCurrentAppUpdateSender(event)) return false;
+  const snapshot = appUpdateController?.snapshotNow();
+  if (snapshot?.installMode !== "manual") return false;
+  const downloadedFilePath = snapshot.downloadedFilePath;
   if (downloadedFilePath === undefined) return false;
   try {
     await access(downloadedFilePath);

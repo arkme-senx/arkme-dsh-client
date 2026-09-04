@@ -244,6 +244,18 @@ describe("desktop notification preload", () => {
     ]);
   });
 
+  it("exposes restart-and-install only through the frozen desktop update bridge", async () => {
+    const { exposed, invokeCalls } = await executePreload("0.1.0-rc.8");
+    const desktop = exposed.arkmeDesktop as {
+      update: { install(): Promise<unknown> };
+    };
+
+    await desktop.update.install();
+
+    expect(invokeCalls).toContainEqual({ channel: "arkme-app-update:install", args: [] });
+    expect(Object.isFrozen(desktop.update)).toBe(true);
+  });
+
   it("freezes the notification facade and validates typed activation events", async () => {
     const { emit, exposed, invokeCalls, sendCalls, syncCalls } = await executePreload("0.1.0-rc.8", {
       notificationPermission: "default",

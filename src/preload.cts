@@ -312,6 +312,7 @@ contextBridge.exposeInMainWorld(
         return await ipcRenderer.invoke("arkme-app-update:check");
       },
       download: async () => await ipcRenderer.invoke("arkme-app-update:download"),
+      install: async () => await ipcRenderer.invoke("arkme-app-update:install"),
       showInFolder: async () => await ipcRenderer.invoke("arkme-app-update:show-in-folder")
     })
   })
