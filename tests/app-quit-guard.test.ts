@@ -18,6 +18,24 @@ describe("createAppQuitGuard", () => {
     expect(quit).not.toHaveBeenCalled();
   });
 
+  test("restores guarded quit if launching the updater fails synchronously", async () => {
+    const stopHarness = vi.fn(async () => undefined);
+    const quit = vi.fn();
+    const guard = createAppQuitGuard({
+      stopHarness,
+      closeDirectoryPicker: vi.fn(async () => undefined),
+      quit,
+    });
+    guard.allowImmediateQuit();
+    guard.restoreGuardedQuit();
+
+    const event = { preventDefault: vi.fn() };
+    guard.handleBeforeQuit(event);
+    await vi.waitFor(() => expect(quit).toHaveBeenCalledOnce());
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(stopHarness).toHaveBeenCalledOnce();
+  });
+
   test("normal quit waits for Harness shutdown and then resumes app quit", async () => {
     const stopHarness = vi.fn(async () => undefined);
     const closeDirectoryPicker = vi.fn(async () => undefined);

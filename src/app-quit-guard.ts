@@ -4,6 +4,7 @@ export interface AppQuitEvent {
 
 export interface AppQuitGuard {
   allowImmediateQuit(): void;
+  restoreGuardedQuit(): void;
   handleBeforeQuit(event: AppQuitEvent): void;
 }
 
@@ -26,6 +27,12 @@ export function createAppQuitGuard(options: {
     allowImmediateQuit(): void {
       immediateQuitAllowed = true;
       shutdownComplete = true;
+    },
+
+    restoreGuardedQuit(): void {
+      immediateQuitAllowed = false;
+      shutdownComplete = false;
+      shutdownStarted = false;
     },
 
     handleBeforeQuit(event: AppQuitEvent): void {

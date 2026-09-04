@@ -1,7 +1,7 @@
 {
   "name": "arkme",
-  "version": "0.2.4",
-  "versionCode": 3,
+  "version": "0.2.6",
+  "versionCode": 4,
   "private": true,
   "author": "Jotmo",
   "description": "A secure Electron desktop shell for DeepSeek Harness",

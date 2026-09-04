@@ -29,6 +29,10 @@ export function resolveAppUpdateDownloadsPath(
     : defaultDownloadsPath;
 }
 
+export function resolveAppUpdateInstallReceiptPath(userDataPath: string): string {
+  return path.join(userDataPath, "app-update-install.json");
+}
+
 export function resolveArkmeAppDataPath(defaultAppDataPath: string, override: string | undefined): string {
   const candidate = override?.trim();
   if (candidate === undefined || candidate === "") return defaultAppDataPath;
