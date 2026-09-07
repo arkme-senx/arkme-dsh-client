@@ -57,6 +57,15 @@ for (const requiredFile of requiredPackagedFiles) {
   if (!packagedFiles.has(requiredFile)) throw new Error(`Packaged app is missing ${requiredFile}`);
 }
 await assertRuntimeFreeResources(layout.resources);
+if (platform === "darwin" || platform === "win32") {
+  const updateProbe = spawnSync(electronBinary, [
+    path.resolve("scripts/packaged-update-config-smoke.cjs"), layout.appAsar
+  ], { encoding: "utf8", timeout: 20_000 });
+  if (updateProbe.status !== 0) {
+    throw new Error(`Packaged updater smoke failed\n${updateProbe.stdout ?? ""}${updateProbe.stderr ?? ""}`);
+  }
+  console.log(updateProbe.stdout.trim());
+}
 if (platform === "darwin") {
   const nativePermissionModule = path.join(
     layout.resources,

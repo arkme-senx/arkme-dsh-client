@@ -81,7 +81,13 @@ pnpm run build
 
 macOS 和 Windows 正式构建需要可用的代码签名环境。Linux 构建生成 AppImage，不使用同一套代码签名流程。
 
-macOS/Windows 分发命令会校验更新 YAML 的版本、`vc{versionCode}` 文件名、文件大小和 SHA-512。发布流水线可设置 `ARKME_UPDATE_DOWNLOAD_URL`，额外确认管理后台的完整下载地址与 YAML 解析出的安装包地址完全一致。必须先把 YAML、安装包和 blockmap 一起上传到不可变目录，再把该目录（以 `/` 结尾）写入发布记录的 `update_feed_url` 并发布 stable。
+`electron-builder.cjs` 的 `afterPack` 钩子会在签名前生成 `Contents/Resources/app-update.yml`（Windows 为 `resources/app-update.yml`），包括更新器缓存目录及 Windows 发布者信息。即使使用 `--dir` 构建，也不能省略此文件：传入动态更新目录并不能免除下载器对包内配置的依赖。后续 `--prepackaged` 只允许使用已经包含该文件并完成签名的应用；禁止往已签名/公证的包里直接补文件。
+
+`packaged-smoke.mjs` 已强制验证包内更新配置，并使用安装包中真实的 `electron-updater` 初始化隔离下载缓存。也可以先单独运行 `pnpm run verify:packaged-update /绝对路径/arkme.app/Contents/Resources/app.asar`（Windows 传入对应 `resources/app.asar`），在公证和上传前尽早拒绝缺配置的包。该检查不下载安装更新，也不改变当前安装应用或用户数据。
+
+发布前运行 `node scripts/verify-app-update-metadata.mjs --platform darwin --release-dir <产物目录> --update-feed-url <HTTPS更新目录>`（Windows 使用 `--platform win32`），校验更新 YAML 的版本、实际更新包的 `vc{versionCode}` 文件名、文件大小和 SHA-512。也可通过 `ARKME_UPDATE_FEED_URL` 指定更新目录；仅本地校验相对路径 YAML 时可省略目录参数。必须先把 YAML、安装包和 blockmap 一起上传到不可变目录，再把该目录（以 `/` 结尾）写入发布记录的 `update_feed_url` 并发布 stable。
+
+`download_url` 只用于官网及客户端手动下载安装，可以指向 DMG、DMG 的包装文件等；它不参与 APP 内更新包选择或一致性校验。APP 内更新只从 `update_feed_url` 的 YAML 选择平台安装包（macOS ZIP / Windows NSIS EXE），校验目录边界、版本身份、Version Code、大小、SHA-512，并由 updater 验证下载内容和平台签名。旧的 `--download-url` / `ARKME_UPDATE_DOWNLOAD_URL` 发布校验参数已移除，流水线应改用更新目录参数。检查失败后的重试应重新检查，不能直接下载覆盖最初的错误。
 
 所有正式应用包都只包含 Electron 外壳。打包冒烟测试会验证应用资源中没有内置 Harness、Arkme 插件或独立 Node.js 运行时，并使用全新的应用数据目录验证动态运行环境安装与启动流程。
 

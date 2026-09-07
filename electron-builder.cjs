@@ -5,6 +5,7 @@ if (!Number.isSafeInteger(versionCode) || versionCode <= 0 || versionCode > 2_14
 }
 
 module.exports = {
+  afterPack: require("./scripts/ensure-app-update-config.cjs"),
   artifactName: `\${productName}-\${version}-vc${versionCode}-\${arch}.\${ext}`,
   publish: [{
     provider: "generic",

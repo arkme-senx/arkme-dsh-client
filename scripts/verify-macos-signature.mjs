@@ -1,5 +1,8 @@
 import { spawnSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
+import { parse } from "yaml";
 import {
   validateMacCodeSigningDetails,
   validateMacLocationUsageDescriptions,
@@ -7,6 +10,8 @@ import {
 } from "../dist/macos-signature.js";
 
 const appPath = path.resolve(process.argv[2] ?? "release/mac-arm64/arkme.app");
+const { assertAppUpdateConfig } = createRequire(import.meta.url)("./ensure-app-update-config.cjs");
+assertAppUpdateConfig(parse(await readFile(path.join(appPath, "Contents", "Resources", "app-update.yml"), "utf8")));
 const appExecutable = path.join(
   appPath,
   "Contents",

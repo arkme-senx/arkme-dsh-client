@@ -13,6 +13,8 @@ import {
 import { parseAppVersionCode } from "../src/app-version-code.js";
 import { AUTOMATIC_UPDATE_CHECK_INTERVAL_MS } from "../src/update-check-policy.js";
 
+const TEST_SHA512 = Buffer.alloc(64, 1).toString("base64");
+
 function fakeUpdater(info: AppUpdaterUpdateInfo): AppUpdaterPort & { quit: ReturnType<typeof vi.fn> } {
   let progressListener: ((progress: AppUpdaterProgress) => void) | undefined;
   const quit = vi.fn();
@@ -116,7 +118,7 @@ describe("ArkmeAppUpdateController", () => {
 
     await expect(controller.checkNow()).resolves.toMatchObject({ status: "available" });
     await expect(controller.checkNow()).resolves.toMatchObject({ status: "failed" });
-    await expect(controller.download()).resolves.toMatchObject({ status: "failed", error: "请先检查更新" });
+    await expect(controller.download()).resolves.toMatchObject({ status: "failed", failureStage: "check", error: expect.stringContaining("Version Code") });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
@@ -421,7 +423,7 @@ describe("ArkmeAppUpdateController", () => {
     const downloadUrl = "https://cdn.example.test/stable/arkme-1.1.0-vc2-arm64.zip";
     const updater = fakeUpdater({
       version: "1.1.0",
-      files: [{ url: downloadUrl, sha512: "digest", size: 123 }],
+      files: [{ url: downloadUrl, sha512: TEST_SHA512, size: 123 }],
     });
     const createUpdater = vi.fn(() => updater);
     const controller = new ArkmeAppUpdateController({
@@ -475,17 +477,17 @@ describe("ArkmeAppUpdateController", () => {
   test.each([
     {
       name: "version",
-      info: { version: "1.4.0", files: [{ url: "arkme-1.3.0-vc2-x64.exe", sha512: "digest", size: 10 }] },
+      info: { version: "1.4.0", files: [{ url: "arkme-1.3.0-vc2-x64.exe", sha512: TEST_SHA512, size: 10 }] },
       error: "版本",
     },
     {
       name: "URL",
-      info: { version: "1.3.0", files: [{ url: "other-1.3.0-vc2-x64.exe", sha512: "digest", size: 10 }] },
+      info: { version: "1.3.0", files: [{ url: "https://other.example.test/arkme-1.3.0-vc2-x64.exe", sha512: TEST_SHA512, size: 10 }] },
       error: "地址",
     },
     {
       name: "Version Code filename",
-      info: { version: "1.3.0", files: [{ url: "arkme-1.3.0-x64.exe", sha512: "digest", size: 10 }] },
+      info: { version: "1.3.0", files: [{ url: "arkme-1.3.0-x64.exe", sha512: TEST_SHA512, size: 10 }] },
       downloadUrl: "https://cdn.example.test/stable/arkme-1.3.0-x64.exe",
       error: "Version Code",
     },
@@ -496,7 +498,7 @@ describe("ArkmeAppUpdateController", () => {
     },
     {
       name: "size",
-      info: { version: "1.3.0", files: [{ url: "arkme-1.3.0-vc2-x64.exe", sha512: "digest", size: 0 }] },
+      info: { version: "1.3.0", files: [{ url: "arkme-1.3.0-vc2-x64.exe", sha512: TEST_SHA512, size: 0 }] },
       error: "大小",
     },
   ])("fails closed when updater metadata has a mismatched $name", async ({ info, downloadUrl, error }) => {
@@ -529,7 +531,7 @@ describe("ArkmeAppUpdateController", () => {
     const downloadUrl = "https://cdn.example.test/stable/arkme-1.3.0-vc2-x64.exe";
     const updater = fakeUpdater({
       version: "1.3.0",
-      files: [{ url: "arkme-1.3.0-vc2-x64.exe", sha512: "digest", size: 100 }],
+      files: [{ url: "arkme-1.3.0-vc2-x64.exe", sha512: TEST_SHA512, size: 100 }],
     });
     let finishInstall: (() => void) | undefined;
     const installUpdate = vi.fn(async (_target, launch: () => void) => {
@@ -575,7 +577,7 @@ describe("ArkmeAppUpdateController", () => {
     const downloadUrl = "https://cdn.example.test/stable/arkme-1.3.0-vc2-x64.exe";
     const updater = fakeUpdater({
       version: "1.3.0",
-      files: [{ url: downloadUrl, sha512: "declared-digest", size: 100 }],
+      files: [{ url: downloadUrl, sha512: TEST_SHA512, size: 100 }],
     });
     updater.downloadUpdate = vi.fn(async () => { throw new Error("invalid platform signature"); });
     const controller = new ArkmeAppUpdateController({
@@ -607,7 +609,7 @@ describe("ArkmeAppUpdateController", () => {
     const downloadUrl = "https://cdn.example.test/stable/arkme-1.3.0-vc2-arm64.zip";
     const updater = fakeUpdater({
       version: "1.3.0",
-      files: [{ url: downloadUrl, sha512: "digest", size: 100 }],
+      files: [{ url: downloadUrl, sha512: TEST_SHA512, size: 100 }],
     });
     const controller = new ArkmeAppUpdateController({
       currentVersion: "1.2.0",
@@ -634,6 +636,65 @@ describe("ArkmeAppUpdateController", () => {
       error: expect.stringContaining("Harness stop failed"),
     });
     expect(updater.quit).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    { platform: "darwin", arch: "arm64", packageName: "arkme-0.2.6-vc3-universal.zip", website: "https://downloads.example.test/arkme.dmg.zip" },
+    { platform: "darwin", arch: "arm64", packageName: "arkme-0.2.6-vc3-universal.zip", website: "https://downloads.example.test/arkme.dmg" },
+    { platform: "win32", arch: "x64", packageName: "arkme-0.2.6-vc3-x64.exe", website: "https://downloads.example.test/arkme-portable.zip" },
+    { platform: "darwin", arch: "arm64", packageName: "arkme-0.2.6-vc3-universal.zip", website: undefined },
+    { platform: "darwin", arch: "arm64", packageName: "arkme-0.2.6-vc3-universal.zip", website: "not-an-update-url" },
+  ] as const)("updates $platform from YAML independently of website URL $website", async ({ platform, arch, packageName, website }) => {
+    const updater = fakeUpdater({ version: "0.2.6", files: [{ url: packageName, sha512: TEST_SHA512, size: 100 }] });
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      version: "0.2.6", versionCode: 3, downloadUrl: website, updateFeedUrl: "https://updates.example.test/0.2.6-vc3/",
+    })));
+    const controller = new ArkmeAppUpdateController({
+      currentVersion: "0.2.4", currentVersionCode: 2, serviceBaseUrl: "https://api.jotmo.cc",
+      platform, arch, downloadsDirectory: os.tmpdir(), fetchImpl, createUpdater: () => updater,
+      installUpdate: async (_target, launch) => launch(),
+    });
+    await expect(controller.checkNow()).resolves.toMatchObject({ status: "available", installMode: "in-app", latestVersionCode: 3 });
+    await expect(controller.download()).resolves.toMatchObject({ status: "downloaded" });
+    await expect(controller.install()).resolves.toMatchObject({ status: "installing" });
+    expect(updater.downloadUpdate).toHaveBeenCalledOnce();
+    expect(updater.quit).toHaveBeenCalledWith(true, true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1); // Never fetch the website package.
+  });
+
+  test.each(["http://updates.example.test/", "https://updates.example.test/latest-mac.yml", { url: "https://updates.example.test/" }])("never falls back to manual download for an invalid feed: %s", async updateFeedUrl => {
+    const createUpdater = vi.fn();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      version: "0.2.6", versionCode: 3, downloadUrl: "https://downloads.example.test/arkme.dmg.zip", updateFeedUrl,
+    })));
+    const controller = new ArkmeAppUpdateController({
+      currentVersion: "0.2.4", currentVersionCode: 2, serviceBaseUrl: "https://api.jotmo.cc",
+      platform: "darwin", arch: "arm64", downloadsDirectory: os.tmpdir(), fetchImpl, createUpdater,
+    });
+    const failure = await controller.checkNow();
+    expect(failure).toMatchObject({ status: "failed", failureStage: "check", installMode: "in-app" });
+    await expect(controller.download()).resolves.toEqual(failure);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(createUpdater).not.toHaveBeenCalled();
+  });
+
+  test("retains the metadata failure on stale download, then recovers through a fresh check", async () => {
+    const info = { version: "0.2.5", files: [{ url: "arkme-0.2.6-vc3-universal.zip", sha512: TEST_SHA512, size: 100 }] };
+    const updater = fakeUpdater(info);
+    const controller = new ArkmeAppUpdateController({
+      currentVersion: "0.2.4", currentVersionCode: 2, serviceBaseUrl: "https://api.jotmo.cc",
+      platform: "darwin", arch: "arm64", downloadsDirectory: os.tmpdir(), createUpdater: () => updater,
+      fetchImpl: async () => new Response(JSON.stringify({
+        version: "0.2.6", versionCode: 3, downloadUrl: "https://downloads.example.test/arkme.dmg.zip", updateFeedUrl: "https://updates.example.test/",
+      })),
+    });
+    const failure = await controller.checkNow();
+    expect(failure).toMatchObject({ failureStage: "check", error: "自动更新元数据版本与发布记录不一致" });
+    await expect(controller.download()).resolves.toEqual(failure);
+    expect(updater.downloadUpdate).not.toHaveBeenCalled();
+    info.version = "0.2.6";
+    await expect(controller.checkNow()).resolves.toMatchObject({ status: "available", installMode: "in-app" });
+    await expect(controller.download()).resolves.toMatchObject({ status: "downloaded" });
   });
 
   test("surfaces a previous incomplete install at startup before automatic checks overwrite it", async () => {
