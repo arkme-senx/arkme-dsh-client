@@ -1,7 +1,7 @@
 {
   "name": "arkme",
-  "version": "0.2.6",
-  "versionCode": 4,
+  "version": "0.2.9",
+  "versionCode": 6,
   "private": true,
   "author": "Jotmo",
   "description": "A secure Electron desktop shell for DeepSeek Harness",
@@ -26,6 +26,7 @@
     "build:runtime:electron-harness": "node scripts/runtime/build-electron-harness.mjs",
     "build:windows-artifacts": "node scripts/build-windows-artifacts.mjs",
     "verify:packaged": "node scripts/packaged-smoke.mjs",
+    "verify:packaged-update": "electron scripts/packaged-update-config-smoke.cjs",
     "verify:mac-signature": "node scripts/verify-macos-signature.mjs",
     "pack": "pnpm run build && electron-builder --mac --universal --dir && node scripts/verify-macos-signature.mjs release/mac-universal/arkme.app",
     "pack:test": "node scripts/run-test-packaging.mjs",

@@ -18,7 +18,9 @@ describe("application manifest", () => {
       await readFile(path.join(projectRoot, "package.json"), "utf8")
     ) as { versionCode?: unknown; scripts: Record<string, string> };
 
-    expect(manifest.versionCode).toBe(3);
+    expect(Number.isSafeInteger(manifest.versionCode)).toBe(true);
+    expect(manifest.versionCode).toBeGreaterThan(0);
+    expect(manifest.versionCode).toBeLessThanOrEqual(2_147_483_647);
     expect(manifest.scripts.build).toContain("node scripts/validate-app-version-code.mjs");
   });
 
@@ -50,13 +52,15 @@ describe("application manifest", () => {
       version: manifest.version,
     };
 
-    for (const [architecture, extension, expected] of [
-      ["universal", "dmg", "arkme-0.2.4-vc3-universal.dmg"],
-      ["universal", "zip", "arkme-0.2.4-vc3-universal.zip"],
-      ["x64", "exe", "arkme-0.2.4-vc3-x64.exe"],
-      ["x64", "AppImage", "arkme-0.2.4-vc3-x64.AppImage"],
+    for (const [architecture, extension] of [
+      ["universal", "dmg"],
+      ["universal", "zip"],
+      ["x64", "exe"],
+      ["x64", "AppImage"],
     ] as const) {
-      expect(expandMacro(config.artifactName, architecture, appInfo, { ext: extension })).toBe(expected);
+      expect(expandMacro(config.artifactName, architecture, appInfo, { ext: extension })).toBe(
+        `arkme-${manifest.version}-vc${manifest.versionCode}-${architecture}.${extension}`
+      );
     }
   });
 
@@ -204,6 +208,20 @@ describe("application manifest", () => {
       "node scripts/verify-macos-signature.mjs release/mac-universal/arkme.app"
     );
     expect(manifest.build.mac.forceCodeSigning).toBe(true);
+    const signatureCheck = await readFile(path.join(projectRoot, "scripts/verify-macos-signature.mjs"), "utf8");
+    expect(signatureCheck).toContain("assertAppUpdateConfig");
+    expect(signatureCheck).toContain('"app-update.yml"');
+  });
+
+  test("gates packaged smoke on the delivered updater's real cache initialization", async () => {
+    const manifest = JSON.parse(await readFile(path.join(projectRoot, "package.json"), "utf8"));
+    expect(manifest.scripts["verify:packaged-update"]).toBe("electron scripts/packaged-update-config-smoke.cjs");
+    const smoke = await readFile(path.join(projectRoot, "scripts/packaged-smoke.mjs"), "utf8");
+    expect(smoke).toContain("scripts/packaged-update-config-smoke.cjs");
+    expect(smoke).toContain("updateProbe.status !== 0");
+    const updaterSmoke = await readFile(path.join(projectRoot, "scripts/packaged-update-config-smoke.cjs"), "utf8");
+    expect(updaterSmoke).toContain('require(path.join(appAsar, "node_modules/electron-updater"))');
+    expect(updaterSmoke).toContain("await updater.getOrCreateDownloadHelper()");
   });
 
   test("packages the macOS notification permission addon outside ASAR", async () => {

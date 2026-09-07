@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
+import { resolveAppUpdateMetadata } from "../src/app-update-metadata.ts";
 
 function argument(name) {
   const index = process.argv.indexOf(name);
@@ -18,22 +19,19 @@ const metadataPath = path.join(releaseDirectory, metadataName);
 const manifest = JSON.parse(await readFile(path.resolve("package.json"), "utf8"));
 const metadata = parse(await readFile(metadataPath, "utf8"));
 
-if (metadata?.version !== manifest.version) {
-  throw new Error(`${metadataName} version does not match package.json`);
+if (argument("--download-url") || process.env.ARKME_UPDATE_DOWNLOAD_URL?.trim()) {
+  throw new Error("Website download URLs are independent of updates; use --update-feed-url / ARKME_UPDATE_FEED_URL instead of --download-url / ARKME_UPDATE_DOWNLOAD_URL");
 }
-if (!Array.isArray(metadata.files) || metadata.files.length === 0) {
-  throw new Error(`${metadataName} does not contain update files`);
-}
-
-const extension = platform === "darwin" ? ".zip" : ".exe";
-const updateFile = metadata.files.find(file => typeof file?.url === "string" && file.url.endsWith(extension));
-if (updateFile === undefined) throw new Error(`${metadataName} does not contain a ${extension} update package`);
-
-const filename = path.basename(updateFile.url);
-if (!new RegExp(`(?:^|[-_.])vc${manifest.versionCode}(?:[-_.]|$)`, "i").test(filename)) {
-  throw new Error(`${filename} does not contain vc${manifest.versionCode}`);
-}
-const artifactPath = path.join(releaseDirectory, filename);
+const feedURL = argument("--update-feed-url") ?? (process.env.ARKME_UPDATE_FEED_URL?.trim() || "https://updates.invalid/");
+const { file: updateFile, url: updateURL, filename } = resolveAppUpdateMetadata(metadata, {
+  version: manifest.version,
+  versionCode: manifest.versionCode,
+  feedURL,
+  platform,
+  arch: platform === "darwin" ? "arm64" : "x64",
+});
+const relativePath = decodeURIComponent(updateURL.pathname.slice(new URL(feedURL).pathname.length));
+const artifactPath = path.join(releaseDirectory, relativePath);
 const artifact = await stat(artifactPath);
 if (!Number.isSafeInteger(updateFile.size) || updateFile.size !== artifact.size) {
   throw new Error(`${metadataName} size does not match ${filename}`);
@@ -43,16 +41,7 @@ if (typeof updateFile.sha512 !== "string" || updateFile.sha512 !== digest) {
   throw new Error(`${metadataName} SHA-512 does not match ${filename}`);
 }
 
-const expectedDownloadURL = argument("--download-url") ?? process.env.ARKME_UPDATE_DOWNLOAD_URL?.trim();
-if (expectedDownloadURL) {
-  const expected = new URL(expectedDownloadURL);
-  const resolvedMetadataURL = new URL(updateFile.url, new URL(".", expected)).href;
-  if (resolvedMetadataURL !== expected.href) {
-    throw new Error("Published download URL does not exactly match update metadata");
-  }
-}
-
-const files = await readdir(releaseDirectory);
+const files = await readdir(path.dirname(artifactPath));
 const matchingArtifacts = files.filter(file => file === filename);
 if (matchingArtifacts.length !== 1) throw new Error(`Expected exactly one ${filename} artifact`);
 

@@ -1,6 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { MAX_APP_VERSION_CODE } from "./app-version-code.js";
+import { resolveAppUpdateMetadata, type AppUpdaterUpdateInfo } from "./app-update-metadata.js";
+export type { AppUpdaterUpdateInfo } from "./app-update-metadata.js";
 
 type UpdatePlatform = "darwin" | "win32" | "linux";
 type UpdateArch = "arm64" | "x64";
@@ -45,11 +47,6 @@ export interface AppUpdaterProgress {
   total: number;
 }
 
-export interface AppUpdaterUpdateInfo {
-  version: string;
-  files: Array<{ url: string; sha512?: string; size?: number }>;
-}
-
 export interface AppUpdaterPort {
   autoDownload: boolean;
   autoInstallOnAppQuit: boolean;
@@ -88,7 +85,7 @@ interface AppUpdateRelease {
   version: string;
   versionCode: number;
   releaseNotes?: string;
-  downloadURL: string;
+  manualDownloadURL?: string;
   updateFeedURL?: string;
 }
 
@@ -119,10 +116,6 @@ function updateFeedDirectory(raw: string): string {
     throw new Error("自动更新目录格式无效");
   }
   return value.href;
-}
-
-function hasVersionCode(filename: string, versionCode: number): boolean {
-  return new RegExp(`(?:^|[-_.])vc${versionCode}(?:[-_.]|$)`, "i").test(filename);
 }
 
 export function resolveSupportedAppUpdateTarget(platform: string, arch: string): SupportedAppUpdateTarget | null {
@@ -238,16 +231,19 @@ export class ArkmeAppUpdateController {
         downloadUrl?: unknown;
         updateFeedUrl?: unknown;
       };
-      if (typeof body.version !== "string" || body.version.trim() === "" || typeof body.downloadUrl !== "string") {
+      if (typeof body.version !== "string" || body.version.trim() === "") {
         throw new Error("更新服务返回格式无效");
       }
-      const downloadURL = secureURL(body.downloadUrl, "安装包地址").href;
       if (!Number.isSafeInteger(body.versionCode) || (body.versionCode as number) < 0 || (body.versionCode as number) > MAX_APP_VERSION_CODE) {
         throw new Error("更新服务返回的 Version Code 无效");
       }
       if (this.isUpdateStateActive()) return this.snapshotNow();
       if ((body.versionCode as number) <= this.options.currentVersionCode) return this.setCurrent();
 
+      if (body.updateFeedUrl != null && typeof body.updateFeedUrl !== "string") {
+        failureInstallMode = "in-app";
+        throw new Error("自动更新目录格式无效");
+      }
       const updateFeedURL = typeof body.updateFeedUrl === "string" && body.updateFeedUrl.trim() !== ""
         ? body.updateFeedUrl
         : undefined;
@@ -256,7 +252,9 @@ export class ArkmeAppUpdateController {
       const release: AppUpdateRelease = {
         version: body.version,
         versionCode: body.versionCode as number,
-        downloadURL,
+        ...(updateFeedURL === undefined
+          ? { manualDownloadURL: secureURL(typeof body.downloadUrl === "string" ? body.downloadUrl : "", "安装包地址").href }
+          : {}),
         ...(typeof body.releaseNotes === "string" ? { releaseNotes: body.releaseNotes } : {}),
         ...(updateFeedURL !== undefined
           ? { updateFeedURL: updateFeedDirectory(updateFeedURL) }
@@ -277,7 +275,13 @@ export class ArkmeAppUpdateController {
         updater.allowDowngrade = true;
         const result = await updater.checkForUpdates();
         if (result === null || !result.isUpdateAvailable) throw new Error("自动更新元数据未返回可安装版本");
-        this.validateUpdaterMetadata(release, result.updateInfo);
+        resolveAppUpdateMetadata(result.updateInfo, {
+          version: release.version,
+          versionCode: release.versionCode,
+          feedURL: release.updateFeedURL,
+          platform: this.options.platform,
+          arch: this.options.arch,
+        });
         this.updater = updater;
         installMode = "in-app";
       }
@@ -304,26 +308,6 @@ export class ArkmeAppUpdateController {
         failureStage: "check",
         error: error instanceof Error ? error.message : String(error),
       };
-    }
-  }
-
-  private validateUpdaterMetadata(release: AppUpdateRelease, info: AppUpdaterUpdateInfo): void {
-    if (info.version !== release.version) throw new Error("自动更新元数据版本与发布记录不一致");
-    const matchingFile = info.files.find(file => {
-      try {
-        return new URL(file.url, release.updateFeedURL).href === release.downloadURL;
-      } catch {
-        return false;
-      }
-    });
-    if (matchingFile === undefined) throw new Error("自动更新元数据安装包地址与发布记录不一致");
-    const filename = decodeURIComponent(path.posix.basename(new URL(release.downloadURL).pathname));
-    if (!hasVersionCode(filename, release.versionCode)) throw new Error("安装包文件名缺少对应的 Version Code");
-    if (typeof matchingFile.sha512 !== "string" || matchingFile.sha512.trim() === "") {
-      throw new Error("自动更新元数据缺少 SHA-512");
-    }
-    if (!Number.isSafeInteger(matchingFile.size) || (matchingFile.size as number) <= 0) {
-      throw new Error("自动更新元数据文件大小无效");
     }
   }
 
@@ -362,7 +346,11 @@ export class ArkmeAppUpdateController {
 
   private async performDownload(): Promise<ArkmeAppUpdateSnapshot> {
     const release = this.release;
-    if (release === undefined) return this.fail("download", "请先检查更新");
+    if (release === undefined) {
+      // A stale download/retry action must not hide the original check failure.
+      if (this.snapshot.status === "failed" && this.snapshot.failureStage === "check") return this.snapshotNow();
+      return this.fail("download", "请先检查更新");
+    }
     const { error: _error, failureStage: _failureStage, ...downloadSnapshot } = this.snapshot;
     this.snapshot = { ...downloadSnapshot, status: "downloading", downloadedBytes: 0 };
     try {
@@ -399,7 +387,8 @@ export class ArkmeAppUpdateController {
   }
 
   private async downloadManual(release: AppUpdateRelease): Promise<ArkmeAppUpdateSnapshot> {
-    const response = await this.fetchImpl(release.downloadURL, {
+    if (release.manualDownloadURL === undefined) throw new Error("手动安装包地址不可用");
+    const response = await this.fetchImpl(release.manualDownloadURL, {
       redirect: "error",
       signal: AbortSignal.timeout(120_000),
     });
