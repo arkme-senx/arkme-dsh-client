@@ -20,7 +20,7 @@
     "dev": "node scripts/run-development.mjs",
     "run:prod": "node scripts/run-packaged-shell.mjs prod",
     "run:test": "node scripts/run-packaged-shell.mjs test",
-    "postinstall": "node node_modules/electron/install.js && electron-builder install-app-deps",
+    "postinstall": "node node_modules/electron/install.js && node scripts/prune-platform-app-dependencies.mjs && electron-builder install-app-deps",
     "prepare:runtime": "node scripts/prepare-runtime.mjs",
     "prepare:runtime:universal": "ARKME_RUNTIME_ARCH=x64 node scripts/prepare-runtime.mjs && ARKME_RUNTIME_ARCH=arm64 node scripts/prepare-runtime.mjs",
     "build:runtime:electron-harness": "node scripts/runtime/build-electron-harness.mjs",
