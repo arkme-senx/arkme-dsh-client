@@ -105,6 +105,15 @@ describe("application manifest", () => {
     expect(manifest.build.appId).toBe("com.senx.arkme.harness");
   });
 
+  test("sets the Windows app identity before Electron initializes notifications", async () => {
+    const mainSource = await readFile(path.join(projectRoot, "src", "main.ts"), "utf8");
+    const identityIndex = mainSource.indexOf("app.setAppUserModelId(appIdentity.appId);");
+    const notificationIndex = mainSource.indexOf("Notification.isSupported()");
+
+    expect(identityIndex).toBeGreaterThanOrEqual(0);
+    expect(notificationIndex).toBeGreaterThan(identityIndex);
+  });
+
   test("registers the arkme URL protocol for packaged macOS and Windows clients", async () => {
     const manifest = JSON.parse(
       await readFile(path.join(projectRoot, "package.json"), "utf8")
@@ -229,6 +238,7 @@ describe("application manifest", () => {
       await readFile(path.join(projectRoot, "package.json"), "utf8")
     ) as {
       optionalDependencies?: Record<string, string>;
+      scripts: Record<string, string>;
       build: { asarUnpack?: string[] };
     };
 
@@ -236,6 +246,9 @@ describe("application manifest", () => {
       .toBe("file:./native/macos-notification-permission");
     expect(manifest.build.asarUnpack).toContain(
       "node_modules/@arkme/macos-notification-permission/build/Release/*.node"
+    );
+    expect(manifest.scripts.postinstall).toContain(
+      "node scripts/prune-platform-app-dependencies.mjs && electron-builder install-app-deps"
     );
   });
 

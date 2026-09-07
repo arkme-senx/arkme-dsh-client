@@ -174,6 +174,7 @@ const statusPageUrl = pathToFileURL(statusHtmlPath).href;
 const appName = appIdentity.appName;
 const deepLinks = new ArkmeDeepLinkQueue();
 app.setName(appName);
+app.setAppUserModelId(appIdentity.appId);
 const appDataPath = resolveArkmeAppDataPath(app.getPath("appData"), process.env.ARKME_APP_DATA_PATH);
 app.setPath("appData", appDataPath);
 app.setPath("userData", resolveUserDataPath(appDataPath, runtimeEnvironment));
@@ -566,7 +567,6 @@ async function deliverPendingDeepLink(): Promise<void> {
 async function bootstrap(): Promise<void> {
   logDiagnostic("bootstrap-start");
   await refreshDesktopNotificationPermission("bootstrap");
-  app.setAppUserModelId(appIdentity.appId);
   desktopLocationPermission ??= new DesktopLocationPermissionService({
     platform: process.platform,
     createMacDriver: createMacCoreLocationDriver,
