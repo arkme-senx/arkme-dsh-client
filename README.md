@@ -101,6 +101,14 @@ pnpm run dist:test:linux
 
 测试环境构建使用独立的应用名称、协议和数据目录，输出到 `release-test-dynamic/`，不会覆盖正式应用身份。
 
+#### GitHub Actions 无签名测试构建
+
+工作流 `构建 Arkme 测试客户端 (无签名)` 在改动推送到 `pre-release` 时运行，包括合并和直接推送；当工作流文件已存在于默认分支 `master` 时，也可以通过 `workflow_dispatch` 手动运行。首次启用时，确保 `pre-release` 分支已包含该工作流文件。
+
+`macos-15-intel` 构建 Universal DMG 和 ZIP，`windows-2022` 构建 x64 NSIS EXE 和 ZIP。产物作为 GitHub Actions artifact 保留 7 天，命名为 `arkme-test-<platform>-<arch>-<run_number>-<run_attempt>`，可在仓库的 Actions → 对应运行记录 → Artifacts 下载。这些构建沿用现有的 Arkme Test 应用身份和 `https://jotmo.senguo.me` 测试服务；CI 中公开插件依赖使用 HTTPS 传输，同时保留固定 Commit 和锁文件。
+
+该工作流不使用项目签名、公证或 SimplySign，不发布 Release、不上传后端，也不构建运行环境或插件制品。它不执行依赖网络的应用冒烟测试，仅验证应用打包与安装包生成。无签名产物只用于构建验证，不能证明签名分发或安装已经就绪。
+
 在 macOS 上，还可以构建直接使用本地插件仓库的未签名测试应用：
 
 ```bash

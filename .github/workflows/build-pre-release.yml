@@ -1,0 +1,124 @@
+name: 构建 Arkme 测试客户端 (无签名)
+
+on:
+  push:
+    branches: [pre-release]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+  ARKME_RUNTIME_SERVICE_BASE_URL: https://jotmo.senguo.me
+
+jobs:
+  build:
+    name: 构建 ${{ matrix.platform }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            runner: macos-15-intel
+            arch: universal
+            builder-args: --mac dmg zip --universal
+            installer-extension: .dmg
+            resources: release-test-dynamic/mac-universal/arkme Test.app/Contents/Resources
+          - platform: windows
+            runner: windows-2022
+            arch: x64
+            builder-args: --win nsis zip --x64
+            installer-extension: .exe
+            resources: release-test-dynamic/win-unpacked/resources
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: 检出本次提交
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: 安装并缓存 pnpm
+        uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
+        with:
+          run_install: false
+          cache: true
+          cache_dependency_path: pnpm-lock.yaml
+
+      - name: 使用 HTTPS 获取公开 GitHub 依赖
+        run: |
+          git config --global --add url."https://github.com/".insteadOf 'ssh://git@github.com/'
+          git config --global --add url."https://github.com/".insteadOf 'git@github.com:'
+
+      - name: 安装锁定依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 编译测试环境客户端
+        run: pnpm run build
+
+      - name: 生成无签名安装包
+        run: >-
+          pnpm exec electron-builder
+          --config electron-builder.ci-test-config.cjs
+          ${{ matrix.builder-args }}
+          --publish never
+
+      - name: 检查安装产物和包内测试配置
+        env:
+          INSTALLER_EXTENSION: ${{ matrix.installer-extension }}
+          APP_RESOURCES: ${{ matrix.resources }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readdir, readFile, stat } from 'node:fs/promises';
+          import path from 'node:path';
+          import { extractFile } from '@electron/asar';
+          import { parse } from 'yaml';
+
+          const output = 'release-test-dynamic';
+          const entries = await readdir(output, { withFileTypes: true });
+          for (const extension of [process.env.INSTALLER_EXTENSION, '.zip']) {
+            const files = entries.filter(entry => entry.isFile() && entry.name.endsWith(extension));
+            assert(files.length > 0, `Missing ${extension} artifact in ${output}`);
+            for (const file of files) {
+              assert((await stat(path.join(output, file.name))).size > 0, `Empty artifact: ${file.name}`);
+              console.log(`Verified artifact: ${file.name}`);
+            }
+          }
+
+          const resources = process.env.APP_RESOURCES;
+          const archive = path.join(resources, 'app.asar');
+          const runtime = JSON.parse(extractFile(archive, 'dist/runtime-service-config.json').toString());
+          assert.equal(runtime.environment, 'test');
+          assert.equal(runtime.serviceBaseUrl, process.env.ARKME_RUNTIME_SERVICE_BASE_URL);
+          const updater = parse(await readFile(path.join(resources, 'app-update.yml'), 'utf8'));
+          assert.equal(updater.provider, 'generic');
+          assert.equal(new URL(updater.url).protocol, 'https:');
+          assert(updater.updaterCacheDirName, 'Missing updater cache directory');
+          console.log('Verified packaged test service and update configuration');
+          NODE
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: arkme-test-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            release-test-dynamic/*${{ matrix.installer-extension }}
+            release-test-dynamic/*.zip
+            release-test-dynamic/*.blockmap
+            release-test-dynamic/latest*.yml
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
