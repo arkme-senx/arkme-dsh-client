@@ -8,6 +8,7 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  powerMonitor,
   Menu,
   nativeImage,
   Notification,
@@ -228,6 +229,10 @@ let lastHarnessReadyState: Extract<HarnessState, { kind: "ready" }> | null = nul
 let activeLaunchRuntime: LaunchRuntime | null = null;
 let appUpdateController: ArkmeAppUpdateController | null = null;
 let appQuitGuard: AppQuitGuard | null = null;
+let desktopResumeGeneration = 0;
+let desktopSuspended = false;
+let lifecycleHooksInstalled = false;
+
 let runtimeManager: ElectronRuntimeManager | null = null;
 let renderRuntimeProgressPage: ReturnType<typeof createRuntimeProgressPageRenderer> | null = null;
 let windowsBadgeDotImage: NativeImage | null = null;
@@ -565,6 +570,18 @@ async function deliverPendingDeepLink(): Promise<void> {
 
 async function bootstrap(): Promise<void> {
   logDiagnostic("bootstrap-start");
+  if (!lifecycleHooksInstalled) {
+    lifecycleHooksInstalled = true;
+    powerMonitor.on("suspend", () => {
+      desktopSuspended = true;
+      logDiagnostic("system-suspend", { resumeGeneration: desktopResumeGeneration });
+    });
+    powerMonitor.on("resume", () => {
+      desktopSuspended = false;
+      desktopResumeGeneration += 1;
+      logDiagnostic("system-resume", { resumeGeneration: desktopResumeGeneration });
+    });
+  }
   await refreshDesktopNotificationPermission("bootstrap");
   app.setAppUserModelId(appIdentity.appId);
   desktopLocationPermission ??= new DesktopLocationPermissionService({
@@ -588,6 +605,7 @@ async function bootstrap(): Promise<void> {
       notifications: desktopNotifications,
       notificationSupported: desktopNotificationCapability,
       badges: nativeBadges,
+      lifecycle: () => ({ resumeGeneration: desktopResumeGeneration, suspended: desktopSuspended }),
       accountScopes: desktopAccountScopes
     });
     logDiagnostic("desktop-capability-bridge-started", { badgeMode: nativeBadges.mode });

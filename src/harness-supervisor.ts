@@ -1,7 +1,8 @@
 import { execFile as nodeExecFile, spawn as nodeSpawn, type SpawnOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { createWriteStream, type WriteStream } from "node:fs";
+import type { Writable } from "node:stream";
+import { RotatingLog } from "./rotating-log.js";
 import { access, appendFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { Readable } from "node:stream";
@@ -102,7 +103,7 @@ interface SupervisorDependencies {
   now: () => number;
   signalProcessGroup: (pid: number, signal: NodeJS.Signals) => Promise<void>;
   waitForExit: (child: ManagedChild, timeoutMs: number) => Promise<boolean>;
-  closeLog: (log: WriteStream) => Promise<void>;
+  closeLog: (log: Writable) => Promise<void>;
   registerWorkspace: (url: string, workspacePath: string, signal: AbortSignal) => Promise<void>;
   managedRestartPlanExists: (planPath: string) => Promise<boolean>;
   runManagedRestartHelper: (input: {
@@ -126,7 +127,7 @@ interface RunningHarness {
   child: ManagedChild;
   expectedStop: boolean;
   exit: { code: number | null; signal: NodeJS.Signals | null } | null;
-  log: WriteStream;
+  log: Writable;
   logClose: Promise<void> | null;
   startupError: Error | null;
   tail: string;
@@ -441,7 +442,7 @@ export class HarnessProcessSupervisor {
     const port = await this.dependencies.allocatePort();
     signal.throwIfAborted();
     const url = `http://127.0.0.1:${port}/`;
-    const log = createWriteStream(this.config.logPath, { flags: "a", mode: 0o600 });
+    const log = new RotatingLog(this.config.logPath);
     const inheritedEnv = withBundledPackageManagerEnvironment(
       this.config.inheritedEnv ?? process.env,
       this.config.packageManagerBinPath,
@@ -729,7 +730,7 @@ export class HarnessProcessSupervisor {
     chunk: Buffer | string
   ): void {
     const text = chunk.toString();
-    running.log.write(`[${stream}] ${text}`);
+    if (running.log.writableLength < 256 * 1024) running.log.write(`[${stream}] ${text.slice(-64 * 1024)}`);
     running.tail = `${running.tail}${text}`.slice(-MAX_TAIL_LENGTH);
   }
 
@@ -783,7 +784,7 @@ export class HarnessProcessSupervisor {
     event: string,
     details: Record<string, unknown> = {}
   ): void {
-    running.log.write(`[supervisor] ${event} ${JSON.stringify(details)}\n`);
+    if (running.log.writableLength < 256 * 1024) running.log.write(`[supervisor] ${event} ${JSON.stringify(details)}\n`);
   }
 
   private async stopRunningProcess(running: RunningHarness, markExpected: boolean): Promise<void> {
@@ -830,7 +831,12 @@ export class HarnessProcessSupervisor {
 
   private async closeRunningLog(running: RunningHarness): Promise<void> {
     running.logClose ??= this.dependencies.closeLog(running.log);
-    await running.logClose;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      running.logClose.catch(() => undefined),
+      new Promise<void>(resolve => { timer = setTimeout(() => { running.log.destroy(); resolve(); }, 2_000); })
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
   }
 
   private async hasPendingManagedRestartPlan(): Promise<boolean> {
