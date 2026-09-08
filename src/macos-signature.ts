@@ -10,11 +10,16 @@ const requiredMainProcessEntitlements = [
   "com.apple.security.personal-information.location"
 ] as const;
 
-export function validateMacCodeSigningDetails(output: string): MacCodeSigningDetails {
+export function validateMacCodeSigningDetails(output: string, expected: {
+  identifier?: string;
+  teamIdentifier?: string;
+  distribution?: boolean;
+} = {}): MacCodeSigningDetails {
   const identifier = detailValue(output, "Identifier");
-  if (identifier !== "com.senx.arkme.harness") {
+  const expectedIdentifier = expected.identifier ?? "com.senx.arkme.harness";
+  if (identifier !== expectedIdentifier) {
     throw new Error(
-      `Signed Harness must use identifier com.senx.arkme.harness; received ${identifier ?? "none"}`
+      `Signed Harness must use identifier ${expectedIdentifier}; received ${identifier ?? "none"}`
     );
   }
 
@@ -25,6 +30,17 @@ export function validateMacCodeSigningDetails(output: string): MacCodeSigningDet
     || teamIdentifier === "not set"
   ) {
     throw new Error("Harness requires a valid Apple code-signing identity with a TeamIdentifier");
+  }
+  if (expected.teamIdentifier !== undefined && teamIdentifier !== expected.teamIdentifier) {
+    throw new Error(`Signed Harness team must be ${expected.teamIdentifier}; received ${teamIdentifier}`);
+  }
+  if (expected.distribution) {
+    if (!detailValue(output, "Authority")?.startsWith("Developer ID Application:")) {
+      throw new Error("Distribution requires a Developer ID Application certificate");
+    }
+    if (!/^CodeDirectory .*flags=0x[0-9a-f]+\([^)]*\bruntime\b[^)]*\)/imu.test(output)) {
+      throw new Error("Distribution requires Hardened Runtime in the code signature");
+    }
   }
 
   return { identifier, teamIdentifier };

@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { parseArgs } from "node:util";
 import { parse } from "yaml";
 import {
   validateMacCodeSigningDetails,
@@ -9,7 +10,16 @@ import {
   validateMacMainProcessEntitlements
 } from "../dist/macos-signature.js";
 
-const appPath = path.resolve(process.argv[2] ?? "release/mac-arm64/arkme.app");
+const { values, positionals } = parseArgs({
+  allowPositionals: true,
+  options: {
+    "app-id": { type: "string", default: "com.senx.arkme.harness" },
+    "team-id": { type: "string" },
+    distribution: { type: "boolean", default: false }
+  }
+});
+if (positionals.length > 1) throw new Error("Expected one macOS application path");
+const appPath = path.resolve(positionals[0] ?? "release/mac-arm64/arkme.app");
 const { assertAppUpdateConfig } = createRequire(import.meta.url)("./ensure-app-update-config.cjs");
 assertAppUpdateConfig(parse(await readFile(path.join(appPath, "Contents", "Resources", "app-update.yml"), "utf8")));
 const appExecutable = path.join(
@@ -51,7 +61,11 @@ if (inspection.error !== undefined || inspection.status !== 0) {
   throw new Error(`Unable to inspect Harness macOS signature: ${detail || inspection.error?.message}`);
 }
 
-const details = validateMacCodeSigningDetails(`${inspection.stdout ?? ""}${inspection.stderr ?? ""}`);
+const details = validateMacCodeSigningDetails(`${inspection.stdout ?? ""}${inspection.stderr ?? ""}`, {
+  identifier: values["app-id"],
+  ...(values["team-id"] ? { teamIdentifier: values["team-id"] } : {}),
+  distribution: values.distribution
+});
 const entitlementInspection = spawnSync(
   "/usr/bin/codesign",
   ["-d", "--entitlements", ":-", appPath],

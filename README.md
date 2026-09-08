@@ -101,15 +101,55 @@ pnpm run dist:test:linux
 
 测试环境构建使用独立的应用名称、协议和数据目录，输出到 `release-test-dynamic/`，不会覆盖正式应用身份。
 
-#### GitHub Actions 无签名测试构建
+#### GitHub Actions 测试构建
 
-工作流 `构建 Arkme 测试客户端 (无签名)` 在改动推送到 `pre-release` 时运行，包括合并和直接推送；当工作流文件已存在于默认分支 `master` 时，也可以通过 `workflow_dispatch` 手动运行。首次启用时，确保 `pre-release` 分支已包含该工作流文件。
+工作流 `构建 Arkme 测试客户端` 在改动推送到 `pre-release` 时运行，包括合并和直接推送；当工作流文件已存在于默认分支 `master` 时，也可以通过 `workflow_dispatch` 手动运行。首次启用时，确保 `pre-release` 分支已包含该工作流文件。
 
 `macos-15-intel` 构建 Universal DMG 和 ZIP，`windows-2022` 构建 x64 NSIS EXE 和 ZIP。产物作为 GitHub Actions artifact 保留 7 天，命名为 `arkme-test-<platform>-<arch>-<run_number>-<run_attempt>`，可在仓库的 Actions → 对应运行记录 → Artifacts 下载。这些构建沿用现有的 Arkme Test 应用身份和 `https://jotmo.senguo.me` 测试服务；CI 中公开插件依赖使用 HTTPS 传输，同时保留固定 Commit 和锁文件。
 
-该工作流不使用项目签名、公证或 SimplySign，不发布 Release、不上传后端，也不构建运行环境或插件制品。它不执行依赖网络的应用冒烟测试，仅验证应用打包与安装包生成。无签名产物只用于构建验证，不能证明签名分发或安装已经就绪。
+macOS 使用 `electron-builder.ci-mac-test-config.cjs` 构建：以 Developer ID Application 证书签名，开启 Hardened Runtime，提交应用公证并附加票据，然后生成 ZIP 和签名 DMG。DMG 还会单独公证和附加票据，之后重新生成 blockmap 与更新哈希，避免票据改变文件内容后 `latest-mac.yml` 失效。上传前校验应用和 ZIP 中应用的签名、测试 Bundle ID、开发团队、权限、Universal 原生模块架构、公证票据及 Gatekeeper 状态，同时校验 DMG 和更新文件。Apple 处理公证的时间计入任务的 60 分钟超时。
+
+Windows 继续使用无签名配置，不调用 SimplySign。两平台仍并行执行，macOS 凭据缺失、签名或公证失败不会取消 Windows 任务。工作流不发布 Release、不上传后端，也不构建运行环境或插件制品，不运行依赖远端 Runtime 下载的启动冒烟测试。
 
 CI 使用 `pnpm install --frozen-lockfile --ignore-scripts` 安装依赖，再显式执行客户端的 `postinstall`，完成 Electron 安装和客户端原生模块重建。这样首次安装也不会隐式执行 Git 插件的 `prepare` 构建；需要构建插件或 Harness 运行环境时，应使用各自的构建流程。
+
+##### macOS 签名与公证 Secrets
+
+在客户端仓库 **Settings → Secrets and variables → Actions → New repository secret** 中配置以下值。证书和私钥以 Base64 文本保存到 Actions Secrets，不作为文件提交到 Git 仓库。签名证书应从原构建 Mac 的“钥匙串访问”导出为包含私钥的 `.p12`，选择 **Developer ID Application**，不是 Apple Development 或 App Store 证书。
+
+| Secret | 内容 |
+| --- | --- |
+| `MAC_CSC_LINK` | `.p12` 文件的 Base64 文本 |
+| `MAC_CSC_KEY_PASSWORD` | 导出 `.p12` 时设置的密码 |
+| `APPLE_TEAM_ID` | 签名证书对应的 10 位开发团队 ID，用于公证和校验证书归属 |
+| `APPLE_ID` | 已有公证账号的 Apple ID 邮箱，账号需有对应开发团队的公证权限 |
+| `APPLE_APP_SPECIFIC_PASSWORD` | 该 Apple ID 的 App 专用密码，不是 Apple ID 登录密码 |
+
+当前使用 **Apple ID + App 专用密码 + Team ID** 公证，配置上面 5 个 Secrets 即可，无需生成 `.p8` 或申请团队 API 密钥。
+
+以后如需切换为 App Store Connect **团队 API 密钥**，保留前 3 个签名相关 Secrets，删除 `APPLE_ID` 和 `APPLE_APP_SPECIFIC_PASSWORD`，再配置下列 3 个 Secrets。两套公证凭据不能同时配置；当前 Apple ID 方式下应不配置下列值：
+
+| Secret | 内容 |
+| --- | --- |
+| `APPLE_API_KEY_BASE64` | `.p8` 私钥文件的 Base64 文本 |
+| `APPLE_API_KEY_ID` | API Key ID |
+| `APPLE_API_ISSUER` | API Issuer ID |
+
+在持有凭据文件的 Mac 上，可用 GitHub CLI 直接写入 Secrets，文件内容不需要粘贴到聊天或写入仓库：
+
+```bash
+base64 -i /绝对路径/DeveloperIDApplication.p12 | gh secret set MAC_CSC_LINK --repo arkme-senx/arkme-dsh-client
+gh secret set MAC_CSC_KEY_PASSWORD --repo arkme-senx/arkme-dsh-client
+gh secret set APPLE_TEAM_ID --repo arkme-senx/arkme-dsh-client
+gh secret set APPLE_ID --repo arkme-senx/arkme-dsh-client
+gh secret set APPLE_APP_SPECIFIC_PASSWORD --repo arkme-senx/arkme-dsh-client
+```
+
+不带输入管道的命令按提示输入对应值。工作流会在安装依赖前检查凭据完整性；证书导入、认证和公证必须实际成功才能上传 macOS 产物，不会自动退回无签名构建。证书由 electron-builder 导入临时钥匙串；证书、钥匙串和 `.p8` 均限制在本次构建专属的 runner 临时目录，成功、失败及证书导入中断的路径均会执行清理，runner 销毁时也不会保留。凭据仅注入 macOS 凭据检查及签名步骤，不进入依赖缓存或 Artifact。
+
+构建子进程的标准输出、标准错误及失败信息在写入日志前统一脱敏，覆盖上述 Secrets 的原值、JSON 转义形式及 API 私钥正文；长时间构建按完整行处理流式输出，避免凭据跨输出分块时漏遮盖。工作流在 Node 启动前清空 `DEBUG`、`NODE_DEBUG` 和 `NODE_DEBUG_NATIVE`，脚本也拒绝在这些调试变量非空的父进程中执行签名命令，避免 Node 自身打印包含凭据的子进程环境。日志可保留构建进度、公证提交 ID 和错误原因，凭据值显示为 `[REDACTED]`，并由 GitHub Actions 的 Secret 遮盖机制再次处理。
+
+对应当前锁定的 electron-builder 26，Apple ID 公证方式直接使用上述 3 个 `APPLE_*` 环境变量；如切换为 API 密钥，公证步骤使用 `.p8` 临时文件路径作为 `APPLE_API_KEY`。可参考 [macOS 签名文档](https://www.electron.build/v26/docs/features/code-signing/code-signing-mac/) 和 [公证文档](https://www.electron.build/v26/docs/features/code-signing/notarization/)。
 
 在 macOS 上，还可以构建直接使用本地插件仓库的未签名测试应用：
 

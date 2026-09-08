@@ -6,6 +6,39 @@ import {
 } from "../src/macos-signature.js";
 
 describe("validateMacCodeSigningDetails", () => {
+  const signedTestApp = `
+Identifier=cc.jiwo.arkme.test
+Authority=Developer ID Application: Jotmo (ABCDE12345)
+TeamIdentifier=ABCDE12345
+CodeDirectory v=20500 size=123 flags=0x10000(runtime) hashes=7+7 location=embedded
+`;
+
+  it("accepts the test identity only when explicitly requested", () => {
+    expect(() => validateMacCodeSigningDetails(signedTestApp)).toThrow(/com\.senx\.arkme\.harness/);
+    expect(validateMacCodeSigningDetails(signedTestApp, {
+      identifier: "cc.jiwo.arkme.test",
+      teamIdentifier: "ABCDE12345",
+      distribution: true
+    })).toEqual({ identifier: "cc.jiwo.arkme.test", teamIdentifier: "ABCDE12345" });
+  });
+
+  it("rejects a distribution signature from a different team", () => {
+    expect(() => validateMacCodeSigningDetails(signedTestApp, {
+      identifier: "cc.jiwo.arkme.test",
+      teamIdentifier: "OTHER12345",
+      distribution: true
+    })).toThrow(/team/i);
+  });
+
+  it.each([
+    ["development certificate", signedTestApp.replace("Developer ID Application", "Apple Development")],
+    ["missing Hardened Runtime", signedTestApp.replace("0x10000(runtime)", "0x0(none)")]
+  ])("rejects %s for CI distribution", (_name, output) => {
+    expect(() => validateMacCodeSigningDetails(output, {
+      identifier: "cc.jiwo.arkme.test", distribution: true
+    })).toThrow(/Developer ID|Hardened Runtime/);
+  });
+
   it("accepts a team-signed Harness bundle", () => {
     expect(validateMacCodeSigningDetails(`
 Identifier=com.senx.arkme.harness

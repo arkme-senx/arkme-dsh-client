@@ -1,4 +1,4 @@
-name: 构建 Arkme 测试客户端 (无签名)
+name: 构建 Arkme 测试客户端
 
 on:
   push:
@@ -57,6 +57,23 @@ jobs:
           cache: true
           cache_dependency_path: pnpm-lock.yaml
 
+      - name: 检查 macOS 签名和公证凭据
+        if: matrix.platform == 'macos'
+        env:
+          # Disable parent-process debug logging before Node can spawn with Secrets.
+          DEBUG: ''
+          NODE_DEBUG: ''
+          NODE_DEBUG_NATIVE: ''
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: node scripts/macos-ci-signing.cjs
+
       - name: 使用 HTTPS 获取公开 GitHub 依赖
         run: |
           git config --global --add url."https://github.com/".insteadOf 'ssh://git@github.com/'
@@ -73,12 +90,29 @@ jobs:
       - name: 编译测试环境客户端
         run: pnpm run build
 
-      - name: 生成无签名安装包
+      - name: 生成 Windows 无签名安装包
+        if: matrix.platform == 'windows'
         run: >-
           pnpm exec electron-builder
           --config electron-builder.ci-test-config.cjs
           ${{ matrix.builder-args }}
           --publish never
+
+      - name: 构建、签名、公证并验证 macOS 安装包
+        if: matrix.platform == 'macos'
+        env:
+          DEBUG: ''
+          NODE_DEBUG: ''
+          NODE_DEBUG_NATIVE: ''
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: node scripts/build-macos-ci.cjs
 
       - name: 检查安装产物和包内测试配置
         env:
