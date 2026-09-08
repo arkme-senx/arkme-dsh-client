@@ -63,7 +63,12 @@ jobs:
           git config --global --add url."https://github.com/".insteadOf 'git@github.com:'
 
       - name: 安装锁定依赖
-        run: pnpm install --frozen-lockfile
+        # The shell does not bundle the Git plugin/runtime. Its prepare hook
+        # rebuilds plugin declarations in pnpm's temporary store on a cache miss.
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: 初始化 Electron 和客户端原生依赖
+        run: pnpm run postinstall
 
       - name: 编译测试环境客户端
         run: pnpm run build

@@ -109,6 +109,8 @@ pnpm run dist:test:linux
 
 该工作流不使用项目签名、公证或 SimplySign，不发布 Release、不上传后端，也不构建运行环境或插件制品。它不执行依赖网络的应用冒烟测试，仅验证应用打包与安装包生成。无签名产物只用于构建验证，不能证明签名分发或安装已经就绪。
 
+CI 使用 `pnpm install --frozen-lockfile --ignore-scripts` 安装依赖，再显式执行客户端的 `postinstall`，完成 Electron 安装和客户端原生模块重建。这样首次安装也不会隐式执行 Git 插件的 `prepare` 构建；需要构建插件或 Harness 运行环境时，应使用各自的构建流程。
+
 在 macOS 上，还可以构建直接使用本地插件仓库的未签名测试应用：
 
 ```bash
