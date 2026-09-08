@@ -25,6 +25,7 @@ describe("desktop notification permission state", () => {
     expect(desktopNativeNotificationAvailable("darwin", true, "granted")).toBe(true);
     expect(desktopNativeNotificationAvailable("darwin", true, "denied")).toBe(false);
     expect(desktopNativeNotificationAvailable("darwin", true, "granted", false)).toBe(false);
+    expect(desktopNativeNotificationAvailable("win32", true, "default")).toBe(true);
     expect(desktopNativeNotificationAvailable("win32", true, "granted")).toBe(true);
     expect(desktopNativeNotificationAvailable("linux", false, "granted")).toBe(false);
     expect(isMacNotificationsNotAllowedError("未能完成操作。（UNErrorDomain错误1。）")).toBe(true);
