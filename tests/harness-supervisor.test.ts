@@ -1060,3 +1060,16 @@ describe("HarnessProcessSupervisor", () => {
     expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
   });
 });
+
+test("disk log flushing cannot indefinitely block stopping the Harness", async () => {
+  const closeLog = vi.fn(() => new Promise<void>(() => undefined));
+  const { supervisor } = await createHarness({ closeLog });
+  await supervisor.start("/Users/test/project");
+  vi.useFakeTimers();
+  try {
+    const stopping = supervisor.stop("quit");
+    await vi.advanceTimersByTimeAsync(2_001);
+    await stopping;
+    expect(closeLog).toHaveBeenCalledOnce();
+  } finally { vi.useRealTimers(); }
+});

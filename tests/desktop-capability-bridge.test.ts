@@ -40,6 +40,7 @@ async function fixture(options: { timeoutMs?: number; notificationSupported?: bo
     notificationSupported: () => options.notificationSupported ?? true,
     badges: { mode: "count", beginSession, endSession, applySnapshot },
     accountScopes,
+    lifecycle: () => ({ resumeGeneration: 7, suspended: false }),
     randomToken: () => "test_desktop_bridge_token_0123456789abcdef",
     ...(options.timeoutMs === undefined ? {} : { requestTimeoutMs: options.timeoutMs })
   });
@@ -105,6 +106,7 @@ describe("desktop capability bridge", () => {
         sessionId: "session-1",
         capabilities: {
           notificationShow: true,
+          lifecycle: { version: 1 },
           badgeApplySnapshot: { mode: "count" },
           accountScope: { version: 1 }
         }
@@ -242,3 +244,13 @@ function incompleteRequest(bridge: DesktopCapabilityBridge): Promise<{ status: n
     request.flushHeaders();
   });
 }
+
+
+test("exposes bounded lifecycle state only to the active authenticated Host session", async () => {
+  const { bridge } = await fixture();
+  const current = await rpc(bridge, action("lifecycle.get", {}));
+  expect(current.status).toBe(200);
+  expect(current.body.value).toEqual({ resumeGeneration: 7, suspended: false });
+  const stale = await rpc(bridge, action("lifecycle.get", {}, "old-session"));
+  expect(stale.status).toBe(409);
+});

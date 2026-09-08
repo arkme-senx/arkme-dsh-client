@@ -25,6 +25,7 @@ const DEFAULT_MAX_CONNECTIONS = 16;
 
 export type DesktopCapabilityAction =
   | "capabilities.get"
+  | "lifecycle.get"
   | "notification.show"
   | "badge.applySnapshot"
   | "account.scope.attest"
@@ -61,6 +62,7 @@ interface DesktopCapabilityBridgeOptions {
   notificationSupported(): boolean;
   badges: Pick<NativeBadgeCoordinator, "mode" | "beginSession" | "endSession" | "applySnapshot">;
   accountScopes?: DesktopAccountScopePort;
+  lifecycle?: () => { resumeGeneration: number; suspended: boolean };
   randomToken?: () => string;
   maxBodyBytes?: number;
   requestTimeoutMs?: number;
@@ -169,11 +171,19 @@ async function handleRequest(
           sessionId: activeSessionId,
           capabilities: {
             notificationShow: context.notificationSupported(),
+            ...(context.lifecycle === undefined ? {} : { lifecycle: { version: 1 } }),
             badgeApplySnapshot: { mode: context.badges.mode },
             ...(context.accountScopes === undefined ? {} : { accountScope: { version: 1 } })
           }
         }
       });
+      return;
+    }
+
+    if (action.action === "lifecycle.get") {
+      assertExactKeys(action.payload, []);
+      if (context.lifecycle === undefined) throw new BridgeHttpError(501, "unsupported");
+      writeJson(response, 200, { ok: true, value: context.lifecycle() });
       return;
     }
 
@@ -355,6 +365,7 @@ function isLoopbackAddress(address: string | undefined): boolean {
 
 function isDesktopCapabilityAction(value: unknown): value is DesktopCapabilityAction {
   return value === "capabilities.get"
+    || value === "lifecycle.get"
     || value === "notification.show"
     || value === "badge.applySnapshot"
     || value === "account.scope.attest"

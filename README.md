@@ -172,3 +172,9 @@ Arkme 包含两条相互独立的更新链路：
 ## 开源许可
 
 本项目采用 [MIT License](LICENSE) 开源。
+
+### 远控连接与系统恢复
+
+桌面通过现有受认证的 Host bridge 提供 `lifecycle.get`，返回进程内 `resumeGeneration` 与 `suspended`。它只服务当前 Harness session；旧 session 请求被拒绝。系统唤醒不重启正在执行任务的 Harness，远控插件自行使过期连接失效并恢复。
+
+Harness 输出按 5MiB 轮转，最多保留当前日志及两个历史文件；输出写入积压超过 256KiB 时丢弃额外诊断输出，仍保留内存中的有限故障 tail。插件断线不触发整个 Harness 重启。
