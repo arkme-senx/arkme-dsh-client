@@ -22,6 +22,7 @@ export interface NativeBadgeAdapter {
 export class NativeBadgeCoordinator {
   private latest: NativeBadgeSnapshot | undefined;
   private lastApplied: NativeBadgeSnapshot | undefined;
+  private directoryCount: number | undefined;
 
   constructor(private readonly adapter: NativeBadgeAdapter) {}
 
@@ -35,12 +36,14 @@ export class NativeBadgeCoordinator {
     // visible indefinitely.
     this.latest = undefined;
     this.lastApplied = undefined;
+    this.directoryCount = undefined;
     return this.clearNative();
   }
 
   endSession(): NativeBadgeApplyResult {
     this.latest = undefined;
     this.lastApplied = undefined;
+    this.directoryCount = undefined;
     return this.clearNative();
   }
 
@@ -62,6 +65,9 @@ export class NativeBadgeCoordinator {
     // or a recreated taskbar window can apply it. Only successfully applied
     // snapshots are deduplicated.
     this.latest = snapshot;
+    // The mounted directory owns presentation; Host snapshots remain the fallback
+    // for clients/plugins that do not publish their visible conversation count.
+    if (this.directoryCount !== undefined) return this.applyCount(this.directoryCount);
     const result = this.applyCount(snapshot.count);
     if (result.accepted) this.lastApplied = snapshot;
     return result;
@@ -69,7 +75,7 @@ export class NativeBadgeCoordinator {
 
   replay(): NativeBadgeApplyResult {
     if (this.adapter.mode === "unsupported") return { accepted: false, outcome: "unsupported" };
-    const result = this.applyCount(this.latest?.count ?? 0);
+    const result = this.applyCount(this.directoryCount ?? this.latest?.count ?? 0);
     if (result.accepted && this.latest !== undefined) this.lastApplied = this.latest;
     return result;
   }
@@ -77,6 +83,21 @@ export class NativeBadgeCoordinator {
   clearNative(): NativeBadgeApplyResult {
     if (this.adapter.mode === "unsupported") return { accepted: false, outcome: "unsupported" };
     return this.applyCount(0);
+  }
+
+  applyDirectoryCount(count: unknown): NativeBadgeApplyResult {
+    if (!nonNegativeSafeInteger(count) || count > 999_999) return { accepted: false, outcome: "native-failed" };
+    if (this.adapter.mode === "unsupported") return { accepted: false, outcome: "unsupported" };
+    this.directoryCount = count;
+    return this.applyCount(count);
+  }
+
+  releaseDirectory(): NativeBadgeApplyResult {
+    // A loading/crashed renderer has no visible rows. Do not revive the Host
+    // fallback during the gap; the next document supplies its own count.
+    if (this.directoryCount !== undefined) this.directoryCount = 0;
+    this.lastApplied = undefined;
+    return this.clearNative();
   }
 
   private applyCount(count: number): NativeBadgeApplyResult {

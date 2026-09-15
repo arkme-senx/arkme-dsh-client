@@ -1229,6 +1229,9 @@ function isCurrentAppUpdateSender(event: Electron.IpcMainInvokeEvent): boolean {
 }
 
 const readDesktopDevice = createDesktopDeviceReader();
+ipcMain.handle("arkme-desktop:directory-badge", (event, count: unknown) => (
+  isCurrentAppUpdateSender(event) && nativeBadges.applyDirectoryCount(count).accepted
+));
 ipcMain.handle("arkme-desktop:device-snapshot", event => (
   isCurrentAppUpdateSender(event) ? readDesktopDevice() : null
 ));
@@ -1308,6 +1311,7 @@ function createMainWindow(): void {
   mainWindow.webContents.on("did-start-navigation", (_event, url, isInPlace, isMainFrame) => {
     if (!desktopNotificationDocumentNavigationInvalidatesConsumer(isInPlace, isMainFrame)) return;
     logDiagnostic("did-start-main-frame-navigation", { url });
+    nativeBadges.releaseDirectory();
     desktopNotifications.markHarnessLoading();
   });
   mainWindow.webContents.on("did-finish-load", () => {
@@ -1326,12 +1330,14 @@ function createMainWindow(): void {
     logDiagnostic("preload-error", { preloadPath, error: error.stack ?? error.message });
   });
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    nativeBadges.releaseDirectory();
     logDiagnostic("render-process-gone", details);
   });
   mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
     logDiagnostic("renderer-console", { level, message, line, sourceId });
   });
   mainWindow.on("closed", () => {
+    nativeBadges.releaseDirectory();
     mainWindow = null;
     renderRuntimeProgressPage = null;
   });
