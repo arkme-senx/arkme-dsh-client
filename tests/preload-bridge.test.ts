@@ -613,3 +613,15 @@ describe("desktop location preload", () => {
     });
   });
 });
+
+
+describe("desktop device preload", () => {
+  it("exposes the device snapshot through the bounded main-process reader", async () => {
+    const { exposed, invokeCalls } = await executePreload("test");
+    const desktop = exposed.arkmeDesktop as { device: { snapshot(): Promise<unknown> } };
+    await desktop.device.snapshot();
+    expect(invokeCalls).toContainEqual({ channel: "arkme-desktop:device-snapshot", args: [] });
+    const main = await readFile(path.join(process.cwd(), "src", "main.ts"), "utf8");
+    expect(main).toContain('isCurrentAppUpdateSender(event) ? readDesktopDevice() : null');
+  });
+});
