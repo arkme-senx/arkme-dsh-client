@@ -87,7 +87,7 @@ macOS 和 Windows 正式构建需要可用的代码签名环境。Linux 构建�
 
 发布前运行 `node scripts/verify-app-update-metadata.mjs --platform darwin --release-dir <产物目录> --update-feed-url <HTTPS更新目录>`（Windows 使用 `--platform win32`），校验更新 YAML 的版本、实际更新包的 `vc{versionCode}` 文件名、文件大小和 SHA-512。也可通过 `ARKME_UPDATE_FEED_URL` 指定更新目录；仅本地校验相对路径 YAML 时可省略目录参数。必须先把 YAML、安装包和 blockmap 一起上传到不可变目录，再把该目录（以 `/` 结尾）写入发布记录的 `update_feed_url` 并发布 stable。
 
-`download_url` 只用于官网及客户端手动下载安装，可以指向 DMG、DMG 的包装文件等；它不参与 APP 内更新包选择或一致性校验。APP 内更新只从 `update_feed_url` 的 YAML 选择平台安装包（macOS ZIP / Windows NSIS EXE），校验目录边界、版本身份、Version Code、大小、SHA-512，并由 updater 验证下载内容和平台签名。旧的 `--download-url` / `ARKME_UPDATE_DOWNLOAD_URL` 发布校验参数已移除，流水线应改用更新目录参数。检查失败后的重试应重新检查，不能直接下载覆盖最初的错误。
+`download_url` 可以指向供用户下载安装的 DMG、DMG 的包装文件等；客户端不读取该字段，官网入口固定打开 `https://jiwo.cc`。APP 内更新只从 `update_feed_url` 的 YAML 选择平台安装包（macOS ZIP / Windows NSIS EXE），校验目录边界、版本身份、Version Code、大小、SHA-512，并由 updater 验证下载内容和平台签名。旧的 `--download-url` / `ARKME_UPDATE_DOWNLOAD_URL` 发布校验参数已移除，流水线应改用更新目录参数。检查失败后的重试应重新检查，不能直接下载覆盖最初的错误。
 
 所有正式应用包都只包含 Electron 外壳。打包冒烟测试会验证应用资源中没有内置 Harness、Arkme 插件或独立 Node.js 运行时，并使用全新的应用数据目录验证动态运行环境安装与启动流程。
 
@@ -127,7 +127,7 @@ ARKME_RUNTIME_BUILD_ID=example-build-1 pnpm run build:runtime:electron-harness
 
 Arkme 包含两条相互独立的更新链路：
 
-- **桌面客户端更新**：检查新的平台安装包，下载完成后由用户打开或安装。
+- **桌面客户端更新**：每次启动检查最新 Version Code；发现新版本后先校验并复用下载缓存，无有效缓存时自动在后台下载，下载完成后由用户点击「重启并安装」。仅检测到新版本时显示顶部提示，关闭后不保留悬浮入口，可从设置页重新打开。Linux 或无法自动更新时通过「下载最新版本」打开官网 `https://jiwo.cc`。
 - **运行环境更新**：同时管理 Harness 和必需的 Arkme 插件。更新会先下载到暂存目录，通过清单、平台、版本、文件大小、SHA-256 和关键路径校验后，才会在下次启动时启用。
 
 新的运行环境会经过启动、工作区注册和插件健康检查。验证失败时，应用会回退到上一份可用环境；确定损坏或身份不一致的制品会被隔离，避免重复启动。稳定环境损坏时，应用会尝试从本地副本恢复或重新下载。

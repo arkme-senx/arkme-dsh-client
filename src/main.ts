@@ -1,3 +1,10 @@
+import { harnessCookieHeader, type HarnessAuthSession } from "./harness-auth-session.js";
+import { HarnessCookieInstaller } from "./harness-cookie-install.js";
+import { HarnessPageReadiness, localHarnessMountFailure, settleHarnessPageRendering } from "./harness-page-ready.js";
+import { assertPreviousHarnessExited } from "./harness-process-lifetime.js";
+import { RuntimeDataTransactionStore, type RuntimeDataTransaction } from "./runtime-data-transaction.js";
+import { commitRuntimeUpgrade, recoverRuntimeUpgrade, restoreFailedRuntimeTrial } from "./runtime-upgrade.js";
+import { RUNTIME_CACHE_EPOCH, readPreviousRuntimeBaseline, resolveRuntimeCacheRoot } from "./runtime/cache-epoch.js";
 import { createDesktopDeviceReader } from "./desktop-device.js";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -41,6 +48,7 @@ import {
 } from "./deep-link.js";
 import { DesktopController } from "./desktop-controller.js";
 import { resolveArkmePreloadPath } from "./desktop-capabilities.js";
+import { AppUpdateNoticeCoordinator, registerAppUpdateNoticeIpc, installAppUpdateNoticeStyles } from "./app-update-notice.js";
 import { createElectronAppUpdater } from "./electron-app-updater.js";
 import {
   startDesktopCapabilityBridge,
@@ -120,7 +128,6 @@ import {
   ensureDefaultWorkspace,
   loadLastWorkspace,
   resolveArkmeAppDataPath,
-  resolveAppUpdateDownloadsPath,
   resolveAppUpdateInstallReceiptPath,
   resolveUserDataPath,
   saveLastWorkspace
@@ -134,6 +141,7 @@ import {
   verifyElectronRuntimePluginHealth
 } from "./runtime/client.js";
 import { installElectronRuntimeRelease } from "./runtime/installer.js";
+import { RuntimeNetworkWaitingError } from "./runtime/download.js";
 import {
   BadRuntimeReleaseBlockedError,
   ElectronRuntimeManager,
@@ -148,7 +156,8 @@ import {
 import { readPackagedRuntimeServiceConfig } from "./runtime/service-config.js";
 import {
   isDeterministicRuntimeArtifactError,
-  runtimeArtifactFailureCode
+  runtimeArtifactFailureCode,
+  RuntimePluginReadinessError
 } from "./runtime/errors.js";
 import {
   AUTOMATIC_UPDATE_CHECK_INTERVAL_MS,
@@ -214,6 +223,14 @@ logDiagnostic("process-start", {
 });
 
 let mainWindow: BrowserWindow | null = null;
+let harnessAuthSession: HarnessAuthSession | null = null;
+let harnessCookieInstaller: HarnessCookieInstaller | null = null;
+const harnessPageReadiness = new HarnessPageReadiness();
+let holdCandidateNavigation = false;
+let deferredAccountScopeRelaunch = false;
+let runtimeDataStore: RuntimeDataTransactionStore | null = null;
+let runtimeRecoveryRequired = false;
+let bufferedHarnessReadyState: Extract<HarnessState, {kind: "ready"}> | null = null;
 let controller: DesktopController | null = null;
 let activeHarnessOrigin: string | null = null;
 let activeHarnessVersion: string | undefined;
@@ -325,6 +342,27 @@ const nativeBadges = new NativeBadgeCoordinator(createDesktopNativeBadgeAdapter<
   windowsDescription: "Arkme 有未读消息"
 }));
 
+const appUpdateNotices = new AppUpdateNoticeCoordinator({
+  statusPageUrl,
+  getHarnessOrigin: () => activeHarnessOrigin,
+  getWindow: () => {
+    const window = mainWindow;
+    if (window === null || window.isDestroyed() || window.webContents.isDestroyed()) return null;
+    return {
+      webContentsId: window.webContents.id,
+      getCurrentUrl: () => window.webContents.getURL(),
+      send: (channel, snapshot) => { if (!window.webContents.isDestroyed()) window.webContents.send(channel, snapshot); }
+    };
+  },
+  openExternal: async url => { await shell.openExternal(url); }
+});
+registerAppUpdateNoticeIpc({
+  handle(channel, handler) { ipcMain.handle(channel, event => handler(appUpdateSender(event))); }
+}, appUpdateNotices);
+ipcMain.on("arkme-app-update:app-version", event => {
+  event.returnValue = appUpdateNotices.snapshot(appUpdateSender(event)) === null ? "" : app.getVersion();
+});
+
 const runtimeUpdateNotices = new RuntimeUpdateNoticeCoordinator({
   getHarnessOrigin: () => activeHarnessOrigin,
   getWindow: runtimeUpdateNoticeWindow,
@@ -347,7 +385,10 @@ const runtimeUpdateNotices = new RuntimeUpdateNoticeCoordinator({
 
 registerRuntimeUpdateNoticeIpc({
   handle(channel, handler) {
-    ipcMain.handle(channel, (event, value: unknown) => handler({ senderFrame: event.senderFrame }, value));
+    ipcMain.handle(channel, (event, value: unknown) => {
+      if (channel === "arkme:runtime-update-notice:restart" && appUpdateNotices.isInstalling()) return false;
+      return handler({ senderFrame: event.senderFrame }, value);
+    });
   }
 }, runtimeUpdateNotices);
 
@@ -446,6 +487,12 @@ ipcMain.on("arkme-desktop:attention-capabilities", event => {
     badgeMode: nativeBadges.mode
   };
 });
+ipcMain.on("arkme-runtime:page-ready-nonce", event => {
+  event.returnValue = harnessPageReadiness.nonce(appUpdateSender(event));
+});
+ipcMain.on("arkme-runtime:page-ready", (event, nonce: unknown) => {
+  harnessPageReadiness.accept(appUpdateSender(event), nonce);
+});
 ipcMain.on("arkme-runtime:harness-version", event => {
   event.returnValue = activeHarnessVersion ?? null;
 });
@@ -455,7 +502,7 @@ if (!hasSingleInstanceLock) {
   app.quit();
 } else {
   registerApplicationLifecycle();
-  void app.whenReady().then(bootstrap).catch(showFatalBootstrapError);
+  void app.whenReady().then(() => bootstrap()).catch(showFatalBootstrapError);
 }
 
 function registerApplicationLifecycle(): void {
@@ -513,6 +560,7 @@ function registerApplicationLifecycle(): void {
 
 async function stopHarnessForExit(): Promise<void> {
   await controller?.stop("quit");
+  await harnessCookieInstaller?.idle();
 }
 
 async function closeDirectoryPickerForExit(): Promise<void> {
@@ -570,7 +618,7 @@ async function deliverPendingDeepLink(): Promise<void> {
   focusMainWindow();
 }
 
-async function bootstrap(): Promise<void> {
+async function bootstrap(manualRetry = false): Promise<void> {
   logDiagnostic("bootstrap-start");
   if (!lifecycleHooksInstalled) {
     lifecycleHooksInstalled = true;
@@ -591,14 +639,16 @@ async function bootstrap(): Promise<void> {
     diagnostic: (event, error) => { logDiagnostic(`desktop-location-${event}`, error); }
   });
   if (mainWindow === null) createMainWindow();
-  if (appUpdateController === null) await installAppUpdateController();
+  const currentVersionCode = await readAppVersionCode(path.join(app.getAppPath(), "package.json"));
+  if (appUpdateController === null) await installAppUpdateController(currentVersionCode);
   checkAppUpdateIfStale("startup");
   if (!nativeBadgeInitialized) {
     nativeBadgeInitialized = true;
     nativeBadges.clearNative();
   }
   const userDataPath = app.getPath("userData");
-  let runtime = await resolveLaunchRuntime(userDataPath);
+  await assertPreviousHarnessExited(path.join(userDataPath, "runtime-process.json"));
+  let runtime = await resolveLaunchRuntime(userDataPath, currentVersionCode, manualRetry);
   await configureAccountScopeForRuntime(userDataPath, runtime);
   lastHarnessReadyState = null;
   if (desktopCapabilityBridge === null) {
@@ -628,10 +678,12 @@ async function configureAccountScopeForRuntime(
   userDataPath: string,
   runtime: LaunchRuntime
 ): Promise<void> {
-  const store = new DshAccountScopeStore(userDataPath);
+  const store = new DshAccountScopeStore(userDataPath, undefined, async (source, target) => {
+    await runtimeDataStore?.transferCommittedIdentity(source, target);
+  });
   if (await arkmePluginSupportsDesktopAccountScope(runtime.arkmePluginPath)) {
     accountScopeStore = store;
-    activeAccountScope = await store.launch();
+    activeAccountScope = await store.launch({deferLegacyMigration: runtime.runtimeManaged});
     accountScopeReady = false;
     return;
   }
@@ -650,7 +702,9 @@ async function attestDesktopAccountScope(
   if (accountScopeTransition !== null) throw new Error("DSH account scope transition is already active");
   const store = accountScopeStore;
   if (store === null) throw new Error("DSH account scope store is unavailable");
-  const result = await store.reconcile(identity);
+  // Reconciliation only plans legacy moves. The stopped-process relaunch owns
+  // the actual rename, including recovery after commit but before migration.
+  const result = await store.reconcile(identity, {deferLegacyMigration: true});
   activeAccountScope = result.launch;
   accountScopeReady = result.status === "ready";
   if (accountScopeReady) {
@@ -683,7 +737,7 @@ async function commitDesktopAccountScope(
   if (transition === null || transition.ref !== transitionRef || store === null) {
     throw new Error("DSH account scope transition is stale");
   }
-  const result = await store.reconcile(transition.identity);
+  const result = await store.reconcile(transition.identity, {deferLegacyMigration: true});
   accountScopeTransition = null;
   activeAccountScope = result.launch;
   accountScopeReady = result.status === "ready";
@@ -722,6 +776,12 @@ async function renderAccountScopeWaiting(): Promise<void> {
 }
 
 function scheduleAccountScopeRelaunch(): void {
+  // Attestation may register an account during the trial, but moving its data
+  // directory must wait until the verified runtime and snapshot commit together.
+  if (holdCandidateNavigation) {
+    deferredAccountScopeRelaunch = true;
+    return;
+  }
   if (accountScopeRelaunchScheduled) return;
   accountScopeRelaunchScheduled = true;
   setTimeout(() => {
@@ -833,39 +893,87 @@ async function launchHarnessRuntime(
 ): Promise<LaunchRuntime> {
   let runtime = initialRuntime;
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    const initialAccountScope = activeAccountScope;
     let profileTransaction: RuntimeManagedProfileTransaction | undefined;
+    let dataTransaction: RuntimeDataTransaction | undefined;
     let candidateCompleted = false;
+    holdCandidateNavigation = runtime.release?.probation === true
+      || (runtime.runtimeManaged && paths.accountScopeRequired && paths.runtimeScopeRef === "web:legacy");
+    bufferedHarnessReadyState = null;
+    deferredAccountScopeRelaunch = false;
     try {
+      if (runtime.release !== undefined) {
+        if (runtimeDataStore === null) throw new Error("Runtime data transaction store unavailable");
+        dataTransaction = await runtimeDataStore.begin({
+          dshHome: paths.dshHome,
+          releaseId: runtime.release.releaseId,
+          harnessIdentity: runtime.release.manifest.artifacts.harness.sha256,
+          registry: [path.join(paths.userDataPath, "dsh-account-scopes.json"), paths.settingsPath],
+          allowHarnessTransition: runtime.release.probation
+        });
+        holdCandidateNavigation ||= dataTransaction !== undefined;
+      }
       await initializeHarnessRuntime(
         runtime,
         paths,
         transaction => { profileTransaction = transaction; }
       );
-      if (runtime.release?.probation === true) {
-        const origin = await waitForHarnessOrigin();
+      if (holdCandidateNavigation && runtime.release !== undefined) {
+        const authenticated = harnessAuthSession;
+        if (authenticated === null || authenticated.signal.aborted) throw new Error("Harness authentication unavailable");
         await verifyElectronRuntimePluginHealth(
-          origin,
-          runtime.release.manifest.artifacts.requiredPlugin.version
+          authenticated.url,
+          runtime.release.manifest.artifacts.requiredPlugin.version,
+          fetch,
+          {headers: {cookie: harnessCookieHeader(authenticated)}, signal: authenticated.signal}
         );
+        await validateCandidateHarnessPage(runtime, authenticated);
       }
-      if (runtime.release?.probation === true) {
-        await runtimeManager?.completeCandidate();
-        candidateCompleted = true;
-        logDiagnostic("runtime-candidate-complete", { releaseId: runtime.release.releaseId });
-      }
-      if (profileTransaction !== undefined) {
+      const commitProfile = async () => {
+        if (profileTransaction === undefined) return;
         await commitRuntimeManagedProfileTransaction(profileTransaction);
         profileTransaction = undefined;
+      };
+      const commitRelease = async () => {
+        if (runtime.release?.probation !== true) return;
+        if (runtimeManager === null) throw new Error("Runtime manager unavailable");
+        await runtimeManager.completeCandidate();
+        candidateCompleted = true;
+        logDiagnostic("runtime-candidate-complete", { releaseId: runtime.release.releaseId });
+      };
+      if (dataTransaction !== undefined) {
+        await commitRuntimeUpgrade(dataTransaction, {commitProfile, commitRelease});
+      } else {
+        await commitProfile();
+        await commitRelease();
       }
+      if (runtime.release?.probation === true) {
+        runtime = launchRuntimeFromRelease({...runtime.release, probation: false});
+      }
+      await releaseCandidateHarnessNavigation();
+      runtimeRecoveryRequired = false;
       return runtime;
     } catch (error) {
-      await controller?.stop("failure").catch(() => undefined);
-      controller = null;
+      holdCandidateNavigation = false;
+      bufferedHarnessReadyState = null;
+      deferredAccountScopeRelaunch = false;
+      runtimeRecoveryRequired = true;
       activeHarnessOrigin = null;
-      if (profileTransaction !== undefined) {
-        await rollbackRuntimeManagedProfileTransaction(profileTransaction);
-        profileTransaction = undefined;
-      }
+      const restored = await restoreFailedRuntimeTrial(dataTransaction, {
+        stopHarness: async () => {
+          await controller?.stop("failure");
+          controller = null;
+        },
+        rollbackProfile: async () => {
+          if (profileTransaction === undefined) return;
+          await rollbackRuntimeManagedProfileTransaction(profileTransaction);
+          profileTransaction = undefined;
+        }
+      });
+      if (!restored) throw error;
+      activeAccountScope = initialAccountScope;
+      accountScopeTransition = null;
+      accountScopeReady = accountScopeStore === null;
       if (runtime.release?.probation !== true || runtimeManager === null) throw error;
       if (candidateCompleted) throw error;
       const failedReleaseId = runtime.release.releaseId;
@@ -877,9 +985,9 @@ async function launchHarnessRuntime(
           reason
         })
         : await runtimeManager.rollbackCandidate({
-          phase: "unknown",
-          scope: "unknown",
-          code: "RUNTIME_START_FAILED",
+          phase: error instanceof RuntimePluginReadinessError ? "plugin-health" : "unknown",
+          scope: error instanceof RuntimePluginReadinessError ? "artifact" : "unknown",
+          code: error instanceof RuntimePluginReadinessError ? error.code : "RUNTIME_START_FAILED",
           reason
         });
       if (fallback === undefined) {
@@ -906,7 +1014,7 @@ function finishRuntimeBootstrap(harnessLogPath: string): void {
   checkRuntimeUpdateIfStale("startup");
 }
 
-async function resolveLaunchRuntime(userDataPath: string): Promise<LaunchRuntime> {
+async function resolveLaunchRuntime(userDataPath: string, shellVersionCode: number, manualRetry = false): Promise<LaunchRuntime> {
   if (!app.isPackaged) {
     const dshBinPath = resolveDshBinPath(false, process.resourcesPath, import.meta.url);
     const packageManagerBinPath = resolvePnpmBinDirectory(false, process.resourcesPath, import.meta.url);
@@ -935,13 +1043,14 @@ async function resolveLaunchRuntime(userDataPath: string): Promise<LaunchRuntime
   if (electronMajor !== 43 || modulesAbi !== 148) {
     throw new Error(`Electron runtime requires Electron 43 / ABI 148, received ${process.versions.electron} / ${process.versions.modules}`);
   }
-  const root = path.join(userDataPath, "runtime-manager", "electron-v1");
+  const root = resolveRuntimeCacheRoot(userDataPath);
   const runtimeServiceBaseUrl = runtimeServiceConfig.serviceBaseUrl;
   const fetcher = ((input: string | URL | Request, init?: RequestInit) => (
     net.fetch(typeof input === "string" ? input : input instanceof URL ? input.href : input, init)
   )) as unknown as typeof fetch;
   runtimeManager = new ElectronRuntimeManager({
     root,
+    cacheEpoch: RUNTIME_CACHE_EPOCH,
     environment: runtimeEnvironment,
     manifestContext: {
       os: process.platform === "win32" ? "windows" : process.platform,
@@ -950,13 +1059,22 @@ async function resolveLaunchRuntime(userDataPath: string): Promise<LaunchRuntime
       electronMajor,
       modulesAbi
     },
-    fetchManifest: () => fetchElectronRuntimeManifest({
+    readInitialBaseline: () => readPreviousRuntimeBaseline(userDataPath, runtimeEnvironment, {
+      os: process.platform === "win32" ? "windows" : process.platform,
+      arch: process.arch,
+      shellVersion: app.getVersion(),
+      electronMajor,
+      modulesAbi
+    }),
+    fetchManifest: baseline => fetchElectronRuntimeManifest({
       serviceBaseUrl: runtimeServiceBaseUrl,
       platform: process.platform,
       arch: process.arch,
       shellVersion: app.getVersion(),
       electronMajor,
       modulesAbi,
+      shellVersionCode,
+      ...(baseline === undefined ? {} : { baseline }),
       fetcher
     }),
     installRelease: async (manifest, stagingPath, progress) => {
@@ -967,9 +1085,19 @@ async function resolveLaunchRuntime(userDataPath: string): Promise<LaunchRuntime
       });
     }
   });
+  runtimeDataStore = new RuntimeDataTransactionStore({userDataPath, environment: runtimeEnvironment});
+  await recoverRuntimeUpgrade(runtimeDataStore, {
+    commitProfile: async (dshHome, releaseId) => {
+      await recoverRuntimeManagedProfileTransaction(dshHome, runtimeEnvironment, {commitReleaseId: releaseId});
+    },
+    commitRelease: async releaseId => {
+      if (runtimeManager === null) throw new Error("Runtime manager unavailable");
+      await runtimeManager.recoverCommittedCandidate(releaseId);
+    }
+  });
   let release: ResolvedElectronRuntime;
   try {
-    release = await runtimeManager.prepareForLaunch(state => runtimeProgressRenderer.schedule(state));
+    release = await runtimeManager.prepareForLaunch(state => runtimeProgressRenderer.schedule(state), {manualRetry});
   } finally {
     await runtimeProgressRenderer.flush();
   }
@@ -1032,6 +1160,21 @@ async function initializeHarnessRuntime(
   onProfileTransaction(provisionedProfile.runtimeTransaction);
   logDiagnostic("profile-ready", { dshHome: paths.dshHome, source: runtime.runtimeManaged ? "release-set" : "development" });
   const supervisor = new HarnessProcessSupervisor({
+    processGuard: {
+      modulePath: path.join(path.dirname(resolveArkmePreloadPath(
+        moduleDirectory, app.isPackaged, process.resourcesPath
+      )), "harness-process-lifetime.js"),
+      receiptPath: path.join(paths.userDataPath, "runtime-process.json")
+    },
+    onAuthenticated: async authenticated => {
+      if (harnessCookieInstaller === null) throw new Error("Harness browser session unavailable");
+      await harnessCookieInstaller.install(authenticated);
+      authenticated.signal.throwIfAborted();
+      harnessAuthSession = authenticated;
+      authenticated.signal.addEventListener("abort", () => {
+        if (harnessAuthSession === authenticated) harnessAuthSession = null;
+      }, {once:true});
+    },
     execPath: process.execPath,
     dshBinPath: runtime.dshBinPath,
     dshHome: paths.dshHome,
@@ -1073,13 +1216,82 @@ async function initializeHarnessRuntime(
   if (!initialized) throw new Error("Harness controller initialization was cancelled");
 }
 
-async function waitForHarnessOrigin(): Promise<string> {
-  const deadline = Date.now() + 5_000;
-  while (activeHarnessOrigin === null && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 25));
+/** The visible status page stays in place until all candidate commits succeed. */
+async function releaseCandidateHarnessNavigation(): Promise<void> {
+  holdCandidateNavigation = false;
+  const ready = bufferedHarnessReadyState;
+  bufferedHarnessReadyState = null;
+  if (ready !== null) await renderState(ready);
+  if (deferredAccountScopeRelaunch) {
+    deferredAccountScopeRelaunch = false;
+    scheduleAccountScopeRelaunch();
   }
-  if (activeHarnessOrigin === null) throw new Error("Electron runtime health check could not resolve the Harness origin");
-  return activeHarnessOrigin;
+}
+
+async function validateCandidateHarnessPage(runtime: LaunchRuntime, authenticated: HarnessAuthSession): Promise<void> {
+  const pkg = JSON.parse(await readFile(path.join(runtime.arkmePluginPath, "package.json"), "utf8")) as {
+    arkme?: {desktopHarnessReady?: {version?: unknown}}
+  };
+  if (pkg.arkme?.desktopHarnessReady?.version !== 1) {
+    throw new RuntimePluginReadinessError();
+  }
+  const window = mainWindow;
+  if (window === null || window.isDestroyed()) throw new Error("Harness browser unavailable");
+  const trial = new BrowserWindow({show: false, webPreferences: {
+    backgroundThrottling: false,
+    session: window.webContents.session,
+    contextIsolation: true,
+    nodeIntegration: false,
+    sandbox: true,
+    webSecurity: true,
+    preload: resolveArkmePreloadPath(moduleDirectory, app.isPackaged, process.resourcesPath)
+  }});
+  const probeAbort = new AbortController();
+  const trialSignal = AbortSignal.any([authenticated.signal, probeAbort.signal]);
+  const probe = harnessPageReadiness.arm(trial.webContents.id, authenticated.url,
+    trialSignal);
+  // Handle early abort/rejection while loadURL is still in flight.
+  void probe.ready.catch(() => undefined);
+  const origin = new URL(authenticated.url).origin;
+  let documentGeneration = 0;
+  let localMountError: Error | undefined;
+  trial.webContents.on("console-message", (_event, level, message) => {
+    const failure = localHarnessMountFailure(level, message);
+    if (failure === undefined) return;
+    localMountError = failure;
+    probeAbort.abort();
+  });
+  trial.webContents.on("did-start-navigation", (_event, _url, inPlace, mainFrame) => {
+    if (mainFrame && !inPlace) {
+      documentGeneration += 1;
+      harnessPageReadiness.navigation(trial.webContents.id);
+    }
+  });
+  const guard = (event: Electron.Event, url: string) => {
+    try { if (new URL(url).origin === origin) return; } catch { /* Reject malformed navigation. */ }
+    event.preventDefault();
+    probeAbort.abort();
+  };
+  trial.webContents.on("will-navigate", guard);
+  trial.webContents.on("will-redirect", guard);
+  trial.webContents.on("will-attach-webview", event => event.preventDefault());
+  trial.webContents.setWindowOpenHandler(() => ({action: "deny"}));
+  trial.webContents.on("render-process-gone", () => probeAbort.abort());
+  trial.webContents.on("preload-error", () => probeAbort.abort());
+  trial.once("closed", () => probeAbort.abort());
+  try {
+    await Promise.all([trial.loadURL(authenticated.url), probe.ready]);
+    const verifiedGeneration = documentGeneration;
+    await settleHarnessPageRendering(script => trial.webContents.executeJavaScript(script), trialSignal);
+    if (documentGeneration !== verifiedGeneration) throw new Error("Harness page changed during validation");
+    trialSignal.throwIfAborted();
+    authenticated.signal.throwIfAborted();
+  } catch (error) {
+    throw localMountError ?? error;
+  } finally {
+    probe.dispose();
+    if (!trial.isDestroyed()) trial.destroy();
+  }
 }
 
 async function readDshPackageVersion(dshBinPath: string): Promise<string | undefined> {
@@ -1096,11 +1308,10 @@ async function readDshPackageVersion(dshBinPath: string): Promise<string | undef
   }
 }
 
-async function installAppUpdateController(): Promise<void> {
+async function installAppUpdateController(currentVersionCode: number): Promise<void> {
   if (packagedLocalTest) return;
   const target = resolveSupportedAppUpdateTarget(process.platform, process.arch);
   if (target === null) return;
-  const currentVersionCode = await readAppVersionCode(path.join(app.getAppPath(), "package.json"));
   const receiptPath = resolveAppUpdateInstallReceiptPath(app.getPath("userData"));
   const reconciliation = await reconcilePendingAppUpdateInstall(receiptPath, currentVersionCode);
   if (reconciliation.outcome !== "none") {
@@ -1111,15 +1322,9 @@ async function installAppUpdateController(): Promise<void> {
   appUpdateController = new ArkmeAppUpdateController({
     currentVersion: app.getVersion(),
     currentVersionCode,
-    applicationName: appIdentity.appName,
     serviceBaseUrl: runtimeServiceConfig.serviceBaseUrl,
     platform: target.platform,
     arch: target.arch,
-    downloadsDirectory: resolveAppUpdateDownloadsPath(
-      runtimeEnvironment,
-      app.getPath("userData"),
-      app.getPath("downloads")
-    ),
     ...(reconciliation.outcome === "incomplete"
       ? { previousInstallFailure: reconciliation.target }
       : {}),
@@ -1152,6 +1357,13 @@ async function installAppUpdateController(): Promise<void> {
       }
     } : {})
   });
+  appUpdateNotices.attach(appUpdateController);
+  appUpdateController.subscribe(snapshot => {
+    if (snapshot.status === "failed" && snapshot.failureStage === "install") appQuitGuard?.restoreGuardedQuit();
+    if (snapshot.status !== "downloading") logDiagnostic("app-update-state", {
+      status: snapshot.status, versionCode: snapshot.latestVersionCode, failureStage: snapshot.failureStage, error: snapshot.error
+    });
+  });
 }
 
 function checkAutomaticUpdates(source: AutomaticUpdateCheckSource): void {
@@ -1170,7 +1382,9 @@ function checkAppUpdateIfStale(source: AutomaticUpdateCheckSource): void {
     return;
   }
   const before = updateController.snapshotNow();
-  const task = updateController.checkIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS);
+  const task = source === "startup"
+    ? updateController.prepareNow()
+    : updateController.prepareIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS);
   const after = updateController.snapshotNow();
   const outcome = after.status === "checking"
     ? before.status === "checking" ? "joined" : "started"
@@ -1221,6 +1435,14 @@ function checkRuntimeUpdateIfStale(source: AutomaticUpdateCheckSource): void {
   });
 }
 
+function appUpdateSender(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent) {
+  return {
+    webContentsId: event.sender.id,
+    isMainFrame: event.senderFrame !== null && event.senderFrame === event.sender.mainFrame,
+    url: event.senderFrame?.url ?? ""
+  };
+}
+
 function isCurrentAppUpdateSender(event: Electron.IpcMainInvokeEvent): boolean {
   const senderFrame = event.senderFrame;
   return senderFrame !== null
@@ -1235,33 +1457,6 @@ ipcMain.handle("arkme-desktop:directory-badge", (event, count: unknown) => (
 ipcMain.handle("arkme-desktop:device-snapshot", event => (
   isCurrentAppUpdateSender(event) ? readDesktopDevice() : null
 ));
-
-ipcMain.handle("arkme-app-update:status", event => (
-  isCurrentAppUpdateSender(event) ? appUpdateController?.snapshotNow() ?? null : null
-));
-ipcMain.handle("arkme-app-update:check", async event => (
-  isCurrentAppUpdateSender(event) ? await appUpdateController?.checkNow() ?? null : null
-));
-ipcMain.handle("arkme-app-update:download", async event => (
-  isCurrentAppUpdateSender(event) ? await appUpdateController?.download() ?? null : null
-));
-ipcMain.handle("arkme-app-update:install", async event => (
-  isCurrentAppUpdateSender(event) ? await appUpdateController?.install() ?? null : null
-));
-ipcMain.handle("arkme-app-update:show-in-folder", async event => {
-  if (!isCurrentAppUpdateSender(event)) return false;
-  const snapshot = appUpdateController?.snapshotNow();
-  if (snapshot?.installMode !== "manual") return false;
-  const downloadedFilePath = snapshot.downloadedFilePath;
-  if (downloadedFilePath === undefined) return false;
-  try {
-    await access(downloadedFilePath);
-  } catch {
-    return false;
-  }
-  shell.showItemInFolder(downloadedFilePath);
-  return true;
-});
 
 function createMainWindow(): void {
   mainWindow = new BrowserWindow({
@@ -1282,6 +1477,7 @@ function createMainWindow(): void {
     }
   });
 
+  harnessCookieInstaller = new HarnessCookieInstaller(mainWindow.webContents.session.cookies);
   installHarnessPermissionPolicy(mainWindow.webContents.session, {
     getActiveHarnessOrigin: () => activeHarnessOrigin,
     getMainWebContentsId: () => {
@@ -1310,6 +1506,7 @@ function createMainWindow(): void {
   });
   mainWindow.webContents.on("did-start-navigation", (_event, url, isInPlace, isMainFrame) => {
     if (!desktopNotificationDocumentNavigationInvalidatesConsumer(isInPlace, isMainFrame)) return;
+    harnessPageReadiness.navigation(mainWindow?.webContents.id ?? -1);
     logDiagnostic("did-start-main-frame-navigation", { url });
     nativeBadges.releaseDirectory();
     desktopNotifications.markHarnessLoading();
@@ -1319,8 +1516,13 @@ function createMainWindow(): void {
     void installRuntimeUpdateNoticeStyles({
       getCurrentUrl: () => statusWindow.webContents.getURL(),
       insertCSS: async css => await statusWindow.webContents.insertCSS(css, { cssOrigin: "user" })
-    }, activeHarnessOrigin).catch(error => {
-      logDiagnostic("runtime-update-notice-style-failed", error);
+    }, activeHarnessOrigin).then(async () => {
+      await installAppUpdateNoticeStyles({
+        getCurrentUrl: () => statusWindow.webContents.getURL(),
+        insertCSS: async css => await statusWindow.webContents.insertCSS(css, { cssOrigin: "user" })
+      }, statusPageUrl, activeHarnessOrigin);
+    }).catch(error => {
+      logDiagnostic("update-notice-style-failed", error);
     });
   });
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
@@ -1386,12 +1588,21 @@ async function renderState(state: HarnessState | RuntimeInstallProgress): Promis
 
   if (state.kind === "ready") {
     lastHarnessReadyState = state;
+    if (holdCandidateNavigation) {
+      bufferedHarnessReadyState = state;
+      return;
+    }
     if (!accountScopeReady) {
       await renderAccountScopeWaiting();
       return;
     }
     activeHarnessOrigin = new URL(state.url).origin;
     logDiagnostic("render-ready", { url: state.url });
+    const authenticated = harnessAuthSession;
+    if (authenticated !== null && !authenticated.signal.aborted) {
+      const readiness = harnessPageReadiness.arm(window.webContents.id, state.url, authenticated.signal);
+      void readiness.ready.catch(() => undefined);
+    }
     const intent = deepLinks.peek();
     await window.loadURL(intent === undefined ? state.url : createExtensionShareHarnessUrl(state.url, intent));
     if (intent !== undefined) deepLinks.markDelivered(intent);
@@ -1541,6 +1752,7 @@ function installApplicationMenu(): void {
 }
 
 async function refreshAccountScopeMenu(): Promise<void> {
+  if (holdCandidateNavigation || deferredAccountScopeRelaunch || accountScopeRelaunchScheduled) return;
   accountScopeChoices = accountScopeStore === null ? [] : await accountScopeStore.accountContainers();
   installApplicationMenu();
 }
@@ -1559,12 +1771,20 @@ function enqueueAction(action: () => Promise<void>): void {
 }
 
 async function handleAppAction(action: AppAction): Promise<void> {
+  if (appUpdateNotices.isInstalling()) return;
   if (action === "reload-runtime") {
     await reloadCurrentRuntimeEnvironment();
     return;
   }
   if (action === "retry") {
-    if (controller === null) await bootstrap();
+    if (runtimeRecoveryRequired) {
+      // A previous stop may have failed. Keep its handle until it really exits,
+      // then run journal recovery instead of bypassing it through controller.retry.
+      await controller?.stop("failure");
+      controller = null;
+      await bootstrap(true);
+    }
+    else if (controller === null) await bootstrap(true);
     else await controller.retry();
     return;
   }
@@ -1627,6 +1847,7 @@ async function renderFailure(error: unknown): Promise<void> {
   const message = error instanceof Error ? error.message : String(error);
   const workspacePath = controller?.getCurrentWorkspace();
   const display = error instanceof ElectronRuntimeManifestError || error instanceof BadRuntimeReleaseBlockedError
+    || error instanceof RuntimeNetworkWaitingError
     ? {
       displayTitle: error.displayTitle,
       suggestion: error.suggestion,

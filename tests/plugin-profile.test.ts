@@ -659,6 +659,43 @@ describe("provisionArkmeWebProfile", () => {
       .resolves.toBe(false);
   });
 
+  test("rolls a profile-written transaction forward only for the externally committed release", async () => {
+    const fixture = await createFixture("0.1.20");
+    const releaseId = "electron-runtime-v1-77777777777777777777777777777777";
+    const provisioned = await provisionArkmeWebProfile({
+      dshHome: fixture.dshHome, environment: "test", pluginDir: fixture.pluginDir,
+      runtimeManaged: true, runtimeReleaseId: releaseId
+    });
+
+    await expect(recoverRuntimeManagedProfileTransaction(
+      fixture.dshHome, "test", { commitReleaseId: releaseId }
+    )).resolves.toBe(true);
+    await expect(readFile(provisioned.runtimeTransaction!.journalPath, "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("preserves a profile transaction when the external commit release does not match", async () => {
+    const fixture = await createFixture("0.1.20");
+    const provisioned = await provisionArkmeWebProfile({
+      dshHome: fixture.dshHome, environment: "test", pluginDir: fixture.pluginDir,
+      runtimeManaged: true,
+      runtimeReleaseId: "electron-runtime-v1-88888888888888888888888888888888"
+    });
+
+    await expect(recoverRuntimeManagedProfileTransaction(fixture.dshHome, "test", {
+      commitReleaseId: "electron-runtime-v1-99999999999999999999999999999999"
+    })).rejects.toThrow(/release mismatch/i);
+    await expect(readFile(provisioned.runtimeTransaction!.journalPath, "utf8"))
+      .resolves.toContain('"phase": "profile-written"');
+  });
+
+  test("returns false when external commit recovery has no profile journal", async () => {
+    const fixture = await createFixture("0.1.20");
+    await expect(recoverRuntimeManagedProfileTransaction(fixture.dshHome, "test", {
+      commitReleaseId: "electron-runtime-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    })).resolves.toBe(false);
+  });
+
   test("recovers a transaction interrupted before the existing Profile link was moved", async () => {
     const fixture = await createFixture("0.1.20");
     const profileDir = path.join(fixture.dshHome, "profiles", "web");

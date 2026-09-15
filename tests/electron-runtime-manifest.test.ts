@@ -58,7 +58,7 @@ const context = {
 } as const;
 
 describe("Electron runtime manifest", () => {
-  test("accepts an Electron 43 release set containing only Harness and the shared plugin", () => {
+  test("accepts a persisted legacy release without network compatibility metadata", () => {
     const parsed = parseElectronRuntimeManifest(manifest(), context);
 
     expect(parsed.artifacts.harness.versionCode).toBe(4);

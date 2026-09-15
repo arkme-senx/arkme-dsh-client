@@ -6,7 +6,6 @@ import {
   ensureDefaultWorkspace,
   loadLastWorkspace,
   resolveArkmeAppDataPath,
-  resolveAppUpdateDownloadsPath,
   resolveUserDataPath,
   saveLastWorkspace
 } from "../src/settings.js";
@@ -43,18 +42,6 @@ describe("workspace settings", () => {
     );
   });
 
-  test("keeps production downloads unchanged and isolates test app updates", () => {
-    expect(resolveAppUpdateDownloadsPath(
-      "prod",
-      "/Users/example/Library/Application Support/Arkme Harness",
-      "/Users/example/Downloads"
-    )).toBe("/Users/example/Downloads");
-    expect(resolveAppUpdateDownloadsPath(
-      "test",
-      "/Users/example/Library/Application Support/Arkme Harness Test",
-      "/Users/example/Downloads"
-    )).toBe("/Users/example/Library/Application Support/Arkme Harness Test/app-updates");
-  });
 
   test("uses an absolute development application-data override for an isolated client profile", () => {
     expect(resolveArkmeAppDataPath("/Users/example/Library/Application Support", "/tmp/arkme-v103-dev"))

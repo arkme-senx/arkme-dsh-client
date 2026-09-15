@@ -503,7 +503,8 @@ export async function rollbackRuntimeManagedProfileTransaction(
 
 export async function recoverRuntimeManagedProfileTransaction(
   dshHome: string,
-  environment: RuntimeEnvironment
+  environment: RuntimeEnvironment,
+  options?: { commitReleaseId: string }
 ): Promise<boolean> {
   const profileDir = path.join(dshHome, "profiles", "web");
   const journalPath = path.join(profileDir, RUNTIME_PROFILE_TRANSACTION_FILE);
@@ -520,6 +521,16 @@ export async function recoverRuntimeManagedProfileTransaction(
       `Runtime-managed Profile transaction environment mismatch: expected ${environment}, received ${parsed.environment}`
     );
   }
+  if (options !== undefined) {
+    if (!isElectronRuntimeReleaseId(options.commitReleaseId)) {
+      throw new Error("External Profile commit Release ID is invalid");
+    }
+    if (parsed.releaseId !== options.commitReleaseId) {
+      throw new Error(
+        `Runtime-managed Profile transaction release mismatch: expected ${options.commitReleaseId}, received ${parsed.releaseId}`
+      );
+    }
+  }
   const transaction = {
     profileDir,
     environment,
@@ -528,6 +539,10 @@ export async function recoverRuntimeManagedProfileTransaction(
   };
   if (parsed.phase === "committing") {
     await finishRuntimeManagedProfileCommit(transaction, parsed);
+    return true;
+  }
+  if (options !== undefined) {
+    await commitRuntimeManagedProfileTransaction(transaction);
     return true;
   }
   await rollbackRuntimeManagedProfileTransaction({

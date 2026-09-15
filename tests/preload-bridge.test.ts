@@ -67,12 +67,15 @@ async function executePreload(
   harnessVersion: unknown,
   options: {
     snapshot?: unknown | Promise<unknown>;
+    appSnapshot?: unknown | Promise<unknown>;
     attention?: unknown;
+    harnessReadyNonce?: unknown;
     notificationPermission?: NotificationPermission;
     requestedNotificationPermission?: NotificationPermission;
     now?: () => number;
     platform?: NodeJS.Platform;
     userActivation?: () => boolean;
+    runtimeRestart?: unknown | Promise<unknown>;
   } = {}
 ): Promise<{
   document: FakeDocument;
@@ -104,12 +107,14 @@ async function executePreload(
     ipcRenderer: {
       invoke: async (channel: string, ...args: unknown[]) => {
         invokeCalls.push({ channel, args });
+        if (channel === "arkme-app-update:notice") return options.appSnapshot ?? null;
         if (channel === "arkme:runtime-update-notice:snapshot") return options.snapshot ?? {
           schemaVersion: 1,
           messageId: "attempt-preload:installing",
           kind: "installing",
           visible: true
         };
+        if (channel === "arkme:runtime-update-notice:restart") return options.runtimeRestart ?? true;
         if (channel === "arkme:desktop-notification:refresh-permission") return notificationPermission;
         return true;
       },
@@ -137,12 +142,14 @@ async function executePreload(
           }
           return true;
         }
+        if (channel === "arkme-runtime:page-ready-nonce") return options.harnessReadyNonce ?? null;
         if (channel === "arkme-desktop:attention-capabilities") return options.attention ?? {
           schemaVersion: 1,
           notificationShow: true,
           notificationPermission,
           badgeMode: "dot"
         };
+        if (channel === "arkme-app-update:app-version") return "1.2.0";
         return harnessVersion;
       }
     }
@@ -224,7 +231,9 @@ describe("desktop notification preload", () => {
     expect(syncChannels).toEqual([
       "arkme-runtime:harness-version",
       "arkme:desktop-notification:permission-state",
-      "arkme-desktop:attention-capabilities"
+      "arkme-desktop:attention-capabilities",
+      "arkme-runtime:page-ready-nonce",
+      "arkme-app-update:app-version"
     ]);
     expect(desktop.harnessVersion).toBe("0.1.0-rc.8");
     expect(desktop.attention).toEqual({
@@ -246,7 +255,7 @@ describe("desktop notification preload", () => {
     await desktop.update.check();
     await desktop.update.check();
 
-    expect(invokeCalls.filter(call => call.channel.startsWith("arkme-app-update:"))).toEqual([
+    expect(invokeCalls.filter(call => call.channel === "arkme-app-update:status" || call.channel === "arkme-app-update:check")).toEqual([
       { channel: "arkme-app-update:status", args: [] },
       { channel: "arkme-app-update:check", args: [] }
     ]);
@@ -623,6 +632,148 @@ describe("desktop location preload", () => {
 });
 
 
+describe("independent APP update preload UI", () => {
+  const state = (status: string, extras = {}) => ({
+    schemaVersion: 1, revision: 1, expanded: true, websiteOpening: false,
+    state: { status, currentVersion: '1.2.0', currentVersionCode: 1, canAutoInstall: true, latestVersion: '1.3.0', latestVersionCode: 2, ...extras },
+  });
+  it('renders download/install/website actions without loading a plugin', async () => {
+    const f = await executePreload(undefined, { appSnapshot: state('downloading') });
+    await vi.waitFor(() => expect(findByText(f.document.documentElement, '正在后台下载')).toBeDefined());
+    expect(findByText(f.document.documentElement, '下载更新')).toBeUndefined();
+    f.emit('arkme-app-update:changed', { ...state('downloaded'), revision: 2 });
+    findByText(f.document.documentElement, '重启并安装')?.click();
+    expect(f.invokeCalls).toContainEqual({ channel: 'arkme-app-update:install', args: [] });
+    f.emit('arkme-app-update:changed', { ...state('failed', { error: 'offline' }), revision: 3 });
+    findByText(f.document.documentElement, '下载最新版本')?.click();
+    expect(f.invokeCalls).toContainEqual({ channel: 'arkme-app-update:open-website', args: [] });
+  });
+  it('shows Linux website action and removes the whole notice after closing', async () => {
+    const f = await executePreload(undefined, { appSnapshot: state('available', { canAutoInstall: false }) });
+    await vi.waitFor(() => expect(findByText(f.document.documentElement, '下载最新版本')).toBeDefined());
+    f.emit('arkme-app-update:changed', { ...state('available'), revision: 2, expanded: false });
+    expect(f.document.getElementById('arkme-app-update-notice')).toBeNull();
+    expect(findByText(f.document.documentElement, 'APP 更新')).toBeUndefined();
+    const desktop = f.exposed.arkmeDesktop as { update: { open(): Promise<boolean> } };
+    await desktop.update.open();
+    expect(f.invokeCalls).toContainEqual({ channel: 'arkme-app-update:open', args: [] });
+    f.emit('arkme-app-update:changed', { ...state('downloaded'), revision: 3 });
+    expect(findByText(f.document.documentElement, '重启并安装')).toBeDefined();
+  });
+  it.each(['idle', 'checking', 'current', 'failed'])('renders nothing for %s without a confirmed newer release', async status => {
+    const f = await executePreload(undefined, { appSnapshot: state(status, { latestVersion: undefined, latestVersionCode: undefined }) });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(f.document.getElementById('arkme-app-update-notice')).toBeNull();
+    f.emit('arkme-app-update:changed', { ...state(status), revision: 2, expanded: false });
+    expect(f.document.getElementById('arkme-app-update-notice')).toBeNull();
+  });
+  it('retains the website fallback when a previously incomplete installation is ready from cache', async () => {
+    const f = await executePreload(undefined, { appSnapshot: state('downloaded', { installWarning: '上次安装未完成' }) });
+    await vi.waitFor(() => expect(findByText(f.document.documentElement, '上次安装未完成')).toBeDefined());
+    expect(findByText(f.document.documentElement, '下载最新版本')).toBeDefined();
+  });
+  it('shows a known target version while downloading and after download or install failure', async () => {
+    const f = await executePreload(undefined, { appSnapshot: state('downloading') });
+    await vi.waitFor(() => expect(findByText(f.document.documentElement, '检测到新版本 v1.3.0')).toBeDefined());
+
+    f.emit('arkme-app-update:changed', { ...state('failed', { failureStage: 'download', error: 'checksum mismatch' }), revision: 2 });
+    expect(findByText(f.document.documentElement, 'v1.3.0 更新未完成')).toBeDefined();
+
+    f.emit('arkme-app-update:changed', { ...state('failed', { failureStage: 'install', error: '上次安装未完成，请重新尝试' }), revision: 3 });
+    expect(findByText(f.document.documentElement, 'v1.3.0 更新未完成')).toBeDefined();
+  });
+  it('keeps runtime restart disabled when APP installing renders before or after runtime', async () => {
+    const f = await executePreload(undefined, {
+      snapshot: { schemaVersion: 1, messageId: 'runtime-ready', kind: 'installed', visible: true },
+      appSnapshot: state('available')
+    });
+    await vi.waitFor(() => expect(findByText(f.document.documentElement, '立即重启')).toBeDefined());
+
+    f.emit('arkme-app-update:changed', { ...state('installing'), revision: 2 });
+    expect(findByText(f.document.documentElement, '立即重启')?.disabled).toBe(true);
+
+    f.emit('arkme:runtime-update-notice:changed', {
+      schemaVersion: 1, messageId: 'runtime-repaint', kind: 'installed', visible: true
+    });
+    expect(findByText(f.document.documentElement, '立即重启')?.disabled).toBe(true);
+  });
+  it('does not re-enable runtime restart after rejection while APP is installing', async () => {
+    let rejectRestart!: (error: Error) => void;
+    const runtimeRestart = new Promise<unknown>((_resolve, reject) => { rejectRestart = reject; });
+    const f = await executePreload(undefined, {
+      snapshot: { schemaVersion: 1, messageId: 'runtime-ready', kind: 'installed', visible: true },
+      appSnapshot: state('available'), runtimeRestart
+    });
+    await vi.waitFor(() => expect(findByText(f.document.documentElement, '立即重启')).toBeDefined());
+    findByText(f.document.documentElement, '立即重启')?.click();
+    f.emit('arkme-app-update:changed', { ...state('installing'), revision: 2 });
+    rejectRestart(new Error('restart rejected'));
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(findByText(f.document.documentElement, '立即重启')?.disabled).toBe(true);
+  });
+  it('keeps runtime restart disabled across APP updates until a false restart result clears pending', async () => {
+    let resolveRestart!: (accepted: boolean) => void;
+    const runtimeRestart = new Promise<boolean>(resolve => { resolveRestart = resolve; });
+    const f = await executePreload(undefined, {
+      snapshot: { schemaVersion: 1, messageId: 'runtime-ready', kind: 'installed', visible: true },
+      appSnapshot: state('available'), runtimeRestart
+    });
+    await vi.waitFor(() => expect(findByText(f.document.documentElement, '立即重启')).toBeDefined());
+    findByText(f.document.documentElement, '立即重启')?.click();
+
+    f.emit('arkme-app-update:changed', { ...state('checking'), revision: 2 });
+    expect(findByText(f.document.documentElement, '立即重启')?.disabled).toBe(true);
+    f.emit('arkme-app-update:changed', { ...state('downloading'), revision: 3 });
+    expect(findByText(f.document.documentElement, '立即重启')?.disabled).toBe(true);
+
+    resolveRestart(false);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(findByText(f.document.documentElement, '立即重启')?.disabled).toBe(false);
+  });
+  it('ignores a late snapshot and stale events, keeps APP and runtime in a common stack', async () => {
+    let finish!: (value: unknown) => void;
+    const f = await executePreload(undefined, { appSnapshot: new Promise(resolve => { finish = resolve; }) });
+    f.emit('arkme-app-update:changed', { ...state('downloaded'), revision: 5 });
+    finish(state('available'));
+    await Promise.resolve(); await Promise.resolve();
+    f.emit('arkme-app-update:changed', { ...state('available'), revision: 4 });
+    expect(findByText(f.document.documentElement, '重启并安装')).toBeDefined();
+    await vi.waitFor(() => expect(f.document.getElementById('arkme-runtime-update-notice')).not.toBeNull());
+    const app = f.document.getElementById('arkme-app-update-notice');
+    const runtime = f.document.getElementById('arkme-runtime-update-notice');
+    expect(app?.parent?.id).toBe('arkme-desktop-update-notices');
+    expect(runtime?.parent).toBe(app?.parent);
+  });
+  it('exposes read-only status subscriptions and no folder-opening bridge', async () => {
+    const f = await executePreload(undefined);
+    const desktop = f.exposed.arkmeDesktop as { appUpdateUi: boolean; appVersion: string; update: { onChanged(listener: (state: unknown) => void): () => void; showInFolder?: unknown } };
+    expect(desktop.appUpdateUi).toBe(true);
+    expect(desktop.appVersion).toBe('1.2.0');
+    expect(desktop.update.showInFolder).toBeUndefined();
+    const listener = vi.fn(); const stop = desktop.update.onChanged(listener);
+    f.emit('arkme-app-update:changed', state('available'));
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ status: 'available' }));
+    stop(); f.emit('arkme-app-update:changed', { ...state('downloaded'), revision: 2 });
+    expect(listener).toHaveBeenCalledOnce();
+  });
+});
+
+
+it("readiness bridge uses the main-owned document nonce and exposes no nonce argument", async () => {
+  const first = await executePreload("0.1.1-rc.2", {harnessReadyNonce:"document-one"});
+  const second = await executePreload("0.1.1-rc.2", {harnessReadyNonce:"document-two"});
+  for (const result of [first, second]) {
+    const bridge = result.exposed.arkmeDesktop as {notifyHarnessReady: (...args: unknown[]) => void};
+    bridge.notifyHarnessReady("spoofed-nonce");
+    bridge.notifyHarnessReady();
+  }
+  expect(first.sendCalls.filter(call => call.channel === "arkme-runtime:page-ready")).toEqual([{channel:"arkme-runtime:page-ready",args:["document-one"]}]);
+  expect(second.sendCalls.filter(call => call.channel === "arkme-runtime:page-ready")).toEqual([{channel:"arkme-runtime:page-ready",args:["document-two"]}]);
+  const unauthorized = await executePreload("0.1.1-rc.2");
+  (unauthorized.exposed.arkmeDesktop as {notifyHarnessReady:()=>void}).notifyHarnessReady();
+  expect(unauthorized.sendCalls.some(call => call.channel === "arkme-runtime:page-ready")).toBe(false);
+});
 describe("desktop device preload", () => {
   it("exposes the device snapshot through the bounded main-process reader", async () => {
     const { exposed, invokeCalls } = await executePreload("test");

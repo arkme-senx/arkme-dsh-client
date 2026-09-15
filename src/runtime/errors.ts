@@ -1,5 +1,14 @@
 import type { RuntimeFailurePhase, RuntimeFailureScope } from "./state.js";
 
+export class RuntimePluginReadinessError extends Error {
+  readonly code = "PLUGIN_DESKTOP_READINESS_UNSUPPORTED";
+
+  constructor() {
+    super("Required plugin does not support desktop Harness readiness v1");
+    this.name = "RuntimePluginReadinessError";
+  }
+}
+
 export class RuntimeArtifactValidationError extends Error {
   constructor(
     readonly code: string,

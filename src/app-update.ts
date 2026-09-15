@@ -1,5 +1,3 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { MAX_APP_VERSION_CODE } from "./app-version-code.js";
 import { resolveAppUpdateMetadata, type AppUpdaterUpdateInfo } from "./app-update-metadata.js";
 export type { AppUpdaterUpdateInfo } from "./app-update-metadata.js";
@@ -22,14 +20,13 @@ export type ArkmeAppUpdateStatus =
   | "installing"
   | "failed";
 
-export type ArkmeAppUpdateInstallMode = "in-app" | "manual";
 export type ArkmeAppUpdateFailureStage = "check" | "download" | "install";
 
 export interface ArkmeAppUpdateSnapshot {
   status: ArkmeAppUpdateStatus;
   currentVersion: string;
   currentVersionCode: number;
-  installMode: ArkmeAppUpdateInstallMode;
+  canAutoInstall: boolean;
   checkedAtMillis?: number;
   noUpdateAvailable?: boolean;
   latestVersion?: string;
@@ -40,6 +37,7 @@ export interface ArkmeAppUpdateSnapshot {
   downloadedBytes?: number;
   totalBytes?: number;
   downloadedFilePath?: string;
+  installWarning?: string;
 }
 
 export interface AppUpdaterProgress {
@@ -54,7 +52,9 @@ export interface AppUpdaterPort {
   checkForUpdates(): Promise<{ isUpdateAvailable: boolean; updateInfo: AppUpdaterUpdateInfo } | null>;
   downloadUpdate(): Promise<string[]>;
   quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void;
+  on(event: "error", listener: (error: Error) => void): this;
   on(event: "download-progress", listener: (progress: AppUpdaterProgress) => void): this;
+  removeListener(event: "error", listener: (error: Error) => void): this;
   removeListener(event: "download-progress", listener: (progress: AppUpdaterProgress) => void): this;
 }
 
@@ -66,11 +66,9 @@ export interface PendingAppUpdateInstall {
 type ArkmeAppUpdateControllerOptions = {
   currentVersion: string;
   currentVersionCode: number;
-  applicationName?: "arkme" | "arkme Test" | "arkme Local Test";
   serviceBaseUrl: string;
   platform: UpdatePlatform;
   arch: UpdateArch;
-  downloadsDirectory: string;
   fetchImpl?: typeof fetch;
   createUpdater?: (feedURL: string, targetVersion: string) => AppUpdaterPort;
   installUpdate?: (
@@ -85,7 +83,6 @@ interface AppUpdateRelease {
   version: string;
   versionCode: number;
   releaseNotes?: string;
-  manualDownloadURL?: string;
   updateFeedURL?: string;
 }
 
@@ -133,17 +130,23 @@ export function appUpdateFeedURL(base: string, platform: UpdatePlatform, arch: U
   return `${origin(base)}/api/public/v1/arkme/app-update/${platform}/${arch}/latest`;
 }
 
-function suffix(platform: UpdatePlatform): string {
-  return platform === "darwin" ? ".zip" : platform === "win32" ? ".exe" : ".AppImage";
-}
-
-function contentLength(response: Response): number | undefined {
-  const value = Number(response.headers.get("content-length"));
-  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
-}
-
 export class ArkmeAppUpdateController {
-  private snapshot: ArkmeAppUpdateSnapshot;
+  private currentSnapshot!: ArkmeAppUpdateSnapshot;
+  private readonly listeners = new Set<(snapshot: ArkmeAppUpdateSnapshot) => void>();
+  private updaterError: Error | undefined;
+  private detachUpdaterError: (() => void) | undefined;
+
+  private get snapshot(): ArkmeAppUpdateSnapshot { return this.currentSnapshot; }
+  private set snapshot(value: ArkmeAppUpdateSnapshot) {
+    this.currentSnapshot = value;
+    for (const listener of this.listeners) listener({ ...value });
+  }
+
+  subscribe(listener: (snapshot: ArkmeAppUpdateSnapshot) => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+
   private readonly feedURL: string;
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
@@ -163,13 +166,13 @@ export class ArkmeAppUpdateController {
           status: "idle",
           currentVersion: options.currentVersion,
           currentVersionCode: options.currentVersionCode,
-          installMode: "manual",
+          canAutoInstall: false,
         }
       : {
           status: "failed",
           currentVersion: options.currentVersion,
           currentVersionCode: options.currentVersionCode,
-          installMode: "in-app",
+          canAutoInstall: false,
           latestVersion: options.previousInstallFailure.version,
           latestVersionCode: options.previousInstallFailure.versionCode,
           failureStage: "install",
@@ -183,6 +186,22 @@ export class ArkmeAppUpdateController {
 
   snapshotNow(): ArkmeAppUpdateSnapshot {
     return { ...this.snapshot };
+  }
+
+  async prepareNow(): Promise<ArkmeAppUpdateSnapshot> {
+    return this.prepareCheckedUpdate(await this.checkNow());
+  }
+
+  async prepareIfStale(minimumIntervalMs: number): Promise<ArkmeAppUpdateSnapshot> {
+    return this.prepareCheckedUpdate(await this.checkIfStale(minimumIntervalMs));
+  }
+
+  private prepareCheckedUpdate(state: ArkmeAppUpdateSnapshot): Promise<ArkmeAppUpdateSnapshot> {
+    // downloadUpdate validates its persisted cache before transferring a package.
+    // Keep native autoDownload disabled until our Version Code/metadata gate passes.
+    return state.status === "available" && state.canAutoInstall
+      ? this.download()
+      : Promise.resolve(state);
   }
 
   checkNow(): Promise<ArkmeAppUpdateSnapshot> {
@@ -215,7 +234,9 @@ export class ArkmeAppUpdateController {
   private async performCheck(): Promise<ArkmeAppUpdateSnapshot> {
     const { error: _error, failureStage: _failureStage, ...checkingSnapshot } = this.snapshot;
     this.snapshot = { ...checkingSnapshot, status: "checking" };
-    let failureInstallMode: ArkmeAppUpdateInstallMode = "manual";
+    let discoveredRelease: AppUpdateRelease | undefined;
+    let candidateUpdater: AppUpdaterPort | undefined;
+    let detachCandidateError: (() => void) | undefined;
     try {
       const response = await this.fetchImpl(this.feedURL, {
         redirect: "error",
@@ -228,7 +249,6 @@ export class ArkmeAppUpdateController {
         version?: unknown;
         versionCode?: unknown;
         releaseNotes?: unknown;
-        downloadUrl?: unknown;
         updateFeedUrl?: unknown;
       };
       if (typeof body.version !== "string" || body.version.trim() === "") {
@@ -240,40 +260,49 @@ export class ArkmeAppUpdateController {
       if (this.isUpdateStateActive()) return this.snapshotNow();
       if ((body.versionCode as number) <= this.options.currentVersionCode) return this.setCurrent();
 
+      // Discovery is valid even if the automatic installer metadata is not.
+      // Retain the target so the notice can offer the official website on failure.
+      discoveredRelease = {
+        version: body.version,
+        versionCode: body.versionCode as number,
+        ...(typeof body.releaseNotes === "string" ? { releaseNotes: body.releaseNotes } : {}),
+      };
+
       if (body.updateFeedUrl != null && typeof body.updateFeedUrl !== "string") {
-        failureInstallMode = "in-app";
         throw new Error("自动更新目录格式无效");
       }
       const updateFeedURL = typeof body.updateFeedUrl === "string" && body.updateFeedUrl.trim() !== ""
         ? body.updateFeedUrl
         : undefined;
-      if (updateFeedURL !== undefined) failureInstallMode = "in-app";
 
       const release: AppUpdateRelease = {
-        version: body.version,
-        versionCode: body.versionCode as number,
-        ...(updateFeedURL === undefined
-          ? { manualDownloadURL: secureURL(typeof body.downloadUrl === "string" ? body.downloadUrl : "", "安装包地址").href }
-          : {}),
-        ...(typeof body.releaseNotes === "string" ? { releaseNotes: body.releaseNotes } : {}),
+        ...discoveredRelease,
         ...(updateFeedURL !== undefined
           ? { updateFeedURL: updateFeedDirectory(updateFeedURL) }
           : {}),
       };
-      this.release = release;
-      this.updater = undefined;
-
-      let installMode: ArkmeAppUpdateInstallMode = "manual";
-      if (release.updateFeedURL !== undefined) {
-        if (this.options.platform === "linux" || this.options.createUpdater === undefined) {
-          throw new Error("当前应用不支持此自动更新目录");
-        }
+      let canAutoInstall = false;
+      if (release.updateFeedURL !== undefined && this.options.platform !== "linux" && this.options.createUpdater !== undefined) {
         const updater = this.options.createUpdater(release.updateFeedURL, release.version);
+        candidateUpdater = updater;
+        let candidateError: Error | undefined;
+        const onError = (error: Error) => {
+          candidateError = error;
+          if (this.updater !== updater) return;
+          this.updaterError = error;
+          const stage = this.snapshot.status === "failed" ? this.snapshot.failureStage ?? "check"
+            : this.snapshot.status === "installing" ? "install"
+            : this.snapshot.status === "downloading" || this.snapshot.status === "downloaded" ? "download" : "check";
+          this.fail(stage, error.message);
+        };
+        updater.on("error", onError);
+        detachCandidateError = () => { updater.removeListener("error", onError); };
         updater.autoDownload = false;
         updater.autoInstallOnAppQuit = false;
         // This flag is deliberately enabled only after the Version Code gate above.
         updater.allowDowngrade = true;
         const result = await updater.checkForUpdates();
+        if (candidateError !== undefined) throw candidateError;
         if (result === null || !result.isUpdateAvailable) throw new Error("自动更新元数据未返回可安装版本");
         resolveAppUpdateMetadata(result.updateInfo, {
           version: release.version,
@@ -282,43 +311,63 @@ export class ArkmeAppUpdateController {
           platform: this.options.platform,
           arch: this.options.arch,
         });
-        this.updater = updater;
-        installMode = "in-app";
+        canAutoInstall = true;
       }
 
+      // Keep the previously verified updater usable until all new metadata passes.
+      // A download started during this check owns its release through installation.
+      if (this.isUpdateStateActive()) return this.snapshotNow();
+      this.detachUpdaterError?.();
+      this.release = release;
+      this.updater = candidateUpdater;
+      this.updaterError = undefined;
+      this.detachUpdaterError = detachCandidateError;
+      detachCandidateError = undefined;
       return this.snapshot = {
         status: "available",
         currentVersion: this.options.currentVersion,
         currentVersionCode: this.options.currentVersionCode,
-        installMode,
+        canAutoInstall,
+        ...(!canAutoInstall ? { error: "当前更新无法自动安装，请前往官网下载最新版本" } : {}),
         latestVersion: release.version,
         latestVersionCode: release.versionCode,
+        ...(this.options.previousInstallFailure?.versionCode === release.versionCode
+          ? { installWarning: "上次安装未完成，请重新尝试或前往官网下载最新版本" } : {}),
         checkedAtMillis: this.now(),
         ...(release.releaseNotes === undefined ? {} : { releaseNotes: release.releaseNotes }),
       };
     } catch (error) {
       if (this.isUpdateStateActive()) return this.snapshotNow();
       this.release = undefined;
+      this.detachUpdaterError?.();
       this.updater = undefined;
       return this.snapshot = {
         status: "failed",
         currentVersion: this.options.currentVersion,
         currentVersionCode: this.options.currentVersionCode,
-        installMode: failureInstallMode,
+        canAutoInstall: false,
         failureStage: "check",
         error: error instanceof Error ? error.message : String(error),
+        ...(discoveredRelease === undefined ? {} : {
+          latestVersion: discoveredRelease.version,
+          latestVersionCode: discoveredRelease.versionCode,
+          ...(discoveredRelease.releaseNotes === undefined ? {} : { releaseNotes: discoveredRelease.releaseNotes }),
+        }),
       };
+    } finally {
+      detachCandidateError?.();
     }
   }
 
   private setCurrent(): ArkmeAppUpdateSnapshot {
     this.release = undefined;
+    this.detachUpdaterError?.();
     this.updater = undefined;
     return this.snapshot = {
       status: "current",
       currentVersion: this.options.currentVersion,
       currentVersionCode: this.options.currentVersionCode,
-      installMode: "manual",
+      canAutoInstall: false,
       noUpdateAvailable: true,
       checkedAtMillis: this.now(),
     };
@@ -351,11 +400,14 @@ export class ArkmeAppUpdateController {
       if (this.snapshot.status === "failed" && this.snapshot.failureStage === "check") return this.snapshotNow();
       return this.fail("download", "请先检查更新");
     }
-    const { error: _error, failureStage: _failureStage, ...downloadSnapshot } = this.snapshot;
+    if (!this.snapshot.canAutoInstall || this.updater === undefined) {
+      return this.fail("download", "当前更新无法自动安装，请前往官网下载最新版本");
+    }
+    this.updaterError = undefined;
+    const { error: _error, failureStage: _failureStage, totalBytes: _totalBytes, ...downloadSnapshot } = this.snapshot;
     this.snapshot = { ...downloadSnapshot, status: "downloading", downloadedBytes: 0 };
     try {
-      if (this.snapshot.installMode === "in-app") return await this.downloadWithUpdater();
-      return await this.downloadManual(release);
+      return await this.downloadWithUpdater();
     } catch (error) {
       return this.fail("download", error instanceof Error ? error.message : String(error));
     }
@@ -375,6 +427,7 @@ export class ArkmeAppUpdateController {
     updater.on("download-progress", onProgress);
     try {
       const files = await updater.downloadUpdate();
+      if (this.updaterError !== undefined) throw this.updaterError;
       const downloadedFilePath = files[0];
       return this.snapshot = {
         ...this.snapshot,
@@ -384,48 +437,6 @@ export class ArkmeAppUpdateController {
     } finally {
       updater.removeListener("download-progress", onProgress);
     }
-  }
-
-  private async downloadManual(release: AppUpdateRelease): Promise<ArkmeAppUpdateSnapshot> {
-    if (release.manualDownloadURL === undefined) throw new Error("手动安装包地址不可用");
-    const response = await this.fetchImpl(release.manualDownloadURL, {
-      redirect: "error",
-      signal: AbortSignal.timeout(120_000),
-    });
-    if (!response.ok) throw new Error(`下载更新包失败（HTTP ${response.status}）`);
-    const totalBytes = contentLength(response);
-    if (totalBytes !== undefined) this.snapshot = { ...this.snapshot, totalBytes };
-    const chunks: Buffer[] = [];
-    let downloadedBytes = 0;
-    if (response.body === null) {
-      const bytes = Buffer.from(await response.arrayBuffer());
-      chunks.push(bytes);
-      downloadedBytes = bytes.byteLength;
-      this.snapshot = { ...this.snapshot, downloadedBytes };
-    } else {
-      const reader = response.body.getReader();
-      while (true) {
-        const result = await reader.read();
-        if (result.done) break;
-        const bytes = Buffer.from(result.value);
-        chunks.push(bytes);
-        downloadedBytes += bytes.byteLength;
-        this.snapshot = { ...this.snapshot, downloadedBytes };
-      }
-    }
-    await mkdir(this.options.downloadsDirectory, { recursive: true });
-    const file = path.join(
-      this.options.downloadsDirectory,
-      `${this.options.applicationName ?? "arkme"}-${release.version}-${this.options.platform}-${this.options.arch}${suffix(this.options.platform)}`,
-    );
-    await writeFile(file, Buffer.concat(chunks));
-    return this.snapshot = {
-      ...this.snapshot,
-      status: "downloaded",
-      downloadedBytes,
-      totalBytes: totalBytes ?? downloadedBytes,
-      downloadedFilePath: file,
-    };
   }
 
   install(): Promise<ArkmeAppUpdateSnapshot> {
@@ -443,10 +454,11 @@ export class ArkmeAppUpdateController {
   private async performInstall(): Promise<ArkmeAppUpdateSnapshot> {
     const release = this.release;
     const updater = this.updater;
-    if (this.snapshot.status !== "downloaded" || this.snapshot.installMode !== "in-app"
+    if (this.snapshot.status !== "downloaded" || !this.snapshot.canAutoInstall
       || release === undefined || updater === undefined || this.options.installUpdate === undefined) {
       return this.fail("install", "没有可安装的应用内更新");
     }
+    this.updaterError = undefined;
     const { error: _error, failureStage: _failureStage, ...installSnapshot } = this.snapshot;
     this.snapshot = { ...installSnapshot, status: "installing" };
     try {

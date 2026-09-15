@@ -10,6 +10,7 @@ describe("Arkme desktop preload capabilities", () => {
     expect(arkmeDesktopCapabilities).toEqual({
       startupAuthGate: true,
       appUpdate: true,
+      appUpdateUi: true,
       runtimeManaged: true
     });
     expect(Object.isFrozen(arkmeDesktopCapabilities)).toBe(true);

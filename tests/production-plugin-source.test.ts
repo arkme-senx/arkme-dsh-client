@@ -16,19 +16,19 @@ import {
 } from "../scripts/production-plugin-source.mjs";
 
 const packageName = "@senguoyun/dsh-arkme";
-const commit = "e817cb21e3923c8e903d68d442f3227c9e6c78ef";
+const commit = "2838fdceea0e4702b9017a31e0ad6f0893fc823a";
 const dependencySpec =
   `git+ssh://git@github.com/arkme-senx/arkme-dsh-plugin.git#${commit}`;
 const tarball =
   `https://codeload.github.com/arkme-senx/arkme-dsh-plugin/tar.gz/${commit}`;
-const peerSuffix = "(2e4ae8833cffc2b8e2a560f0f5496f1a)";
+const peerSuffix = "(573d2c61500c32345d20c20077cad57d)";
 const gitAllowBuildsKey = `${packageName}@${dependencySpec}`;
 const tarballAllowBuildsKey = `${packageName}@${tarball}`;
 const allowBuildsKey = gitAllowBuildsKey;
 const packageResolutionKey = `${packageName}@${tarball}`;
 const snapshotKey = `${packageResolutionKey}${peerSuffix}`;
 const productionIntegrity =
-  "sha512-bCBOmvdcR+wrLluFEbHtjntX4t7r476oNEV6faZ22oa1Si+eX6Jgu/jysR+w3dgTRN/swByyH55oK00ZOCxnuw==";
+  "sha512-sfAkMLLEHniTWw2zu+ECpTIcoJJxkLyuBb7bDCuWotEmeJPkwV9hevOX4v9NbZ+IsoAqI82Ze7B5huK7voHBZA==";
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const [realWorkspaceManifest, realLockfileManifest] = await Promise.all([
   readFile(path.join(projectRoot, "pnpm-workspace.yaml"), "utf8"),
@@ -93,7 +93,7 @@ describe("production plugin source", () => {
 
     await expect(readProductionPluginSource(project)).resolves.toEqual({
       packageName,
-      packageVersion: "0.1.29",
+      packageVersion: "0.1.52",
       repository: "git@github.com:arkme-senx/arkme-dsh-plugin.git",
       commit,
       dependencySpec
@@ -109,14 +109,14 @@ describe("production plugin source", () => {
 
     await expect(readProductionPluginSource(project)).resolves.toMatchObject({
       packageName,
-      packageVersion: "0.1.29",
+      packageVersion: "0.1.52",
       commit
     });
   });
 
   test.each([
     ["a branch", "main"],
-    ["a tag", "v0.1.29"],
+    ["a tag", "v0.1.52"],
     ["a short SHA", commit.slice(0, 12)]
   ])("rejects %s instead of a full commit", async (_description, ref) => {
     const project = await createProject({
@@ -294,17 +294,17 @@ describe("production plugin source", () => {
     );
   });
 
-  test("rejects a lockfile catalog version other than 0.1.29", async () => {
+  test("rejects a lockfile catalog version other than 0.1.52", async () => {
     const project = await createProject({
-      lockfile: lockfileManifest().replace("      version: 0.1.29", "      version: 0.1.5")
+      lockfile: lockfileManifest().replace("      version: 0.1.52", "      version: 0.1.5")
     });
 
     await expect(readProductionPluginSource(project)).rejects.toThrow(
-      "lockfile production catalog version must be 0.1.29"
+      "lockfile production catalog version must be 0.1.52"
     );
   });
 
-  test("rejects a lockfile package version other than 0.1.29", async () => {
+  test("rejects a lockfile package version other than 0.1.52", async () => {
     const project = await createProject({
       lockfile: mutateLockfile((lockfile) => {
         lockfile.packages[packageResolutionKey].version = "0.1.5";
@@ -312,7 +312,7 @@ describe("production plugin source", () => {
     });
 
     await expect(readProductionPluginSource(project)).rejects.toThrow(
-      "lockfile package version must be 0.1.29"
+      "lockfile package version must be 0.1.52"
     );
   });
 
@@ -582,7 +582,7 @@ describe("production plugin source", () => {
 
     await expect(verifyRuntimePlugin(fixture)).resolves.toEqual({
       packageName,
-      packageVersion: "0.1.29"
+      packageVersion: "0.1.52"
     });
   });
 
@@ -618,7 +618,7 @@ describe("production plugin source", () => {
     const fixture = await createRuntimePlugin({ version: "0.1.5" });
 
     await expect(verifyRuntimePlugin(fixture)).rejects.toThrow(
-      "runtime plugin package version must equal production source version 0.1.29"
+      "runtime plugin package version must equal production source version 0.1.52"
     );
   });
 
@@ -705,7 +705,7 @@ describe("production plugin source", () => {
     const provenancePath = await writePluginProvenance({
       pluginDir: fixture.pluginDir,
       source: fixture.source,
-      packageVersion: "0.1.29"
+      packageVersion: "0.1.52"
     });
 
     expect(provenancePath).toBe(path.join(fixture.pluginDir, "PLUGIN_PROVENANCE.json"));
@@ -716,7 +716,7 @@ describe("production plugin source", () => {
       repository: "git@github.com:arkme-senx/arkme-dsh-plugin.git",
       commit,
       packageName,
-      packageVersion: "0.1.29"
+      packageVersion: "0.1.52"
     });
     expect(provenanceText).toBe(`${JSON.stringify({
       schemaVersion: 1,
@@ -724,7 +724,7 @@ describe("production plugin source", () => {
       repository: "git@github.com:arkme-senx/arkme-dsh-plugin.git",
       commit,
       packageName,
-      packageVersion: "0.1.29"
+      packageVersion: "0.1.52"
     }, null, 2)}\n`);
     expect(await provenanceTempFiles(fixture.pluginDir)).toEqual([]);
   });
@@ -736,7 +736,7 @@ describe("production plugin source", () => {
     await expect(writePluginProvenance({
       pluginDir: fixture.pluginDir,
       source: fixture.source,
-      packageVersion: "0.1.29"
+      packageVersion: "0.1.52"
     })).rejects.toThrow();
     expect(await provenanceTempFiles(fixture.pluginDir)).toEqual([]);
   });
@@ -748,7 +748,7 @@ describe("production plugin source", () => {
       pluginDir: fixture.pluginDir,
       source: fixture.source,
       packageVersion: "0.1.5"
-    })).rejects.toThrow("provenance package version must equal production source version 0.1.29");
+    })).rejects.toThrow("provenance package version must equal production source version 0.1.52");
     await expect(readFile(
       path.join(fixture.pluginDir, "PLUGIN_PROVENANCE.json"),
       "utf8"
@@ -768,19 +768,19 @@ describe("production plugin source", () => {
           path.join(fixture.pluginDir, "PLUGIN_PROVENANCE.json"),
           "utf8"
         ));
-        expect(provenance.packageVersion).toBe("0.1.29");
+        expect(provenance.packageVersion).toBe("0.1.52");
       }
     });
 
     expect(observations).toEqual(["import"]);
     expect(result).toEqual({
       packageName,
-      packageVersion: "0.1.29",
+      packageVersion: "0.1.52",
       provenancePath: path.join(fixture.pluginDir, "PLUGIN_PROVENANCE.json")
     });
     await expect(verifyRuntimePluginProvenance(fixture)).resolves.toEqual({
       packageName,
-      packageVersion: "0.1.29"
+      packageVersion: "0.1.52"
     });
   });
 
@@ -943,9 +943,10 @@ describe("production plugin source", () => {
   });
 
   test("keeps runtime preparation on the tested production orchestration without vendor fallback", async () => {
-    const [script, packagedSmoke] = await Promise.all([
+    const [script, packagedSmoke, packagedSmokeEvidence] = await Promise.all([
       readFile(path.join(process.cwd(), "scripts", "prepare-runtime.mjs"), "utf8"),
-      readFile(path.join(process.cwd(), "scripts", "packaged-smoke.mjs"), "utf8")
+      readFile(path.join(process.cwd(), "scripts", "packaged-smoke.mjs"), "utf8"),
+      readFile(path.join(process.cwd(), "scripts", "packaged-smoke-lib.mjs"), "utf8")
     ]);
     const stagingStart = script.indexOf("await stageRuntimeWithStableProductionSource({");
     const stagingEnd = script.indexOf("\n\nawait assertRuntimeDependency", stagingStart);
@@ -975,26 +976,30 @@ describe("production plugin source", () => {
     expect(afterTransaction).not.toContain("const directoryPickerWorker");
     expect(afterTransaction).not.toContain("await pruneRuntimeFiles(runtimeRoot)");
     expect(afterTransaction).not.toContain("buildElectronRebuildArgs({");
-    expect(packagedSmoke).toContain("release.artifacts.requiredPlugin.version");
-    expect(packagedSmoke).toContain("state.probationReleaseId === undefined");
+    expect(packagedSmoke).toContain("hasCompletedPackagedRuntimeStartup({ state, release, log })");
+    expect(packagedSmoke).toContain("resolvePackagedRuntimeCacheRoot(userData, packagedEpochSource)");
+    expect(packagedSmokeEvidence).toContain("release?.releaseId !== state.activeReleaseId");
+    expect(packagedSmokeEvidence).toContain("state.probationReleaseId !== undefined");
+    expect(packagedSmokeEvidence).toContain("runtime-candidate-complete");
+    expect(packagedSmokeEvidence).toContain("render-ready");
     expect(packagedSmoke).not.toContain("validatePackagedPluginMetadata({");
   });
 });
 
 function validPackagedMetadata(): PackagedMetadataInput {
   return {
-    manifest: { name: packageName, version: "0.1.29" },
+    manifest: { name: packageName, version: "0.1.52" },
     provenance: {
       schemaVersion: 1,
       source: "git",
       repository: "git@github.com:arkme-senx/arkme-dsh-plugin.git",
       commit,
       packageName,
-      packageVersion: "0.1.29"
+      packageVersion: "0.1.52"
     },
     expectedSource: {
       packageName,
-      packageVersion: "0.1.29",
+      packageVersion: "0.1.52",
       repository: "git@github.com:arkme-senx/arkme-dsh-plugin.git",
       commit,
       dependencySpec
@@ -1020,7 +1025,7 @@ async function createRuntimePlugin(manifest: {
   await Promise.all([
     writeFile(path.join(pluginDir, "package.json"), JSON.stringify({
       name: manifest.name ?? packageName,
-      version: manifest.version ?? "0.1.29",
+      version: manifest.version ?? "0.1.52",
       dsh: { bundle: { patch: manifest.patch ?? "./cordis.patch.yml" } }
     })),
     writeFile(path.join(pluginDir, "cordis.patch.yml"), "[]\n"),
@@ -1032,7 +1037,7 @@ async function createRuntimePlugin(manifest: {
     pluginDir,
     source: {
       packageName,
-      packageVersion: "0.1.29",
+      packageVersion: "0.1.52",
       repository: "git@github.com:arkme-senx/arkme-dsh-plugin.git",
       commit,
       dependencySpec

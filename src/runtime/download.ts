@@ -18,6 +18,7 @@ interface DownloadRuntimeArtifactOptions {
   idleTimeoutMs?: number;
   retryDelaysMs?: number[];
   sleep?: (milliseconds: number) => Promise<void>;
+  signal?: AbortSignal;
 }
 
 export async function downloadRuntimeArtifact(
@@ -36,6 +37,7 @@ export async function downloadRuntimeArtifact(
   };
   let lastError: unknown;
   for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
+    options.signal?.throwIfAborted();
     const delay = retryDelays[attempt] ?? 0;
     if (delay > 0) await sleep(delay);
     try {
@@ -71,12 +73,17 @@ async function downloadRuntimeArtifactOnce(
     offset = 0;
   }
   const controller = new AbortController();
+  const abort = () => controller.abort(options.signal?.reason);
+  options.signal?.addEventListener("abort", abort, { once: true });
+  if (options.signal?.aborted) abort();
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   const resetIdleTimer = () => {
     if (idleTimer !== undefined) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => controller.abort(), options.idleTimeoutMs ?? 30_000);
   };
   resetIdleTimer();
+  let responseBody: ReadableStream<Uint8Array> | null = null;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
     const requestInit: RequestInit = {
       method: "GET",
@@ -84,7 +91,13 @@ async function downloadRuntimeArtifactOnce(
       signal: controller.signal
     };
     if (offset > 0) requestInit.headers = { Range: `bytes=${offset}-` };
-    const response = await fetcher(artifact.url, requestInit);
+    let response: Response;
+    try { response = await fetcher(artifact.url, requestInit); }
+    catch (error) {
+      if (options.signal?.aborted) throw error;
+      throw new RuntimeNetworkWaitingError("网络请求失败", {cause:error});
+    }
+    responseBody = response.body;
     if (response.status >= 300 && response.status < 400) {
       throw new RuntimeDownloadError(`Runtime artifact redirect HTTP ${response.status} is not allowed`, true);
     }
@@ -112,9 +125,14 @@ async function downloadRuntimeArtifactOnce(
     const file = await open(partialPath, offset === 0 ? "w" : "a", 0o600);
     let written = offset;
     try {
-      const reader = response.body.getReader();
+      reader = response.body.getReader();
       while (true) {
-        const chunk = await reader.read();
+        let chunk: ReadableStreamReadResult<Uint8Array>;
+        try { chunk = await reader.read(); }
+        catch (error) {
+          if (options.signal?.aborted) throw error;
+          throw new RuntimeNetworkWaitingError("下载连接中断", {cause:error});
+        }
         if (chunk.done) break;
         resetIdleTimer();
         if (written > artifact.size - chunk.value.byteLength) {
@@ -129,7 +147,7 @@ async function downloadRuntimeArtifactOnce(
       await file.close();
     }
     if (written !== artifact.size) {
-      throw new RuntimeArtifactValidationError("ARTIFACT_SIZE_MISMATCH", `Runtime artifact size mismatch: expected ${artifact.size}, received ${written}`, "download");
+      throw new RuntimeNetworkWaitingError(`Runtime download interrupted: expected ${artifact.size}, received ${written}`);
     }
     const digest = await sha256File(partialPath);
     if (digest !== artifact.sha256) {
@@ -140,14 +158,38 @@ async function downloadRuntimeArtifactOnce(
     await rename(partialPath, destination);
     options.onProgress?.(100);
     return destination;
+  } catch (error) {
+    // Stop this transfer before detaching its parent cancellation listener.
+    // The installer's sibling abort arrives only after this promise rejects.
+    controller.abort(error);
+    try {
+      if (reader !== undefined) await reader.cancel(error);
+      else await responseBody?.cancel(error);
+    } catch {
+      // Cleanup AbortError must not replace the HTTP/digest/size failure.
+    }
+    throw error;
   } finally {
     if (idleTimer !== undefined) clearTimeout(idleTimer);
+    options.signal?.removeEventListener("abort", abort);
   }
 }
 
-class RuntimeDownloadError extends Error {
+export class RuntimeDownloadError extends Error {
   constructor(message: string, readonly permanent: boolean) {
     super(message);
+    this.name = "RuntimeDownloadError";
+  }
+}
+
+export class RuntimeNetworkWaitingError extends RuntimeDownloadError {
+  readonly displayTitle = "需要联网完成运行环境升级";
+  readonly suggestion = "已下载进度和本地数据会保留。\n\n网络恢复后，请点击“重试”继续。";
+  readonly showWorkspaceAction = false;
+  constructor(readonly technicalDetails: string, options?: ErrorOptions) {
+    super("需要联网完成运行环境升级", false);
+    this.name = "RuntimeNetworkWaitingError";
+    if (options?.cause !== undefined) this.cause = options.cause;
   }
 }
 

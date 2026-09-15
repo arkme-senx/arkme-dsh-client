@@ -6,7 +6,7 @@ const RESOLVER_PATTERN = /^([ \t]*)function resolveBundleDir\(binName, packageNa
 const MOUNT_PATTERN = /^([ \t]*)async function mountRootInclude\(ctx, absoluteConfigPath, patches = \[\], bareModuleBaseUrl\) \{\r?\n([ \t]*)ctx\.loader\.builtins\.include = bareModuleBaseUrl === void 0 \? Include : class HostResolvedRootInclude extends Include \{/gm;
 const HOST_IMPORT_PATTERN = /^([ \t]*)return internal\.import\(specifier, bareModuleBaseUrl, \{\}\);$/gm;
 const ROUTER_V1_PATTERN = /^([ \t]*)const moduleBaseUrl = profileFirstModules\.has\(name\)\r?\n[ \t]*\? profileModuleBaseUrl\r?\n[ \t]*: installedModuleBaseUrl;$/gm;
-const SYMLINK_PATTERN = /^([ \t]*)if \(readlinkSync\(link\) === target\) return;$/gm;
+const SYMLINK_PATTERN = /^([ \t]*)if \((readlinkSync\(link\) === target|symlinkPointsTo\(link, target\))\) return;$/gm;
 const RESOLVER_PATCH_MARKER = "process.env.DSH_PROFILE_FIRST_BUNDLES";
 const MODULE_ROUTER_PATCH_MARKER = "process.env.DSH_INSTALLED_MODULE_BASE_PATH";
 const MODULE_ROUTER_V2_MARKER = "const installedModuleDir = installedModuleBasePath";
@@ -110,14 +110,15 @@ export async function patchDshProfileBundleResolution(appBootRoot) {
     );
   }
 
-  if (!patched.includes(SYMLINK_PATCH_MARKER)) {
+  if (!patched.includes(SYMLINK_PATCH_MARKER)
+      && !patched.includes('symlinkPointsTo(link, target) && existsSync(join(link, "package.json"))) return;')) {
     const symlinkOccurrences = [...patched.matchAll(SYMLINK_PATTERN)];
     if (symlinkOccurrences.length !== 1) {
       throw new Error(`Expected one DSH installation fallback link check, found ${symlinkOccurrences.length}`);
     }
     patched = patched.replace(
       SYMLINK_PATTERN,
-      (_line, indentation) => `${indentation}if (readlinkSync(link) === target && existsSync(join(link, "package.json"))) return;`
+      (_line, indentation, comparison) => `${indentation}if (${comparison} && existsSync(join(link, "package.json"))) return;`
     );
   }
 

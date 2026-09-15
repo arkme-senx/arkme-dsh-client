@@ -10,6 +10,9 @@ function isDshPackage(name) {
 function pinDependencies(dependencies) {
   if (!dependencies) return;
   for (const name of Object.keys(dependencies)) {
+    // Retired type-only build dependency in the plugin's own development tree;
+    // no rc2 version was published and it is absent from the runtime peer graph.
+    if (name === "@deepseek-ai/dsh-client-runtime") continue;
     if (isDshPackage(name)) dependencies[name] = targetVersion;
   }
 }

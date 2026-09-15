@@ -3,6 +3,7 @@ import path from "node:path";
 export const arkmeDesktopCapabilities = Object.freeze({
   startupAuthGate: true as const,
   appUpdate: true as const,
+  appUpdateUi: true as const,
   runtimeManaged: true as const
 });
 

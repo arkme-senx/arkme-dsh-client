@@ -146,7 +146,177 @@ function hasDesktopLocationUserActivation(): boolean {
   return leased;
 }
 
+interface AppUpdateState {
+  status: "idle" | "checking" | "current" | "available" | "downloading" | "downloaded" | "installing" | "failed";
+  currentVersion: string;
+  currentVersionCode: number;
+  canAutoInstall: boolean;
+  latestVersion?: string;
+  latestVersionCode?: number;
+  releaseNotes?: string;
+  error?: string;
+  failureStage?: "check" | "download" | "install";
+  downloadedBytes?: number;
+  totalBytes?: number;
+  installWarning?: string;
+}
+interface AppUpdateNotice {
+  schemaVersion: 1;
+  revision: number;
+  expanded: boolean;
+  state: AppUpdateState | null;
+  websiteOpening: boolean;
+  actionError?: string;
+  actionMessage?: string;
+}
+
+let appUpdateInstalling = false;
+let runtimeRestartPending = false;
+
+function desktopUpdateNoticeStack(documentRef: Document): HTMLElement {
+  const existing = documentRef.getElementById("arkme-desktop-update-notices");
+  if (existing !== null) return existing;
+  const root = documentRef.createElement("div");
+  root.id = "arkme-desktop-update-notices";
+  documentRef.documentElement.append(root);
+  return root;
+}
+
+function parseAppUpdateNotice(value: unknown): AppUpdateNotice | null {
+  if (value === null || typeof value !== "object") return null;
+  const notice = value as Partial<AppUpdateNotice>;
+  if (notice.schemaVersion !== 1 || !Number.isSafeInteger(notice.revision) || (notice.revision ?? -1) < 0
+    || typeof notice.expanded !== "boolean" || typeof notice.websiteOpening !== "boolean") return null;
+  const state = notice.state;
+  if (state !== null && (state === undefined || typeof state !== "object"
+    || !["idle", "checking", "current", "available", "downloading", "downloaded", "installing", "failed"].includes(state.status)
+    || typeof state.currentVersion !== "string" || !Number.isSafeInteger(state.currentVersionCode)
+    || typeof state.canAutoInstall !== "boolean")) return null;
+  return notice as AppUpdateNotice;
+}
+
+function installAppUpdateNoticeRenderer(documentRef: Document = document): () => void {
+  let latest: AppUpdateNotice | null = null;
+  let disposed = false;
+  let domReady = documentRef.readyState !== "loading";
+  const rootId = "arkme-app-update-notice";
+  const invoke = (operation: string) => {
+    void ipcRenderer.invoke(`arkme-app-update:${operation}`).catch(() => {
+      const message = documentRef.getElementById("arkme-app-update-action-error");
+      if (message !== null) message.textContent = "操作未完成，请重试";
+    });
+  };
+  const render = () => {
+    if (!domReady || disposed) return;
+    documentRef.getElementById(rootId)?.remove();
+    const notice = latest;
+    const state = notice?.state;
+    // The envelope exists before a version is discovered. It is not a reason to
+    // show UI, and dismissing a real update must not leave a floating launcher.
+    if (!notice?.expanded || !state?.latestVersion?.trim()
+      || typeof state.latestVersionCode !== "number" || state.latestVersionCode <= state.currentVersionCode
+      || !["available", "downloading", "downloaded", "installing", "failed"].includes(state.status)) return;
+    const status = state.status;
+    const root = documentRef.createElement("aside");
+    root.id = rootId;
+    root.setAttribute("role", "status");
+    root.setAttribute("aria-live", "polite");
+    const button = (text: string, operation: string, primary = false) => {
+      const result = runtimeUpdateNoticeButton(documentRef, text, () => invoke(operation), primary);
+      result.disabled = status === "installing" || notice.websiteOpening;
+      return result;
+    };
+    const card = documentRef.createElement("div");
+    card.className = "arkme-app-update-card";
+    const icon = documentRef.createElement("span");
+    icon.className = "arkme-app-update-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = status === "downloaded" ? "✓" : status === "failed" ? "!" : status === "installing" ? "↻" : "↓";
+    const content = documentRef.createElement("div");
+    content.className = "arkme-app-update-content";
+    const title = documentRef.createElement("strong");
+    title.textContent = status === "downloaded" ? `客户端 v${state.latestVersion} 已就绪`
+      : status === "installing" ? "正在安装更新，即将重新启动…"
+      : status === "failed" ? `v${state.latestVersion} 更新未完成`
+      : `检测到新版本 v${state.latestVersion}`;
+    content.append(title);
+    const detail = documentRef.createElement("p");
+    detail.textContent = status === "failed" ? state.error ?? "请重试或前往官网下载最新版本"
+      : status === "available" ? state.canAutoInstall ? "正在准备更新包" : "请前往官网下载最新版本"
+      : status === "downloading" ? "正在后台下载" : "";
+    content.append(detail);
+    if (status === "downloading" && typeof state.totalBytes === "number" && Number.isFinite(state.totalBytes) && state.totalBytes > 0) {
+      const percent = Math.min(100, Math.max(0, Math.round((state.downloadedBytes ?? 0) / state.totalBytes * 100)));
+      detail.textContent += ` · ${percent}%`;
+      const progress = documentRef.createElement("progress");
+      progress.setAttribute("max", "100");
+      progress.setAttribute("value", String(percent));
+      progress.setAttribute("aria-label", "APP 更新下载进度");
+      content.append(progress);
+    }
+    if (state.installWarning && status !== "installing") {
+      const warning = documentRef.createElement("p");
+      warning.setAttribute("role", "alert");
+      warning.textContent = state.installWarning;
+      content.append(warning);
+    }
+    if (state.releaseNotes && (status === "available" || status === "downloading")) {
+      const notes = documentRef.createElement("p");
+      notes.className = "arkme-app-update-notes";
+      notes.textContent = state.releaseNotes;
+      content.append(notes);
+    }
+    const feedback = documentRef.createElement("p");
+    feedback.id = "arkme-app-update-action-error";
+    feedback.setAttribute("role", notice.actionError ? "alert" : "status");
+    feedback.textContent = notice.actionError ?? notice.actionMessage ?? "";
+    content.append(feedback);
+    const actions = documentRef.createElement("div");
+    actions.className = "arkme-app-update-actions";
+    if (status === "available" && !state.canAutoInstall) {
+      actions.append(button("稍后", "collapse"), button("下载最新版本", "open-website", true));
+    } else if (status === "downloaded") {
+      if (state.installWarning) actions.append(button("下载最新版本", "open-website"));
+      actions.append(button("稍后安装", "collapse"), button("重启并安装", "install", true));
+    } else if (status === "failed") {
+      actions.append(button("重试", "retry"), button("下载最新版本", "open-website", true), button("关闭", "collapse"));
+    } else if (status !== "installing") {
+      actions.append(button("关闭", "collapse"));
+    }
+    card.append(icon, content, actions); root.append(card);
+    desktopUpdateNoticeStack(documentRef).append(root);
+    applyAppInstallingState(documentRef);
+  };
+  const accept = (value: unknown) => {
+    const parsed = parseAppUpdateNotice(value);
+    if (parsed === null || (latest !== null && parsed.revision <= latest.revision)) return;
+    latest = parsed;
+    appUpdateInstalling = parsed.state?.status === "installing";
+    render();
+    applyAppInstallingState(documentRef);
+  };
+  const onChange = (_event: Electron.IpcRendererEvent, value: unknown) => { accept(value); };
+  const onReady = () => { domReady = true; render(); };
+  ipcRenderer.on("arkme-app-update:changed", onChange);
+  if (!domReady) documentRef.addEventListener("DOMContentLoaded", onReady, { once: true });
+  void ipcRenderer.invoke("arkme-app-update:notice").then(accept).catch(() => undefined);
+  return () => {
+    disposed = true;
+    ipcRenderer.removeListener("arkme-app-update:changed", onChange);
+    documentRef.removeEventListener("DOMContentLoaded", onReady);
+    documentRef.getElementById(rootId)?.remove();
+  };
+}
+
 const RUNTIME_UPDATE_NOTICE_ROOT_ID = "arkme-runtime-update-notice";
+const RUNTIME_UPDATE_NOTICE_RESTART_ID = "arkme-runtime-update-restart";
+
+function applyAppInstallingState(documentRef: Document): void {
+  const runtime = documentRef.getElementById(RUNTIME_UPDATE_NOTICE_ROOT_ID);
+  if (runtime !== null) runtime.setAttribute("data-app-installing", String(appUpdateInstalling));
+  const restart = documentRef.getElementById(RUNTIME_UPDATE_NOTICE_RESTART_ID) as HTMLButtonElement | null;
+  if (restart !== null) restart.disabled = appUpdateInstalling || runtimeRestartPending;
+}
 
 // Keep this renderer in the preload entry: sandboxed Electron preloads cannot
 // require local relative modules unless the preload is bundled first.
@@ -193,14 +363,23 @@ function installRuntimeUpdateNoticeRenderer(
     actions.className = "arkme-runtime-update-notice__actions";
 
     if (snapshot.kind === "installed") {
+      const restart = runtimeUpdateNoticeButton(documentRef, "立即重启", () => {
+        runtimeRestartPending = true;
+        applyAppInstallingState(documentRef);
+        void bridge.restart(snapshot.messageId).then(accepted => {
+          if (!accepted) {
+            runtimeRestartPending = false;
+            applyAppInstallingState(documentRef);
+          }
+        }).catch(() => {
+          runtimeRestartPending = false;
+          applyAppInstallingState(documentRef);
+        });
+      }, true);
+      restart.id = RUNTIME_UPDATE_NOTICE_RESTART_ID;
+      restart.disabled = appUpdateInstalling || runtimeRestartPending;
       actions.append(
-        runtimeUpdateNoticeButton(documentRef, "立即重启", () => {
-          const button = actions.children[0] as HTMLButtonElement | undefined;
-          if (button !== undefined) button.disabled = true;
-          void bridge.restart(snapshot.messageId).then(accepted => {
-            if (!accepted && button !== undefined) button.disabled = false;
-          }).catch(() => { if (button !== undefined) button.disabled = false; });
-        }, true),
+        restart,
         runtimeUpdateNoticeButton(documentRef, "稍后", () => { dismiss(snapshot.messageId); })
       );
     } else if (snapshot.kind === "failed") {
@@ -212,7 +391,8 @@ function installRuntimeUpdateNoticeRenderer(
     close.setAttribute("aria-label", "关闭更新提示");
     card.append(icon, message, actions, close);
     root.append(card);
-    documentRef.documentElement.append(root);
+    desktopUpdateNoticeStack(documentRef).append(root);
+    applyAppInstallingState(documentRef);
     renderedMessageId = snapshot.messageId;
   };
   const accept = (value: unknown) => {
@@ -293,15 +473,24 @@ const attentionCapabilities = parseDesktopAttentionCapabilities(
   ipcRenderer.sendSync("arkme-desktop:attention-capabilities") as unknown
 );
 let initialAppUpdateCheck = true;
+const harnessReadyNonce = ipcRenderer.sendSync("arkme-runtime:page-ready-nonce") as unknown;
+let harnessReadyNotified = false;
 
 contextBridge.exposeInMainWorld(
   "arkmeDesktop",
   Object.freeze({
+    notifyHarnessReady(): void {
+      if (harnessReadyNotified || typeof harnessReadyNonce !== "string" || harnessReadyNonce === "") return;
+      harnessReadyNotified = true;
+      ipcRenderer.send("arkme-runtime:page-ready", harnessReadyNonce);
+    },
     startupAuthGate: true as const,
     device: Object.freeze({
       snapshot: async () => await ipcRenderer.invoke("arkme-desktop:device-snapshot")
     }),
     appUpdate: true as const,
+    appUpdateUi: true as const,
+    appVersion: ipcRenderer.sendSync("arkme-app-update:app-version") as string,
     runtimeManaged: true as const,
     ...(harnessVersion === undefined ? {} : { harnessVersion }),
     attention: Object.freeze(attentionCapabilities),
@@ -316,7 +505,16 @@ contextBridge.exposeInMainWorld(
       },
       download: async () => await ipcRenderer.invoke("arkme-app-update:download"),
       install: async () => await ipcRenderer.invoke("arkme-app-update:install"),
-      showInFolder: async () => await ipcRenderer.invoke("arkme-app-update:show-in-folder")
+      open: async () => await ipcRenderer.invoke("arkme-app-update:open") as boolean,
+      onChanged(listener: (state: AppUpdateState | null) => void): () => void {
+        let revision = -1;
+        const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+          const notice = parseAppUpdateNotice(value);
+          if (notice !== null && notice.revision > revision) { revision = notice.revision; listener(notice.state); }
+        };
+        ipcRenderer.on("arkme-app-update:changed", handler);
+        return () => { ipcRenderer.removeListener("arkme-app-update:changed", handler); };
+      }
     })
   })
 );
@@ -457,7 +655,7 @@ contextBridge.exposeInMainWorld("arkmeRuntimeStatus", Object.freeze({
   }
 }));
 
-installRuntimeUpdateNoticeRenderer(Object.freeze({
+const stopRuntimeUpdateNotice = installRuntimeUpdateNoticeRenderer(Object.freeze({
   snapshot: async () => await ipcRenderer.invoke("arkme:runtime-update-notice:snapshot") as unknown,
   dismiss: async (messageId: string) => await ipcRenderer.invoke(
     "arkme:runtime-update-notice:dismiss",
@@ -473,6 +671,12 @@ installRuntimeUpdateNoticeRenderer(Object.freeze({
     return () => { ipcRenderer.removeListener("arkme:runtime-update-notice:changed", handler); };
   }
 }));
+
+const stopAppUpdateNotice = installAppUpdateNoticeRenderer();
+if (typeof window !== "undefined") window.addEventListener("pagehide", () => {
+  stopAppUpdateNotice();
+  stopRuntimeUpdateNotice();
+}, { once: true });
 
 function parseRuntimeInstallProgress(value: unknown): RuntimeInstallProgress | undefined {
   if (value === null || typeof value !== "object") return undefined;

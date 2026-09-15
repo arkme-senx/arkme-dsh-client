@@ -249,9 +249,10 @@ export async function writePluginProvenance({ pluginDir, source, packageVersion 
   );
   const contents = `${JSON.stringify({
     schemaVersion: 1,
-    source: "git",
-    repository: source.repository,
-    commit: source.commit,
+    source: source.kind === "local" ? "local" : "git",
+    ...(source.kind === "local"
+      ? { contentSha256: source.contentSha256, releaseEligible: false }
+      : { repository: source.repository, commit: source.commit }),
     packageName: source.packageName,
     packageVersion
   }, null, 2)}\n`;
@@ -275,9 +276,13 @@ export async function writePluginProvenance({ pluginDir, source, packageVersion 
 export function validatePackagedPluginMetadata({ manifest, provenance, expectedSource }) {
   if (
     provenance?.schemaVersion !== 1
-    || provenance?.source !== "git"
-    || provenance?.repository !== expectedSource?.repository
-    || provenance?.commit !== expectedSource?.commit
+    || (expectedSource?.kind === "local"
+      ? provenance?.source !== "local"
+        || provenance?.releaseEligible !== false
+        || provenance?.contentSha256 !== expectedSource.contentSha256
+      : provenance?.source !== "git"
+        || provenance?.repository !== expectedSource?.repository
+        || provenance?.commit !== expectedSource?.commit)
     || provenance?.packageName !== expectedSource?.packageName
     || provenance?.packageVersion !== expectedSource?.packageVersion
     || manifest?.name !== expectedSource?.packageName

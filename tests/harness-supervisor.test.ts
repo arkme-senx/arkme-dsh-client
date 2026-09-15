@@ -43,6 +43,8 @@ class FakeChild extends EventEmitter implements ManagedChild {
 }
 
 async function createHarness(overrides: {
+  realAuthentication?: boolean;
+  onAuthenticated?: (session: import("../src/harness-auth-session.js").HarnessAuthSession) => Promise<void>;
   health?: (context: { spawnCount: number; children: FakeChild[] }) => Promise<boolean>;
   apiReady?: () => Promise<boolean>;
   port?: number;
@@ -75,6 +77,7 @@ async function createHarness(overrides: {
     const spawned = children[spawnIndex] ?? new FakeChild();
     if (children[spawnIndex] === undefined) children.push(spawned);
     spawnIndex += 1;
+    queueMicrotask(() => spawned.stdout.write(`dsh web: http://127.0.0.1:${overrides.port ?? 41234}/?token=test-launch-token\n`));
     return spawned;
   });
   let now = 0;
@@ -84,6 +87,7 @@ async function createHarness(overrides: {
 
   const supervisor = new HarnessProcessSupervisor(
     {
+      ...(overrides.onAuthenticated === undefined ? {} : {onAuthenticated: overrides.onAuthenticated}),
       execPath: "/Applications/arkme.app/Contents/MacOS/arkme",
       dshBinPath: "/runtime/@deepseek-ai/dsh/lib/bin.js",
       dshHome,
@@ -111,6 +115,7 @@ async function createHarness(overrides: {
       }
     },
     {
+      ...(overrides.realAuthentication ? {} : { authenticate: async (_launchUrl: string, url: string, signal: AbortSignal) => ({ url, signal, cookie: {name: "dsh-auth-test", value: "v1.body.sig", path: "/" as const, httpOnly: true as const, sameSite: "strict" as const} }) }),
       allocatePort: async () => overrides.port ?? 41234,
       spawn,
       checkHealth: overrides.health === undefined
@@ -332,7 +337,7 @@ describe("HarnessProcessSupervisor", () => {
           ? undefined
           : JSON.parse(Buffer.concat(chunks).toString("utf8")) as { rpcId?: string };
 
-        if (request.url === "/api/host.describe") {
+        if (request.url === "/api/session/list") {
           hostDescribeAttempts += 1;
           if (hostDescribeAttempts === 1) {
             response.writeHead(404).end();
@@ -344,18 +349,14 @@ describe("HarnessProcessSupervisor", () => {
             result: {
               ok: true,
               value: {
-                version: "0.1.0-rc.8",
-                cwd: "/Users/test/project",
-                attachedSessions: 0,
-                home: "/Users/test",
-                canOpenPath: true
+                items: []
               }
             }
           }));
           return;
         }
 
-        if (request.url === "/api/workspace.create") {
+        if (request.url === "/api/workspace/create") {
           workspaceRegistrationAttempts += 1;
           response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
             type: "server-response",
@@ -519,8 +520,8 @@ describe("HarnessProcessSupervisor", () => {
       expect(receivedRequest).toMatchObject({
         type: "client-request",
         rpcId: expect.any(String),
-        method: "workspace.create",
-        payload: { path: "/Users/test/project" }
+        method: "workspace/create",
+        payload: { args: { request: { path: "/Users/test/project" } } }
       });
       expect(states).toEqual([{ kind: "starting", workspacePath: "/Users/test/project" }]);
 
@@ -1072,4 +1073,75 @@ test("disk log flushing cannot indefinitely block stopping the Harness", async (
     await stopping;
     expect(closeLog).toHaveBeenCalledOnce();
   } finally { vi.useRealTimers(); }
+});
+
+test('real rc2 auth protects RPC, installs cookie before ready, and revokes each restart generation', async () => {
+  const sessions: import('../src/harness-auth-session.js').HarnessAuthSession[] = [];
+  const methods: string[] = [];
+  let authCount = 0;
+  const server = createServer((req, res) => { void (async () => {
+    if (req.url === '/?token=test-launch-token') {
+      authCount++;
+      res.writeHead(303, {location: '/', 'set-cookie': `dsh-auth-test=v1.body.${authCount}; Path=/; HttpOnly; SameSite=Strict`}).end(); return;
+    }
+    if (req.headers.cookie !== `dsh-auth-test=v1.body.${authCount}`) { res.writeHead(401).end(); return; }
+    if (req.url === '/') { res.writeHead(200).end('ready'); return; }
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    methods.push(body.method);
+    expect(req.url).toBe(`/api/${body.method}`);
+    expect(body.payload).toEqual(body.method === 'session/list' ? {args:{_request:{}}} : {args:{request:{path:'/Users/test/project'}}});
+    res.writeHead(200, {'content-type':'application/json'}).end(JSON.stringify({type:'server-response', rpcId:body.rpcId, result:{ok:true, value: body.method === 'session/list' ? {items:[]} : {created:true, workspace:{workspaceId:'w', path:'/Users/test/project', title:'project', sessionIds:[], createdAt:'now',updatedAt:'now'}}}}));
+  })().catch(e => res.destroy(e)); });
+  await new Promise<void>((resolve, reject) => { server.once('error',reject); server.listen(0,'127.0.0.1',resolve); });
+  const harness = await createHarness({port:(server.address() as {port:number}).port, realAuthentication:true, useRealApiReadiness:true, useRealWorkspaceRegistration:true, onAuthenticated:async session => {sessions.push(session);}});
+  try {
+    await harness.supervisor.start('/Users/test/project');
+    expect(sessions).toHaveLength(1);
+    expect(harness.supervisor.getState()?.kind).toBe('ready');
+    await harness.supervisor.restart('/Users/test/project');
+    expect(sessions[0]!.signal.aborted).toBe(true);
+    expect(sessions[0]!.cookie.value).toBe('');
+    expect(sessions[1]!.signal.aborted).toBe(false);
+    expect(authCount).toBe(2);
+    expect(methods).toEqual(['session/list','workspace/create','session/list','workspace/create']);
+    await harness.supervisor.stop('quit');
+    expect(sessions[1]!.signal.aborted).toBe(true);
+    const log = await readFile(path.join(harness.root, 'logs','harness.log'), 'utf8');
+    expect(log).not.toContain('test-launch-token');
+    expect(log).not.toContain('v1.body.');
+  } finally { await harness.supervisor.stop('quit'); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+test('stop while authentication callback is pending never reports ready or failed and clears credentials', async () => {
+  let entered!: () => void;
+  let release!: () => void;
+  const installed = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const harness = await createHarness({onAuthenticated: async () => {entered(); await gate;}});
+  const starting = harness.supervisor.start('/Users/test/project');
+  const rejected = expect(starting).rejects.toThrow();
+  await installed;
+  await harness.supervisor.stop('quit');
+  release();
+  await rejected;
+  expect(harness.states.map(state => state.kind)).toEqual(['starting','stopping']);
+});
+
+test('child exit revokes an authenticated session even while browser installation is pending', async () => {
+  let session!: import('../src/harness-auth-session.js').HarnessAuthSession;
+  let entered!: () => void;
+  let release!: () => void;
+  const installed = new Promise<void>(resolve => {entered = resolve;});
+  const gate = new Promise<void>(resolve => {release = resolve;});
+  const harness = await createHarness({onAuthenticated: async value => {session = value; entered(); await gate;}});
+  const starting = harness.supervisor.start('/Users/test/project');
+  const rejected = expect(starting).rejects.toThrow();
+  await installed;
+  harness.child.exit(1);
+  const revokedAtExit = session.signal.aborted;
+  release();
+  await rejected;
+  expect(revokedAtExit).toBe(true);
 });

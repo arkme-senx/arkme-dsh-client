@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import electronBinary from "electron";
@@ -14,6 +14,10 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const arch = process.env.ARKME_RUNTIME_ARCH?.trim() || process.arch;
 const buildId = process.env.ARKME_RUNTIME_BUILD_ID?.trim();
 if (!buildId) throw new Error("ARKME_RUNTIME_BUILD_ID is required so all platform artifacts share one build identity");
+const localCandidate = Boolean(process.env.ARKME_RUNTIME_LOCAL_PLUGIN_DIR?.trim());
+if (localCandidate && !buildId.startsWith("local-")) {
+  throw new Error("Local plugin candidates require an ARKME_RUNTIME_BUILD_ID beginning with local-; they are not production artifacts");
+}
 const runtimeRoot = runtimeDirectory(projectRoot, arch);
 const runtimeManifest = JSON.parse(await readFile(path.join(projectRoot, "runtime", "package.json"), "utf8"));
 const dshVersion = runtimeManifest.dependencies?.["@deepseek-ai/dsh"];
@@ -53,6 +57,13 @@ const result = await buildElectronHarnessArtifacts({
   version: dshVersion,
   buildId
 });
+if (localCandidate) {
+  await writeFile(path.join(outputDirectory, "LOCAL_CANDIDATE.json"), JSON.stringify({
+    releaseEligible: false,
+    reason: "Plugin readiness changes are local and not pinned to a published production commit",
+    plugin: JSON.parse(await readFile(path.join(runtimeRoot, "node_modules", "@senguoyun", "dsh-arkme", "PLUGIN_PROVENANCE.json"), "utf8"))
+  }, null, 2) + "\n");
+}
 console.log(JSON.stringify({ outputDirectory, ...result }));
 
 function run(command, args, cwd, env) {

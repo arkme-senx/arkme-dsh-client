@@ -9,7 +9,9 @@ import {
   assertRuntimeFreePaths,
   assertRuntimeFreeResources,
   normalizeArchivePath,
-  resolvePackagedSmokeEnvironment
+  resolvePackagedSmokeEnvironment,
+  resolvePackagedRuntimeCacheRoot,
+  hasCompletedPackagedRuntimeStartup
 } from "./packaged-smoke-lib.mjs";
 import { buildArchitectureLaunch } from "./runtime-architecture.mjs";
 import {
@@ -41,6 +43,7 @@ const layout = packagedAppLayoutFromRoot(
 assertRuntimeFreePaths([...packagedFiles]);
 const requiredPackagedFiles = [
   "/dist/main.js",
+  "/dist/harness-process-lifetime.js",
   "/dist/macos-notification-permission.js",
   "/dist/preload.cjs",
   "/dist/desktop-capabilities.js",
@@ -57,6 +60,10 @@ for (const requiredFile of requiredPackagedFiles) {
   if (!packagedFiles.has(requiredFile)) throw new Error(`Packaged app is missing ${requiredFile}`);
 }
 await assertRuntimeFreeResources(layout.resources);
+const lifetimeGuard = await lstat(path.join(layout.resources, "dist", "harness-process-lifetime.js"));
+if (!lifetimeGuard.isFile() || lifetimeGuard.isSymbolicLink()) {
+  throw new Error("Packaged Harness lifetime --import guard must be a real unpacked file");
+}
 if (platform === "darwin" || platform === "win32") {
   const updateProbe = spawnSync(electronBinary, [
     path.resolve("scripts/packaged-update-config-smoke.cjs"), layout.appAsar
@@ -89,6 +96,12 @@ if (preloadProbe.status !== 0) {
   const output = `${preloadProbe.stdout ?? ""}${preloadProbe.stderr ?? ""}`.trim();
   throw new Error(`Packaged Arkme preload smoke failed${output ? `\n${output}` : ""}`);
 }
+const packagedEpochSource = extractFile(configLayout.appAsar, "dist/runtime/cache-epoch.js").toString("utf8");
+resolvePackagedRuntimeCacheRoot("/smoke-preflight", packagedEpochSource);
+if (smokeArgs.includes("--preflight-only")) {
+  console.log("packaged Arkme preflight passed: runtime-free layout, updater config and preload; dynamic runtime activation was not exercised");
+  process.exit(0);
+}
 const appData = await mkdtemp(path.join(tmpdir(), "arkme-dynamic-runtime-smoke-"));
 const launch = platform === "darwin"
   ? buildArchitectureLaunch(layout.electron, [], process.env.ARKME_PACKAGED_EXEC_ARCH)
@@ -107,7 +120,8 @@ child.stdout.on("data", chunk => { output = `${output}${chunk}`.slice(-16_384); 
 child.stderr.on("data", chunk => { output = `${output}${chunk}`.slice(-16_384); });
 try {
   const userData = path.join(appData, packagedEnvironment.userDataDirectoryName);
-  const statePath = path.join(userData, "runtime-manager", "electron-v1", "state.json");
+  const cacheRoot = resolvePackagedRuntimeCacheRoot(userData, packagedEpochSource);
+  const statePath = path.join(cacheRoot, "state.json");
   const logPath = path.join(userData, "logs", "desktop-startup.log");
   const deadline = Date.now() + 5 * 60_000;
   let passed = false;
@@ -116,39 +130,15 @@ try {
       const state = JSON.parse(await readFile(statePath, "utf8"));
       const releaseId = state.activeReleaseId;
       const release = JSON.parse(await readFile(path.join(
-        userData,
-        "runtime-manager",
-        "electron-v1",
+        cacheRoot,
         "releases",
         releaseId,
         "release.json"
       ), "utf8"));
       const log = await readFile(logPath, "utf8");
-      const matches = [...log.matchAll(/render-ready \{"url":"(http:\/\/127\.0\.0\.1:\d+[^" ]*)"/g)];
-      const harnessUrl = matches.at(-1)?.[1];
-      if (harnessUrl) {
-        const pluginUpdateResponse = await fetch(new URL("/arkme-self/api", harnessUrl), {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ operation: "plugin.update.status" })
-        });
-        const providerStateResponse = await fetch(new URL("/arkme-self/api", harnessUrl), {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ operation: "provider.state" })
-        });
-        const pluginUpdate = pluginUpdateResponse.ok ? await pluginUpdateResponse.json() : undefined;
-        const providerState = providerStateResponse.ok ? await providerStateResponse.json() : undefined;
-        if (
-          pluginUpdate?.ok === true
-          && pluginUpdate.value?.installedVersion === release.artifacts.requiredPlugin.version
-          && providerState?.ok === true
-          && providerState.value?.environment === packagedEnvironment.environment
-          && state.probationReleaseId === undefined
-        ) {
-          passed = true;
-          break;
-        }
+      if (hasCompletedPackagedRuntimeStartup({ state, release, log })) {
+        passed = true;
+        break;
       }
     } catch {
       // Runtime download, installation and Harness startup are still progressing.

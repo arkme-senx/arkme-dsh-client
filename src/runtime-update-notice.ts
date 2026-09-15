@@ -45,7 +45,7 @@ interface RuntimeUpdateNoticeCoordinatorOptions {
   ): void;
 }
 
-export type RuntimeStageLatestResult = "current" | "stale" | "bad" | "deferred" | "staged" | "throttled";
+export type RuntimeStageLatestResult = "current" | "stale" | "bad" | "deferred" | "staged" | "throttled" | "no-active";
 
 interface RuntimeUpdateNoticeIpcEvent {
   senderFrame?: { url: string } | null;

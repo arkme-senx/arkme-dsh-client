@@ -1,3 +1,6 @@
+import { clearExitedHarnessProcessReceipt, writeHarnessProcessReceipt } from "./harness-process-lifetime.js";
+import { pathToFileURL } from "node:url";
+import { authenticateHarness, HarnessLaunchOutput, harnessCookieHeader, redactHarnessSecrets, type HarnessAuthSession } from "./harness-auth-session.js";
 import { execFile as nodeExecFile, spawn as nodeSpawn, type SpawnOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
@@ -63,6 +66,7 @@ export function buildProcessTerminationPlan(
 }
 
 export interface ManagedChild extends EventEmitter {
+  send?: (message: unknown, callback: (error: Error | null) => void) => boolean;
   readonly pid?: number;
   readonly stdout: Readable | null;
   readonly stderr: Readable | null;
@@ -71,6 +75,8 @@ export interface ManagedChild extends EventEmitter {
 }
 
 interface SupervisorConfig {
+  processGuard?: {modulePath: string; receiptPath: string};
+  onAuthenticated?: (session: HarnessAuthSession) => Promise<void>;
   execPath: string;
   dshBinPath: string;
   dshHome: string;
@@ -97,14 +103,15 @@ interface StartOptions {
 interface SupervisorDependencies {
   allocatePort: () => Promise<number>;
   spawn: (command: string, args: string[], options: SpawnOptions) => ManagedChild;
-  checkHealth: (url: string) => Promise<boolean>;
-  checkApiReady: (url: string) => Promise<boolean>;
+  authenticate: typeof authenticateHarness;
+  checkHealth: (url: string, session: HarnessAuthSession) => Promise<boolean>;
+  checkApiReady: (url: string, session: HarnessAuthSession) => Promise<boolean>;
   sleep: (milliseconds: number) => Promise<void>;
   now: () => number;
   signalProcessGroup: (pid: number, signal: NodeJS.Signals) => Promise<void>;
   waitForExit: (child: ManagedChild, timeoutMs: number) => Promise<boolean>;
   closeLog: (log: Writable) => Promise<void>;
-  registerWorkspace: (url: string, workspacePath: string, signal: AbortSignal) => Promise<void>;
+  registerWorkspace: (url: string, workspacePath: string, signal: AbortSignal, session: HarnessAuthSession) => Promise<void>;
   managedRestartPlanExists: (planPath: string) => Promise<boolean>;
   runManagedRestartHelper: (input: {
     execPath: string;
@@ -124,6 +131,11 @@ interface SupervisorDependencies {
 }
 
 interface RunningHarness {
+  processGeneration?: string;
+  authAbort: AbortController;
+  auth?: HarnessAuthSession;
+  launchUrl?: string;
+  output: Record<"stdout" | "stderr", HarnessLaunchOutput>;
   child: ManagedChild;
   expectedStop: boolean;
   exit: { code: number | null; signal: NodeJS.Signals | null } | null;
@@ -182,6 +194,7 @@ export class HarnessProcessSupervisor {
   private current: RunningHarness | null = null;
   private state: HarnessState | null = null;
   private lifecycleGeneration = 0;
+  private startupAbort: AbortController | null = null;
   private managedRestartAbort: AbortController | null = null;
   private managedRestartTask: Promise<void> | null = null;
 
@@ -200,7 +213,11 @@ export class HarnessProcessSupervisor {
   }
 
   async start(workspacePath: string, options: StartOptions = {}): Promise<void> {
-    await this.startInternal(workspacePath, options);
+    if (this.startupAbort !== null || this.current !== null) throw new Error("Harness is already running");
+    const abort = new AbortController();
+    this.startupAbort = abort;
+    try { await this.startInternal(workspacePath, options, abort.signal); }
+    finally { if (this.startupAbort === abort) this.startupAbort = null; }
   }
 
   private async startInternal(
@@ -455,12 +472,14 @@ export class HarnessProcessSupervisor {
     if (desktopBridgeSessionId !== undefined) {
       this.config.desktopCapabilityBridge?.activateSession(desktopBridgeSessionId);
     }
+    const processGeneration = this.config.processGuard === undefined ? undefined : randomUUID();
     let child: ManagedChild;
     try {
       child = this.dependencies.spawn(
         this.config.execPath,
         [
           "--expose-internals",
+          ...(this.config.processGuard === undefined ? [] : ["--import", pathToFileURL(this.config.processGuard.modulePath).href]),
           this.config.dshBinPath,
           "web",
           "--no-open",
@@ -474,6 +493,7 @@ export class HarnessProcessSupervisor {
           detached: true,
           env: {
             ...inheritedEnv,
+            ...(processGeneration === undefined ? {} : {ARKME_PROCESS_GUARD_GENERATION:processGeneration}),
             DSH_HOME: this.config.dshHome,
             DSH_PROFILE_FIRST_BUNDLES: "@senguoyun/dsh-arkme",
             DSH_INSTALLED_MODULE_BASE_PATH: this.config.dshBinPath,
@@ -493,7 +513,7 @@ export class HarnessProcessSupervisor {
               ARKME_DESKTOP_BRIDGE_SESSION_ID: desktopBridgeSessionId
             })
           },
-          stdio: ["ignore", "pipe", "pipe"]
+          stdio: this.config.processGuard === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", "ipc"]
         }
       );
     } catch (error) {
@@ -503,7 +523,10 @@ export class HarnessProcessSupervisor {
       throw error;
     }
     const running: RunningHarness = {
+      authAbort: new AbortController(),
+      output: { stdout: new HarnessLaunchOutput(url), stderr: new HarnessLaunchOutput(url) },
       child,
+      ...(processGeneration === undefined ? {} : {processGeneration}),
       expectedStop: false,
       exit: null,
       log,
@@ -524,7 +547,18 @@ export class HarnessProcessSupervisor {
     this.emit({ kind: "starting", workspacePath });
 
     try {
-      await this.waitUntilReady(running, url, timeoutMs, pollIntervalMs, signal);
+      if (this.config.processGuard !== undefined && processGeneration !== undefined) {
+        if (child.pid === undefined || child.send === undefined) throw new Error("Harness process guard IPC unavailable");
+        await writeHarnessProcessReceipt(this.config.processGuard.receiptPath, {
+          schemaVersion:1, pid:child.pid, generation:processGeneration
+        });
+        signal.throwIfAborted();
+        this.assertRunningBeforeReady(running);
+        await new Promise<void>((resolve,reject) => {
+          child.send!({type:"arkme-harness-start",generation:processGeneration},error => error === null ? resolve() : reject(error));
+        });
+      }
+      await this.waitUntilReady(running, url, timeoutMs, pollIntervalMs, AbortSignal.any([signal, running.authAbort.signal]));
       this.recordLifecycle(running, "ready", { url });
       return { running, url };
     } catch (error) {
@@ -541,6 +575,7 @@ export class HarnessProcessSupervisor {
 
   async stop(_reason: StopReason): Promise<void> {
     this.lifecycleGeneration += 1;
+    this.startupAbort?.abort();
     this.managedRestartAbort?.abort(new Error("Harness shutdown interrupted managed restart"));
     const managedRestartTask = this.managedRestartTask;
     const running = this.current;
@@ -564,13 +599,15 @@ export class HarnessProcessSupervisor {
       this.recordOutput(running, "stderr", chunk);
     });
     running.child.once("error", (error: Error) => {
-      running.startupError = error;
-      this.recordLifecycle(running, "process-error", { message: error.message });
+      running.startupError = new Error(redactHarnessSecrets(error.message));
+      this.recordLifecycle(running, "process-error", { message: running.startupError.message });
     });
     running.child.once(
       "exit",
       (code: number | null, signal: NodeJS.Signals | null) => {
         running.exit = { code, signal };
+        void this.clearProcessReceipt(running).catch(() => undefined);
+        this.releaseDesktopBridgeSession(running);
         this.recordLifecycle(running, "process-exit", { code, signal });
         if (running.expectedStop || this.current !== running) return;
         if (this.state?.kind !== "ready") return;
@@ -622,7 +659,7 @@ export class HarnessProcessSupervisor {
       this.assertRunningBeforeReady(running);
       apiChecks += 1;
 
-      if (await this.dependencies.checkApiReady(url)) {
+      if (await this.dependencies.checkApiReady(url, running.auth!)) {
         registrationAttempts += 1;
         const remaining = deadline - this.dependencies.now();
         const attemptSignal = AbortSignal.any([
@@ -633,7 +670,7 @@ export class HarnessProcessSupervisor {
           ))
         ]);
         try {
-          await this.dependencies.registerWorkspace(url, workspacePath, attemptSignal);
+          await this.dependencies.registerWorkspace(url, workspacePath, AbortSignal.any([attemptSignal, running.authAbort.signal]), running.auth!);
           this.assertRunningBeforeReady(running);
           this.recordLifecycle(running, "workspace-registered", {
             apiChecks,
@@ -729,7 +766,10 @@ export class HarnessProcessSupervisor {
     stream: "stdout" | "stderr",
     chunk: Buffer | string
   ): void {
-    const text = chunk.toString();
+    if (this.current !== running || running.authAbort.signal.aborted) return;
+    const parsed = running.output[stream].push(chunk.toString());
+    if (parsed.launchUrl !== undefined && running.auth === undefined) running.launchUrl = parsed.launchUrl;
+    const text = parsed.text;
     if (running.log.writableLength < 256 * 1024) running.log.write(`[${stream}] ${text.slice(-64 * 1024)}`);
     running.tail = `${running.tail}${text}`.slice(-MAX_TAIL_LENGTH);
   }
@@ -756,8 +796,18 @@ export class HarnessProcessSupervisor {
         );
       }
 
+      if (running.auth === undefined && running.launchUrl !== undefined) {
+        const launchUrl = running.launchUrl;
+        delete running.launchUrl;
+        running.auth = await this.dependencies.authenticate(launchUrl, url, AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, deadline - this.dependencies.now()))]));
+        // The session lifetime outlives the bounded exchange request.
+        running.auth = { ...running.auth, signal: running.authAbort.signal };
+        this.assertRunningBeforeReady(running);
+        await this.config.onAuthenticated?.(running.auth);
+        signal.throwIfAborted();
+      }
       healthChecks += 1;
-      if (await this.dependencies.checkHealth(url)) {
+      if (running.auth !== undefined && await this.dependencies.checkHealth(url, running.auth)) {
         this.recordLifecycle(running, "health-ready", { healthChecks });
         return;
       }
@@ -818,11 +868,24 @@ export class HarnessProcessSupervisor {
     // signal or wait operation failed, the exception above leaves `current`
     // intact so a later stop can retry the same detached child. Its lease stays
     // revoked because releaseDesktopBridgeSession() is intentionally idempotent.
+    await this.clearProcessReceipt(running);
     if (this.current === running) this.current = null;
     await this.closeRunningLog(running);
   }
 
+  private async clearProcessReceipt(running: RunningHarness): Promise<void> {
+    if (this.config.processGuard !== undefined && running.processGeneration !== undefined) {
+      await clearExitedHarnessProcessReceipt(this.config.processGuard.receiptPath,running.processGeneration);
+    }
+  }
+
   private releaseDesktopBridgeSession(running: RunningHarness): void {
+    running.authAbort.abort();
+    if (running.auth !== undefined) running.auth.cookie.value = '';
+    delete running.auth;
+    delete running.launchUrl;
+    running.output.stdout.clear();
+    running.output.stderr.clear();
     const sessionId = running.desktopBridgeSessionId;
     if (sessionId === undefined) return;
     delete running.desktopBridgeSessionId;
@@ -874,7 +937,7 @@ export class HarnessProcessSupervisor {
   }
 
   private failureMessage(error: unknown, tail: string): string {
-    const base = error instanceof Error ? error.message : String(error);
+    const base = redactHarnessSecrets(error instanceof Error ? error.message : String(error));
     const details = tail.trim();
     return details.length === 0 ? base : `${base}\n\n${details}`;
   }
@@ -888,19 +951,21 @@ export class HarnessProcessSupervisor {
 async function registerDshWorkspace(
   url: string,
   workspacePath: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  session: HarnessAuthSession
 ): Promise<void> {
   const rpcId = randomUUID();
   let response: Response;
   try {
-    response = await fetch(new URL("/api/workspace.create", url), {
+    response = await fetch(new URL("/api/workspace/create", url), {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", cookie: harnessCookieHeader(session) },
+      redirect: "manual",
       body: JSON.stringify({
         type: "client-request",
         rpcId,
-        method: "workspace.create",
-        payload: { path: workspacePath }
+        method: "workspace/create",
+        payload: { args: { request: { path: workspacePath } } }
       }),
       signal
     });
@@ -954,28 +1019,29 @@ function isTransientHttpStatus(status: number): boolean {
     || status >= 500;
 }
 
-async function checkDshApiReady(url: string): Promise<boolean> {
+async function checkDshApiReady(url: string, session: HarnessAuthSession): Promise<boolean> {
   const rpcId = randomUUID();
   try {
-    const response = await fetch(new URL("/api/host.describe", url), {
+    const response = await fetch(new URL("/api/session/list", url), {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", cookie: harnessCookieHeader(session) },
+      redirect: "manual",
       body: JSON.stringify({
         type: "client-request",
         rpcId,
-        method: "host.describe",
-        payload: {}
+        method: "session/list",
+        payload: { args: { _request: {} } }
       }),
-      signal: AbortSignal.timeout(1_000)
+      signal: AbortSignal.any([session.signal, AbortSignal.timeout(1_000)])
     });
     if (!response.ok) return false;
-    return isHostDescribeResponse(await response.json(), rpcId);
+    return isSessionListResponse(await response.json(), rpcId);
   } catch {
     return false;
   }
 }
 
-function isHostDescribeResponse(body: unknown, rpcId: string): boolean {
+function isSessionListResponse(body: unknown, rpcId: string): boolean {
   if (!isRecord(body)
     || body.type !== "server-response"
     || body.rpcId !== rpcId
@@ -984,16 +1050,7 @@ function isHostDescribeResponse(body: unknown, rpcId: string): boolean {
     || !isRecord(body.result.value)) {
     return false;
   }
-  const value = body.result.value;
-  return typeof value.version === "string"
-    && typeof value.cwd === "string"
-    && (value.provider === undefined || typeof value.provider === "string")
-    && (value.model === undefined || typeof value.model === "string")
-    && typeof value.attachedSessions === "number"
-    && Number.isInteger(value.attachedSessions)
-    && value.attachedSessions >= 0
-    && typeof value.home === "string"
-    && typeof value.canOpenPath === "boolean";
+  return Array.isArray(body.result.value.items);
 }
 
 interface WorkspaceRegistrationResponse {
@@ -1056,11 +1113,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 const defaultDependencies: SupervisorDependencies = {
+  authenticate: authenticateHarness,
   allocatePort: allocateLoopbackPort,
   spawn: (command, args, options) => nodeSpawn(command, args, options) as ManagedChild,
-  checkHealth: async (url) => {
+  checkHealth: async (url, session) => {
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(1_000) });
+      const response = await fetch(url, { redirect: "manual", headers: { cookie: harnessCookieHeader(session) }, signal: AbortSignal.any([session.signal, AbortSignal.timeout(1_000)]) });
       return response.ok;
     } catch {
       return false;

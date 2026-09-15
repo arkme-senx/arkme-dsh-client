@@ -8,7 +8,7 @@ type Pnpmfile = {
 };
 
 describe("pnpm DSH release pin", () => {
-  test("pins every DSH dependency section to the runtime manifest release", () => {
+  test("pins published DSH dependencies without inventing a release for the retired type-only package", () => {
     const require = createRequire(import.meta.url);
     let pnpmfile: Pnpmfile | undefined;
     try {
@@ -28,7 +28,8 @@ describe("pnpm DSH release pin", () => {
         "ordinary-package": "^1.0.0"
       },
       devDependencies: {
-        "@deepseek-ai/dsh": "latest"
+        "@deepseek-ai/dsh": "latest",
+        "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.7"
       },
       optionalDependencies: {
         "@deepseek-ai/dsh-attachment-local": ">=0.1.0"
@@ -39,17 +40,18 @@ describe("pnpm DSH release pin", () => {
       }
     })).toEqual({
       dependencies: {
-        "@deepseek-ai/dsh-llm-pi-ai": "0.1.1-rc.2",
+        "@deepseek-ai/dsh-llm-pi-ai": "0.1.5-rc.2",
         "ordinary-package": "^1.0.0"
       },
       devDependencies: {
-        "@deepseek-ai/dsh": "0.1.1-rc.2"
+        "@deepseek-ai/dsh": "0.1.5-rc.2",
+        "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.7"
       },
       optionalDependencies: {
-        "@deepseek-ai/dsh-attachment-local": "0.1.1-rc.2"
+        "@deepseek-ai/dsh-attachment-local": "0.1.5-rc.2"
       },
       peerDependencies: {
-        "@deepseek-ai/dsh-llm": "0.1.1-rc.2",
+        "@deepseek-ai/dsh-llm": "0.1.5-rc.2",
         "@deepseek-ai/dshark": "^1.0.0"
       }
     });

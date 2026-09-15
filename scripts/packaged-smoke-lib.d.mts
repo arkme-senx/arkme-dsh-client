@@ -5,3 +5,5 @@ export function resolvePackagedSmokeEnvironment(rawConfig: string | Buffer): {
   environment: "prod" | "test";
   userDataDirectoryName: "Arkme Harness" | "Arkme Harness Test";
 };
+export function resolvePackagedRuntimeCacheRoot(userDataPath: string, packagedEpochSource: string): string;
+export function hasCompletedPackagedRuntimeStartup(options: { state: unknown; release: unknown; log: string }): boolean;

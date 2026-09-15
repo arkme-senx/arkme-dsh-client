@@ -98,6 +98,15 @@ describe("Electron runtime release installer", () => {
 
     await expect(readFile(path.join(root, "staging", manifest.artifacts.harness.entry), "utf8")).resolves.toBe("dsh");
     await expect(readFile(path.join(root, "staging", manifest.artifacts.requiredPlugin.target, "lib", "index.js"), "utf8")).resolves.toBe("plugin");
+    // A restart can reconstruct a fresh staging directory from both verified
+    // archives without contacting either artifact host.
+    let offlineRequests = 0;
+    await installElectronRuntimeRelease(manifest, path.join(root, "offline-staging"), {
+      downloadsPath: path.join(root, "downloads"),
+      fetcher: async () => { offlineRequests += 1; throw new TypeError("offline"); }
+    });
+    expect(offlineRequests).toBe(0);
+    await validateInstalledElectronRuntime(manifest, path.join(root, "offline-staging"));
     await writeFile(path.join(root, "staging", manifest.artifacts.requiredPlugin.target, "lib", "index.js"), "tampered");
     const tamperedValidation = validateInstalledElectronRuntime(manifest, path.join(root, "staging"));
     await expect(tamperedValidation).rejects.toBeInstanceOf(RuntimeArtifactValidationError);
@@ -143,4 +152,32 @@ describe("Electron runtime release installer", () => {
       code: "RESERVED_RUNTIME_FILE"
     });
   });
+});
+
+
+test("settles both downloads before exposing a failed installation for manual retry", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "runtime-installer-cancel-"));
+  temporaryDirectories.push(root);
+  const manifest = { artifacts: {
+    harness: { ...artifact(Buffer.from("harness"), "https://d.jiwo.cc/harness.tar.zst") },
+    requiredPlugin: { ...artifact(Buffer.from("plugin"), "https://d.jiwo.cc/plugin.tar.zst") }
+  } } as ElectronRuntimeManifest;
+  let pending = false;
+  let cancelled = false;
+  await expect(installElectronRuntimeRelease(manifest, path.join(root, "staging"), {
+    downloadsPath: path.join(root, "downloads"),
+    fetcher: async (input, init) => {
+      if (String(input).endsWith("plugin.tar.zst")) {
+        // Let the other request start before delivering the permanent failure.
+        while (!pending) await new Promise(resolve => setTimeout(resolve, 1));
+        return new Response(null, {status: 403});
+      }
+      pending = true;
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => { pending = false; cancelled = true; reject(new Error("cancelled")); }, {once:true});
+      });
+    }
+  })).rejects.toThrow();
+  expect(cancelled).toBe(true);
+  expect(pending).toBe(false);
 });

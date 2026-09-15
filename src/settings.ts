@@ -19,16 +19,6 @@ export function resolveUserDataPath(
   return path.join(appDataPath, environment === "test" ? "Arkme Harness Test" : "Arkme Harness");
 }
 
-export function resolveAppUpdateDownloadsPath(
-  environment: RuntimeEnvironment,
-  userDataPath: string,
-  defaultDownloadsPath: string
-): string {
-  return environment === "test"
-    ? path.join(userDataPath, "app-updates")
-    : defaultDownloadsPath;
-}
-
 export function resolveAppUpdateInstallReceiptPath(userDataPath: string): string {
   return path.join(userDataPath, "app-update-install.json");
 }

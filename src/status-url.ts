@@ -5,6 +5,8 @@ import type { RuntimeInstallProgress } from "./runtime/manager.js";
 
 type StatusPageState = Exclude<HarnessState, { kind: "ready" }> | RuntimeInstallProgress;
 
+const RUNTIME_NETWORK_WAITING_TITLE = "需要联网完成运行环境升级";
+
 export function createStatusPageUrl(
   statusHtmlPath: string,
   state: StatusPageState,
@@ -22,6 +24,9 @@ export function createStatusPageUrl(
     url.searchParams.set("workspace", state.workspacePath);
   }
   if (state.kind === "failed") {
+    if (state.displayTitle === RUNTIME_NETWORK_WAITING_TITLE) {
+      url.searchParams.set("presentation", "runtime-network-waiting");
+    }
     url.searchParams.set("message", state.message);
     if (state.displayTitle !== undefined) url.searchParams.set("title", state.displayTitle);
     if (state.suggestion !== undefined) url.searchParams.set("suggestion", state.suggestion);

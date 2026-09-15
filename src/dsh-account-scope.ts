@@ -55,7 +55,8 @@ export class DshAccountScopeStore {
 
   constructor(
     private readonly userDataPath: string,
-    private readonly createContainerRef: () => string = () => `scope_${randomUUID().replaceAll("-", "")}`
+    private readonly createContainerRef: () => string = () => `scope_${randomUUID().replaceAll("-", "")}`,
+    private readonly beforeLegacyMigration?: (sourceDshHome: string, targetDshHome: string) => Promise<void>
   ) {}
 
   async configured(): Promise<boolean> { return await exists(this.registryPath); }
@@ -69,7 +70,15 @@ export class DshAccountScopeStore {
     return launch;
   }
 
-  async launch(): Promise<DshAccountScopeLaunch> {
+  async launch(options: {deferLegacyMigration?: boolean} = {}): Promise<DshAccountScopeLaunch> {
+    if (options.deferLegacyMigration === true) {
+      const pending = (await this.readRegistry())?.pendingLegacy;
+      if (pending !== undefined && await exists(this.legacyHome)) {
+        // Initial runtime selection must snapshot the original directory before
+        // finishing a legacy rename planned by a previous process.
+        return this.paths(LEGACY_CONTAINER_REF, {kind: "legacy"});
+      }
+    }
     await this.recoverPendingLegacy();
     const registry = await this.readRegistry();
     if (registry !== undefined) return await this.ensureLaunch(registry.activeContainerRef, registry);
@@ -87,9 +96,9 @@ export class DshAccountScopeStore {
     return await this.ensureLaunch(containerRef, created);
   }
 
-  async reconcile(identity: DshAccountIdentity): Promise<DshAccountScopeReconcileResult> {
+  async reconcile(identity: DshAccountIdentity, options: {deferLegacyMigration?: boolean} = {}): Promise<DshAccountScopeReconcileResult> {
     let result!: DshAccountScopeReconcileResult;
-    const mutation = this.mutationTail.then(async () => { result = await this.reconcileSerial(identity); });
+    const mutation = this.mutationTail.then(async () => { result = await this.reconcileSerial(identity, options.deferLegacyMigration === true); });
     this.mutationTail = mutation.catch(() => undefined);
     await mutation;
     return result;
@@ -128,9 +137,22 @@ export class DshAccountScopeStore {
     return result;
   }
 
-  private async reconcileSerial(identity: DshAccountIdentity): Promise<DshAccountScopeReconcileResult> {
-    const current = await this.launch();
+  private async reconcileSerial(identity: DshAccountIdentity, deferLegacyMigration: boolean): Promise<DshAccountScopeReconcileResult> {
     const targetOwner = ownerFor(identity);
+    if (deferLegacyMigration) {
+      const pendingRegistry = await this.readRegistry();
+      const pending = pendingRegistry?.pendingLegacy;
+      if (pendingRegistry !== undefined && pending !== undefined) {
+        const owner = pendingRegistry.containers[pending.targetContainerRef]!.owner;
+        if (!sameOwner(owner, targetOwner)) {
+          throw new Error("Account identity cannot change while legacy migration is deferred");
+        }
+        // Do not call launch(): it would recover the planned rename while the
+        // trial Harness is still using the snapshotted source directory.
+        return {status: "relaunch", launch: this.paths(pending.targetContainerRef, owner)};
+      }
+    }
+    const current = await this.launch();
     if (current.owner.kind === "legacy") return await this.planLegacyMigration(targetOwner);
 
     const registry = await this.requireRegistry();
@@ -196,6 +218,9 @@ export class DshAccountScopeStore {
     const sourceExists = await exists(this.legacyHome);
     const targetExists = await exists(target);
     if (sourceExists && targetExists) throw new Error("Legacy DSH migration has both source and target directories");
+    if (!sourceExists && !targetExists) throw new Error("Legacy DSH migration lost both source and target directories");
+    // Re-run during crash recovery too; the identity transfer must be idempotent.
+    await this.beforeLegacyMigration?.(this.legacyHome, target);
     if (sourceExists) {
       await mkdir(path.dirname(target), { recursive: true });
       await rename(this.legacyHome, target);

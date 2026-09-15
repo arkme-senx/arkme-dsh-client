@@ -81,7 +81,7 @@ describe("application manifest", () => {
     expect(manifest.devDependencies.yaml).toBe("2.9.0");
     expect(workspaceManifest.packages).toEqual([".", "runtime"]);
     expect(workspaceManifest.catalogs.production["@senguoyun/dsh-arkme"]).toBe(
-      "git+ssh://git@github.com/arkme-senx/arkme-dsh-plugin.git#e817cb21e3923c8e903d68d442f3227c9e6c78ef"
+      "git+ssh://git@github.com/arkme-senx/arkme-dsh-plugin.git#2838fdceea0e4702b9017a31e0ad6f0893fc823a"
     );
   });
 
@@ -247,6 +247,7 @@ describe("application manifest", () => {
     expect(manifest.build.asarUnpack).toContain(
       "node_modules/@arkme/macos-notification-permission/build/Release/*.node"
     );
+    expect(manifest.build.asarUnpack).toContain("dist/harness-process-lifetime.js");
     expect(manifest.scripts.postinstall).toContain(
       "node scripts/prune-platform-app-dependencies.mjs && electron-builder install-app-deps"
     );

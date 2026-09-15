@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -182,4 +182,83 @@ describe("DSH account scope store", () => {
     expect(switchBlock.indexOf("logPath = scope.logPath"))
       .toBeLessThan(switchBlock.indexOf("launchHarnessRuntime("));
   });
+});
+
+test('repeated trial attestation retains pending legacy data and rejects identity changes until relaunch', async () => {
+  const userData = await makeTempDirectory('account-scope-deferred-');
+  const store = new DshAccountScopeStore(userData, () => 'scope_deferred_01');
+  const initial = await store.legacyLaunch();
+  await writeFile(join(initial.dshHome, 'records'), 'trial');
+  const first = await store.reconcile({kind:'guest'}, {deferLegacyMigration:true});
+  const registry = await readFile(join(userData,'dsh-account-scopes.json'),'utf8');
+  const second = await store.reconcile({kind:'guest'}, {deferLegacyMigration:true});
+  expect(second).toEqual(first);
+  expect(second.status).toBe('relaunch');
+  expect(await readFile(join(initial.dshHome,'records'),'utf8')).toBe('trial');
+  expect(await readFile(join(userData,'dsh-account-scopes.json'),'utf8')).toBe(registry);
+  await expect(store.reconcile({kind:'account',userId:42},{deferLegacyMigration:true})).rejects.toThrow('identity');
+  expect(await readFile(join(initial.dshHome,'records'),'utf8')).toBe('trial');
+  const launched = await store.launch();
+  expect(await readFile(join(launched.dshHome,'records'),'utf8')).toBe('trial');
+});
+
+test('migration identity callback must finish before rename and is retried after failure', async () => {
+  const userData = await makeTempDirectory('account-scope-before-move-');
+  let allowed = false;
+  let calls = 0;
+  const store = new DshAccountScopeStore(userData, ()=>'scope_protected_01', async (source,target) => {
+    calls++;
+    expect(source).toBe(join(userData,'dsh'));
+    expect(target).toBe(join(userData,'dsh-containers','scope_protected_01','dsh'));
+    expect(await readFile(join(source,'records'),'utf8')).toBe('committed');
+    if (!allowed) throw new Error('identity not persisted');
+    await writeFile(join(userData,'identity-persisted'),'done');
+  });
+  const initial = await store.legacyLaunch(); await writeFile(join(initial.dshHome,'records'),'committed');
+  await store.reconcile({kind:'guest'});
+  await expect(store.launch()).rejects.toThrow('identity not persisted');
+  expect(await readFile(join(initial.dshHome,'records'),'utf8')).toBe('committed');
+  allowed = true;
+  const final = await store.launch();
+  expect(calls).toBe(2);
+  expect(await readFile(join(userData,'identity-persisted'),'utf8')).toBe('done');
+  expect(await readFile(join(final.dshHome,'records'),'utf8')).toBe('committed');
+});
+
+
+test('replays identity persistence after a crash following rename but before registry completion', async () => {
+  const userData = await makeTempDirectory('account-scope-renamed-recovery-');
+  const first = new DshAccountScopeStore(userData, ()=>'scope_recovery_01');
+  const legacy = await first.legacyLaunch(); await writeFile(join(legacy.dshHome,'records'),'committed');
+  const pending = await first.reconcile({kind:'guest'});
+  await mkdir(join(userData,'dsh-containers','scope_recovery_01'),{recursive:true});
+  await rename(legacy.dshHome,pending.launch.dshHome);
+  let transferred = false;
+  const resumed = new DshAccountScopeStore(userData,undefined,async (source,target)=>{
+    expect(source).toBe(legacy.dshHome); expect(target).toBe(pending.launch.dshHome);
+    expect(await readFile(join(target,'records'),'utf8')).toBe('committed');
+    transferred = true;
+  });
+  const recovered = await resumed.launch({deferLegacyMigration:true});
+  expect(transferred).toBe(true);
+  expect(recovered.dshHome).toBe(pending.launch.dshHome);
+  expect(JSON.parse(await readFile(join(userData,'dsh-account-scopes.json'),'utf8'))).not.toHaveProperty('pendingLegacy');
+});
+
+test('defers a historical pending legacy rename until after the new runtime snapshot and trial', async () => {
+  const userData = await makeTempDirectory('account-scope-initial-pending-');
+  const previous = new DshAccountScopeStore(userData, () => 'scope_historical_01');
+  const legacy = await previous.legacyLaunch();
+  await writeFile(join(legacy.dshHome,'records'),'original');
+  const pending = await previous.reconcile({kind:'guest'});
+  const resumed = new DshAccountScopeStore(userData);
+  const trial = await resumed.launch({deferLegacyMigration:true});
+  expect(trial.containerRef).toBe('legacy');
+  expect(trial.dshHome).toBe(legacy.dshHome);
+  const snapshot = await readFile(join(trial.dshHome,'records'),'utf8');
+  expect(snapshot).toBe('original');
+  await writeFile(join(trial.dshHome,'records'),'committed-trial');
+  const committed = await resumed.launch();
+  expect(committed.dshHome).toBe(pending.launch.dshHome);
+  expect(await readFile(join(committed.dshHome,'records'),'utf8')).toBe('committed-trial');
 });

@@ -1,3 +1,4 @@
+import { RuntimeNetworkWaitingError } from "./download.js";
 import { parseElectronRuntimeManifest, type ElectronRuntimeManifest } from "./manifest.js";
 import { RuntimeArtifactValidationError } from "./errors.js";
 import { resolveRuntimeServiceOrigin } from "./service-config.js";
@@ -14,6 +15,8 @@ interface FetchElectronRuntimeManifestOptions {
   shellVersion: string;
   electronMajor: number;
   modulesAbi: number;
+  shellVersionCode: number;
+  baseline?: ElectronRuntimeManifest;
   fetcher: typeof fetch;
 }
 
@@ -80,9 +83,20 @@ export async function fetchElectronRuntimeManifest(
     throw new Error("Electron runtime service origin is not trusted");
   }
   const endpoint = new URL(
-    `/api/public/v1/arkme/electron-runtime-update/${target.os}/${target.arch}/latest`,
+    `/api/public/v1/arkme/electron-runtime-update/${target.os}/${target.arch}/compatible`,
     base
   );
+  if (!positiveVersionCode(options.shellVersionCode)) {
+    throw new Error("Electron runtime shell Version Code is invalid");
+  }
+  endpoint.searchParams.set("shell_version_code", String(options.shellVersionCode));
+  endpoint.searchParams.set("shell_version", options.shellVersion);
+  endpoint.searchParams.set("electron_major", String(options.electronMajor));
+  endpoint.searchParams.set("modules_abi", String(options.modulesAbi));
+  if (options.baseline !== undefined) {
+    endpoint.searchParams.set("current_harness_version_code", String(options.baseline.artifacts.harness.versionCode));
+    endpoint.searchParams.set("current_plugin_version_code", String(options.baseline.artifacts.requiredPlugin.versionCode));
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
   try {
@@ -94,13 +108,8 @@ export async function fetchElectronRuntimeManifest(
         cache: "no-store",
         signal: controller.signal
       });
-    } catch {
-      throw new ElectronRuntimeManifestError({
-        displayTitle: "无法连接运行环境服务",
-        message: "未能连接到运行环境服务，请检查网络连接后重试。",
-        suggestion: "如果网络正常但问题持续出现，请联系管理员。",
-        technicalDetails: "网络请求失败"
-      });
+    } catch (error) {
+      throw new RuntimeNetworkWaitingError("网络请求失败", {cause:error});
     }
     if (response.status >= 300 && response.status < 400) {
       throw new Error(`Electron runtime manifest redirect HTTP ${response.status} is not allowed`);
@@ -122,10 +131,16 @@ export async function fetchElectronRuntimeManifest(
       shellVersion: options.shellVersion,
       electronMajor: options.electronMajor,
       modulesAbi: options.modulesAbi
+    }, {
+      requiredShellVersionCode: options.shellVersionCode
     });
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function positiveVersionCode(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 0xffffffff;
 }
 
 async function runtimeManifestResponseError(response: Response): Promise<ElectronRuntimeManifestError> {
@@ -200,7 +215,9 @@ async function readLimitedManifest(response: Response): Promise<Uint8Array> {
   const chunks: Uint8Array[] = [];
   let total = 0;
   while (true) {
-    const result = await reader.read();
+    let result: ReadableStreamReadResult<Uint8Array>;
+    try { result = await reader.read(); }
+    catch (error) { throw new RuntimeNetworkWaitingError("运行环境清单连接中断", {cause:error}); }
     if (result.done) break;
     total += result.value.byteLength;
     if (total > MAX_MANIFEST_BYTES) {
@@ -221,21 +238,24 @@ async function readLimitedManifest(response: Response): Promise<Uint8Array> {
 export async function verifyElectronRuntimePluginHealth(
   harnessOrigin: string,
   expectedVersion: string,
-  fetcher: typeof fetch = fetch
+  fetcher: typeof fetch = fetch,
+  authentication: {headers?: HeadersInit; signal?: AbortSignal} = {}
 ): Promise<void> {
   const origin = new URL(harnessOrigin);
   if (origin.protocol !== "http:" || origin.hostname !== "127.0.0.1" || origin.username !== "" || origin.password !== "") {
     throw new Error("Electron runtime health origin is not trusted loopback");
   }
+  const headers = new Headers(authentication.headers);
+  headers.set("content-type", "application/json");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
   try {
     const response = await fetcher(new URL("/arkme-self/api", origin), {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers,
       body: JSON.stringify({ operation: "plugin.update.status" }),
       redirect: "manual",
-      signal: controller.signal
+      signal: authentication.signal === undefined ? controller.signal : AbortSignal.any([controller.signal, authentication.signal])
     });
     const body = response.status === 200
       ? await response.json() as { ok?: unknown; value?: { installedVersion?: unknown } }
