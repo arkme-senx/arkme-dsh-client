@@ -2,6 +2,31 @@ import { describe, expect, test, vi } from "vitest";
 import { NativeBadgeCoordinator } from "../src/native-badge.js";
 
 describe("NativeBadgeCoordinator", () => {
+  test("keeps the sidebar count authoritative when Host summaries lag behind a local read", () => {
+    const apply = vi.fn(() => true);
+    const coordinator = new NativeBadgeCoordinator({ mode: "count", apply });
+    coordinator.applySnapshot({ generation: 1, revision: 1, count: 4 });
+    coordinator.applyDirectoryCount(4);
+    coordinator.applyDirectoryCount(3);
+    coordinator.applySnapshot({ generation: 1, revision: 2, count: 4 });
+    expect(apply).toHaveBeenLastCalledWith(3);
+    coordinator.replay();
+    expect(apply).toHaveBeenLastCalledWith(3);
+    coordinator.applyDirectoryCount(0);
+    coordinator.applySnapshot({ generation: 1, revision: 3, count: 4 });
+    expect(apply).toHaveBeenLastCalledWith(0);
+    for (const invalid of [-1, NaN, 1.5, 1_000_000, "2", { count: 2 }]) {
+      expect(coordinator.applyDirectoryCount(invalid).accepted).toBe(false);
+    }
+    coordinator.releaseDirectory();
+    expect(apply).toHaveBeenLastCalledWith(0);
+    coordinator.applySnapshot({ generation: 1, revision: 4, count: 2 });
+    expect(apply).toHaveBeenLastCalledWith(0);
+    coordinator.applyDirectoryCount(1);
+    coordinator.beginSession();
+    coordinator.applySnapshot({ generation: 0, revision: 0, count: 5 });
+    expect(apply).toHaveBeenLastCalledWith(5);
+  });
   test("applies only increasing absolute snapshots and accepts zero as an explicit clear", () => {
     const apply = vi.fn(() => true);
     const coordinator = new NativeBadgeCoordinator({ mode: "count", apply });

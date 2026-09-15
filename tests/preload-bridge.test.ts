@@ -188,6 +188,14 @@ async function executePreload(
 }
 
 describe("desktop notification preload", () => {
+  it("forwards only the directory badge count through the dedicated bridge", async () => {
+    const { exposed, invokeCalls } = await executePreload("0.1.0-rc.8");
+    const bridge = exposed.arkmeDesktopNotifications as { applyDirectoryBadge(count: number): Promise<boolean> };
+    await bridge.applyDirectoryBadge(3);
+    await bridge.applyDirectoryBadge(0);
+    expect(invokeCalls.filter(call => call.channel === "arkme-desktop:directory-badge"))
+      .toEqual([{ channel: "arkme-desktop:directory-badge", args: [3] }, { channel: "arkme-desktop:directory-badge", args: [0] }]);
+  });
   it("exposes only the bounded notification API and announces activation readiness", async () => {
     const source = await readFile(path.join(process.cwd(), "src", "preload.cts"), "utf8");
 

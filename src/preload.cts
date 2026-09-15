@@ -322,6 +322,9 @@ contextBridge.exposeInMainWorld(
 );
 
 contextBridge.exposeInMainWorld("arkmeDesktopNotifications", Object.freeze({
+  async applyDirectoryBadge(count: number): Promise<boolean> {
+    return await ipcRenderer.invoke("arkme-desktop:directory-badge", count) as boolean;
+  },
   permission(): DesktopNotificationPermission {
     return parseDesktopAttentionCapabilities(
       ipcRenderer.sendSync("arkme-desktop:attention-capabilities") as unknown
