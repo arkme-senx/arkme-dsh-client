@@ -9,13 +9,13 @@
  * every other array keeps its order.
  */
 const packageName = "@senguoyun/dsh-arkme";
-const packageVersion = "0.1.29";
-const commit = "e817cb21e3923c8e903d68d442f3227c9e6c78ef";
+const packageVersion = "0.1.52";
+const commit = "2838fdceea0e4702b9017a31e0ad6f0893fc823a";
 const repository = "git@github.com:arkme-senx/arkme-dsh-plugin.git";
 const dependencySpec = `git+ssh://git@github.com/arkme-senx/arkme-dsh-plugin.git#${commit}`;
 const tarball =
   `https://codeload.github.com/arkme-senx/arkme-dsh-plugin/tar.gz/${commit}`;
-const peerSuffix = "(2e4ae8833cffc2b8e2a560f0f5496f1a)";
+const peerSuffix = "(573d2c61500c32345d20c20077cad57d)";
 
 export const productionPluginFingerprint = Object.freeze({
   packageName,
@@ -29,11 +29,11 @@ export const productionPluginFingerprint = Object.freeze({
   packageResolutionKey: `${packageName}@${tarball}`,
   snapshotKey: `${packageName}@${tarball}${peerSuffix}`,
   integrity:
-    "sha512-bCBOmvdcR+wrLluFEbHtjntX4t7r476oNEV6faZ22oa1Si+eX6Jgu/jysR+w3dgTRN/swByyH55oK00ZOCxnuw==",
+    "sha512-sfAkMLLEHniTWw2zu+ECpTIcoJJxkLyuBb7bDCuWotEmeJPkwV9hevOX4v9NbZ+IsoAqI82Ze7B5huK7voHBZA==",
   packageEntrySha256:
-    "4c9b00a0d20b888bccd0e92f2ca1cbb2793fbf036471103d98e4fdf203778cf9",
+    "f1cb163ae99ab1a5f4a6f75409b016ecd10ba9de9d34ad3a112ad48a1f4b05d9",
   snapshotSha256:
-    "ea6472eea320bde6e61a48f5c2177a8959871b6fd5426939b303d9e290e07e6c",
+    "e3b17d4854d9113d5107f0af64c1eade943cfd84426efd417843bab41618cc8e",
   unorderedArrayFields: Object.freeze([
     "bundledDependencies",
     "cpu",

@@ -79,6 +79,10 @@ describe("packaged DSH profile bundle resolution patch", () => {
       writePackage(profileArkme, "@senguoyun/dsh-arkme", "0.1.22"),
       writePackage(runtimeBase, "@deepseek-ai/dsh-base", "0.1.0-rc.8"),
       writePackage(profileBase, "@deepseek-ai/dsh-base", "9.9.9"),
+      // This assertion exercises an installed bundle, so provide both copies.
+      // Without the runtime package the resolver correctly falls back to Profile.
+      writePackage(path.join(root, "runtime", "node_modules", "@deepseek-ai", "dsh-client-ui-commands"), "@deepseek-ai/dsh-client-ui-commands", "0.1.0"),
+      writePackage(path.join(profileDirectory, "node_modules", "@deepseek-ai", "dsh-client-ui-commands"), "@deepseek-ai/dsh-client-ui-commands", "9.9.9"),
     ]);
     await writeFile(appBootModule, `
 import { createRequire } from "node:module";

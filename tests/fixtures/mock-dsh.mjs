@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
@@ -11,34 +12,48 @@ const host = option("--host") ?? "127.0.0.1";
 const port = Number(option("--port"));
 if (!Number.isInteger(port) || port <= 0) throw new Error("A valid --port is required");
 
+const launchToken = randomBytes(32).toString("base64url");
+const cookieValue = `v1.${randomBytes(24).toString("base64url")}.signature`;
+const cookie = `dsh-auth-mock=${cookieValue}`;
 const server = http.createServer(async (request, response) => {
-  if (request.method === "POST" && request.url === "/api/host.describe") {
+  if (request.method === "GET" && request.url === `/?token=${launchToken}`) {
+    response.writeHead(303, {location: "/", "set-cookie": `${cookie}; Path=/; HttpOnly; SameSite=Strict`, "cache-control":"no-store"}).end();
+    return;
+  }
+  if (request.headers.cookie !== cookie) {
+    response.writeHead(401, {"cache-control":"no-store"}).end("authentication required");
+    return;
+  }
+  if (request.method === "POST" && request.url === "/api/session/list") {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const requestBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    if (requestBody.type !== "client-request" || typeof requestBody.rpcId !== "string"
+      || requestBody.method !== "session/list"
+      || JSON.stringify(requestBody.payload) !== JSON.stringify({args:{_request:{}}})) {
+      response.writeHead(400).end("invalid session/list request"); return;
+    }
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({
       type: "server-response",
       rpcId: requestBody.rpcId,
       result: {
         ok: true,
-        value: {
-          version: "0.1.0-rc.8",
-          cwd: process.cwd(),
-          attachedSessions: 0,
-          home: process.env.DSH_HOME ?? process.cwd(),
-          canOpenPath: true
-        }
+        value: {items: []}
       }
     }));
     return;
   }
 
-  if (request.method === "POST" && request.url === "/api/workspace.create") {
+  if (request.method === "POST" && request.url === "/api/workspace/create") {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const requestBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    const workspacePath = requestBody.payload?.path;
+    const workspacePath = requestBody.payload?.args?.request?.path;
+    if (requestBody.type !== "client-request" || typeof requestBody.rpcId !== "string"
+      || requestBody.method !== "workspace/create" || typeof workspacePath !== "string") {
+      response.writeHead(400).end("invalid workspace/create request"); return;
+    }
     const registrationStatePath = process.env.DSH_HOME === undefined
       ? undefined
       : path.join(process.env.DSH_HOME, "mock-workspace-registrations.json");
@@ -101,5 +116,5 @@ server.listen(port, host, async () => {
     // PID is the readiness marker for integration tests, so publish it last.
     await writeFile(path.join(process.env.DSH_HOME, "mock.pid"), `${process.pid}\n`);
   }
-  console.log(`mock harness ready at http://${host}:${port}/`);
+  console.log(`dsh web: http://${host}:${port}/?token=${launchToken}`);
 });

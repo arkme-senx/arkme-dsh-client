@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { access, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   isDeterministicRuntimeArtifactError,
   RuntimeArtifactValidationError,
   runtimeArtifactFailureCode,
+  RuntimePluginReadinessError,
   runtimeFailureScope
 } from "./errors.js";
 import {
@@ -54,7 +55,7 @@ export interface RuntimeCandidateFailure {
   reason: string;
 }
 
-export type ElectronRuntimeStageLatestResult = "current" | "stale" | "bad" | "deferred" | "staged";
+export type ElectronRuntimeStageLatestResult = "current" | "stale" | "bad" | "deferred" | "staged" | "no-active";
 export type ElectronRuntimeStageLatestIfStaleResult = ElectronRuntimeStageLatestResult | "throttled";
 
 export class BadRuntimeReleaseBlockedError extends Error {
@@ -76,7 +77,7 @@ export class BadRuntimeReleaseBlockedError extends Error {
 }
 
 interface RuntimeManagerDependencies {
-  fetchManifest: () => Promise<ElectronRuntimeManifest>;
+  fetchManifest: (baseline?: ElectronRuntimeManifest) => Promise<ElectronRuntimeManifest>;
   installRelease: (
     manifest: ElectronRuntimeManifest,
     stagingPath: string,
@@ -90,6 +91,9 @@ interface RuntimeManagerOptions extends RuntimeManagerDependencies {
   root: string;
   environment: RuntimeEnvironment;
   manifestContext: ElectronRuntimeContext;
+  cacheEpoch?: number;
+  initialBaseline?: ElectronRuntimeManifest;
+  readInitialBaseline?: () => Promise<ElectronRuntimeManifest | undefined>;
 }
 
 const RELEASE_ENVIRONMENT_RECEIPT = "runtime-environment.json";
@@ -99,6 +103,7 @@ export class ElectronRuntimeManager {
   private readonly releasesPath: string;
   private readonly stagingPath: string;
   private readonly downloadsPath: string;
+  private readonly acquisitionPath: string;
   private readonly now: () => Date;
   private readonly validateRelease: (manifest: ElectronRuntimeManifest, releasePath: string) => Promise<void>;
   private readonly legacyUnmarkedReleaseIds = new Set<string>();
@@ -113,15 +118,17 @@ export class ElectronRuntimeManager {
     this.releasesPath = path.join(options.root, "releases");
     this.stagingPath = path.join(options.root, "staging");
     this.downloadsPath = path.join(options.root, "downloads");
+    this.acquisitionPath = path.join(options.root, "acquisition.json");
     this.now = options.now ?? (() => new Date());
     this.validateRelease = options.validateRelease ?? validateInstalledElectronRuntime;
   }
 
   prepareForLaunch(
-    progress?: (state: RuntimeInstallProgress) => void
+    progress?: (state: RuntimeInstallProgress) => void,
+    options: { manualRetry?: boolean } = {}
   ): Promise<ResolvedElectronRuntime> {
     if (this.prepareForLaunchInFlight !== undefined) return this.prepareForLaunchInFlight;
-    const task = this.performPrepareForLaunch(progress);
+    const task = this.performPrepareForLaunch(progress, options.manualRetry === true);
     this.prepareForLaunchInFlight = task;
     const clear = () => {
       if (this.prepareForLaunchInFlight === task) this.prepareForLaunchInFlight = undefined;
@@ -131,7 +138,8 @@ export class ElectronRuntimeManager {
   }
 
   private async performPrepareForLaunch(
-    progress?: (state: RuntimeInstallProgress) => void
+    progress?: (state: RuntimeInstallProgress) => void,
+    manualRetry = false
   ): Promise<ResolvedElectronRuntime> {
     await this.ensureDirectories();
     const state = await this.readState();
@@ -140,7 +148,14 @@ export class ElectronRuntimeManager {
       const candidateId = state.candidateReleaseId;
       if (state.candidateAttemptedAt !== undefined) {
         try {
-          await this.resolveRelease(candidateId, false);
+          const candidate = await this.resolveRelease(candidateId, state.activeReleaseId === undefined);
+          if (state.activeReleaseId === undefined) {
+            // A fresh epoch has no verified fallback. Give a fully local candidate
+            // one trial per explicit bootstrap after the data transaction recovered.
+            markRuntimeCandidateAttempted(state, this.now().toISOString());
+            await this.writeState(state);
+            return candidate;
+          }
           rollbackRuntimeCandidate(state, {
             phase: "harness-start",
             scope: "unknown",
@@ -168,7 +183,37 @@ export class ElectronRuntimeManager {
     const active = await this.resolveActiveReleaseOrRecover(state);
     if (active !== undefined) return active;
 
-    const manifest = await this.fetchLatestManifest();
+    const acquisition = await this.readAcquisition();
+    const failedAcquisition = acquisition === undefined ? undefined : state.deferredReleases.find(item =>
+      item.releaseId === acquisition.releaseId
+      && !["install", "download", "verify", "manifest"].includes(item.phase)
+    );
+    let manifest: ElectronRuntimeManifest;
+    if (manualRetry && acquisition !== undefined && failedAcquisition !== undefined) {
+      // A failed trial must not pin explicit recovery to an obsolete pair forever.
+      // Fetch before replacing acquisition; failures leave all local bytes intact.
+      manifest = await this.fetchLatestManifest(acquisition);
+      if (compareElectronRuntimeCandidate(acquisition, manifest) === "stale") {
+        throw new RuntimeArtifactValidationError("RECOVERY_BASELINE_CODE_REGRESSION",
+          "Runtime component Code cannot decrease from the failed acquisition baseline", "manifest");
+      }
+    } else if (acquisition !== undefined
+      && !state.badReleases.some(item => item.releaseId === acquisition.releaseId)) {
+      manifest = acquisition;
+    } else {
+      const baseline = this.options.readInitialBaseline === undefined
+        ? this.options.initialBaseline : await this.options.readInitialBaseline();
+      manifest = await this.fetchLatestManifest(baseline);
+      if (baseline !== undefined && compareElectronRuntimeCandidate(baseline, manifest) === "stale") {
+        throw new RuntimeArtifactValidationError("INITIAL_BASELINE_CODE_REGRESSION",
+          "Runtime component Code cannot decrease from the previous cache baseline", "manifest");
+      }
+    }
+    const incompatible = state.deferredReleases.find(item => item.releaseId === manifest.releaseId
+      && (item.code === "PLUGIN_DESKTOP_READINESS_UNSUPPORTED"
+        // Recognize failures persisted by Code 7 before the dedicated error code.
+        || item.reason === "Required plugin does not support desktop Harness readiness v1"));
+    if (incompatible !== undefined) throw new RuntimePluginReadinessError();
     const bad = state.badReleases.find(item => item.releaseId === manifest.releaseId);
     if (bad !== undefined) {
       throw new BadRuntimeReleaseBlockedError(manifest.releaseId, this.options.environment, bad.reason);
@@ -245,7 +290,7 @@ export class ElectronRuntimeManager {
     await this.ensureDirectories();
     const state = await this.readState();
     await this.persistMigratedStateIfNeeded(state);
-    if (state.activeReleaseId === undefined) return "current";
+    if (state.activeReleaseId === undefined) return "no-active";
     let baseline = await this.resolveRelease(state.activeReleaseId, false);
     if (state.candidateReleaseId !== undefined) {
       try {
@@ -255,7 +300,7 @@ export class ElectronRuntimeManager {
         await this.handleCandidateValidationFailure(state, candidateId, error);
       }
     }
-    const candidate = await this.fetchLatestManifest();
+    const candidate = await this.fetchLatestManifest(baseline.manifest);
     const decision = compareElectronRuntimeCandidate(baseline.manifest, candidate);
     if (decision === "current" && state.candidateReleaseId === candidate.releaseId) return "staged";
     if (decision !== "newer") return decision;
@@ -268,15 +313,37 @@ export class ElectronRuntimeManager {
     return "staged";
   }
 
-  private fetchLatestManifest(): Promise<ElectronRuntimeManifest> {
+  private fetchLatestManifest(baseline?: ElectronRuntimeManifest): Promise<ElectronRuntimeManifest> {
     this.lastManifestCheckStartedAtMillis = this.now().getTime();
-    return this.options.fetchManifest();
+    return this.options.fetchManifest(baseline);
+  }
+
+  /** Finish a durable data-commit decision before normal interrupted-candidate recovery. */
+  async recoverCommittedCandidate(releaseId: string): Promise<void> {
+    if (this.prepareForLaunchInFlight !== undefined || this.stageLatestInFlight !== undefined) {
+      throw new Error("Cannot recover a committed runtime while another operation is running");
+    }
+    const state = await this.readState();
+    if (state.activeReleaseId !== releaseId && state.candidateReleaseId !== releaseId) {
+      throw new Error("Committed runtime release does not match the local active or candidate release");
+    }
+    // Never resolve another epoch or silently fall back for a committed decision.
+    await this.resolveRelease(releaseId, false);
+    if (state.activeReleaseId === releaseId) return;
+    await this.completeCandidate();
   }
 
   async completeCandidate(): Promise<void> {
     const state = await this.readState();
     completeRuntimeCandidate(state);
     await this.writeState(state);
+    try {
+      if ((await this.readAcquisition())?.releaseId === state.activeReleaseId) {
+        await rm(this.acquisitionPath, { force: true });
+      }
+    } catch {
+      // The active pointer is committed; optional cache cleanup cannot undo it.
+    }
     await this.pruneUnreferencedRuntimeData(state).catch(() => undefined);
   }
 
@@ -352,6 +419,9 @@ export class ElectronRuntimeManager {
     manifest: ElectronRuntimeManifest,
     progress?: (state: RuntimeInstallProgress) => void
   ): Promise<void> {
+    // Persist the selected pair before downloading either archive. A retry may
+    // finish entirely from local verified archives without reaching the feed.
+    await this.writeAcquisition(manifest);
     const releasePath = path.join(this.releasesPath, manifest.releaseId);
     if (!this.discardExistingRuntime) {
       try {
@@ -560,6 +630,7 @@ export class ElectronRuntimeManager {
   }
 
   private async pruneUnreferencedRuntimeData(state: RuntimeInstallState): Promise<void> {
+    const acquisition = await this.readAcquisition();
     const referencedReleaseIds = new Set([
       state.activeReleaseId,
       state.previousReleaseId,
@@ -567,6 +638,13 @@ export class ElectronRuntimeManager {
       ...state.deferredReleases.map(item => item.releaseId)
     ].filter((releaseId): releaseId is string => releaseId !== undefined));
     const referencedDownloads = new Set<string>();
+    if (acquisition !== undefined) {
+      referencedReleaseIds.add(acquisition.releaseId);
+      for (const artifact of Object.values(acquisition.artifacts)) {
+        referencedDownloads.add(`${artifact.sha256}.tar.zst`);
+        referencedDownloads.add(`${artifact.sha256}.tar.zst.part`);
+      }
+    }
     for (const releaseId of referencedReleaseIds) {
       try {
         const manifest = parseElectronRuntimeManifest(
@@ -597,6 +675,36 @@ export class ElectronRuntimeManager {
     await mkdir(this.stagingPath, { recursive: true });
   }
 
+  private async readAcquisition(): Promise<ElectronRuntimeManifest | undefined> {
+    let document: unknown;
+    try {
+      document = JSON.parse(await readFile(this.acquisitionPath, "utf8"));
+    } catch (error) {
+      if (isMissingFile(error) || error instanceof SyntaxError) return undefined;
+      throw error;
+    }
+    if (document === null || typeof document !== "object") return undefined;
+    const record = document as Record<string, unknown>;
+    if (record.schemaVersion !== 1 || record.environment !== this.options.environment
+      || record.cacheEpoch !== (this.options.cacheEpoch ?? 1)) return undefined;
+    try {
+      return parseElectronRuntimeManifest(record.manifest, this.options.manifestContext);
+    } catch (error) {
+      if (isDeterministicRuntimeArtifactError(error)) return undefined;
+      throw error;
+    }
+  }
+
+  private async writeAcquisition(manifest: ElectronRuntimeManifest): Promise<void> {
+    parseElectronRuntimeManifest(manifest, this.options.manifestContext);
+    await writeDurableJson(this.acquisitionPath, {
+      schemaVersion: 1,
+      environment: this.options.environment,
+      cacheEpoch: this.options.cacheEpoch ?? 1,
+      manifest
+    });
+  }
+
   private async readState(): Promise<RuntimeInstallState> {
     try {
       const document = JSON.parse(await readFile(this.statePath, "utf8")) as Record<string, unknown>;
@@ -621,13 +729,7 @@ export class ElectronRuntimeManager {
   }
 
   private async writeState(state: RuntimeInstallState): Promise<void> {
-    const temporaryPath = `${this.statePath}.${process.pid}.${randomUUID()}.tmp`;
-    try {
-      await writeFile(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, { flag: "wx", mode: 0o600 });
-      await rename(temporaryPath, this.statePath);
-    } finally {
-      await rm(temporaryPath, { force: true });
-    }
+    await writeDurableJson(this.statePath, state);
   }
 
   private async persistMigratedStateIfNeeded(state: RuntimeInstallState): Promise<void> {
@@ -649,4 +751,18 @@ function systemErrorCode(error: unknown): string | undefined {
   return error !== null && typeof error === "object" && "code" in error && typeof error.code === "string"
     ? error.code
     : undefined;
+}
+
+
+async function writeDurableJson(destination: string, value: unknown): Promise<void> {
+  const temporaryPath = `${destination}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    const handle = await open(temporaryPath, "wx", 0o600);
+    try { await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`); await handle.sync(); }
+    finally { await handle.close(); }
+    await rename(temporaryPath, destination);
+  } finally {
+    // Rename is the commit point; cleanup must never report it as a failed write.
+    await rm(temporaryPath, {force:true}).catch(() => undefined);
+  }
 }

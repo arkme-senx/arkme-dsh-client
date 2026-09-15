@@ -6,6 +6,14 @@ export interface ProductionPluginSource {
   dependencySpec: string;
 }
 
+export interface LocalPluginSource {
+  kind: "local";
+  packageName: string;
+  packageVersion: string;
+  contentSha256: string;
+}
+export type RuntimePluginSource = ProductionPluginSource | LocalPluginSource;
+
 export function assertProductionManifestReferencesCatalog(
   manifest: unknown,
   manifestName: "root" | "runtime"
@@ -26,7 +34,7 @@ export function stageRuntimeWithStableProductionSource(options: {
 export function verifyRuntimePlugin(options: {
   pluginDir: string;
   runtimeRoot: string;
-  source: ProductionPluginSource;
+  source: RuntimePluginSource;
 }): Promise<{
   packageName: string;
   packageVersion: string;
@@ -34,20 +42,20 @@ export function verifyRuntimePlugin(options: {
 
 export function writePluginProvenance(options: {
   pluginDir: string;
-  source: ProductionPluginSource;
+  source: RuntimePluginSource;
   packageVersion: string;
 }): Promise<string>;
 
 export function validatePackagedPluginMetadata(options: {
   manifest: unknown;
   provenance: unknown;
-  expectedSource: ProductionPluginSource;
+  expectedSource: RuntimePluginSource;
 }): void;
 
 export function verifyRuntimePluginProvenance(options: {
   pluginDir: string;
   runtimeRoot: string;
-  source: ProductionPluginSource;
+  source: RuntimePluginSource;
 }): Promise<{
   packageName: string;
   packageVersion: string;
@@ -56,7 +64,7 @@ export function verifyRuntimePluginProvenance(options: {
 export function prepareRuntimePlugin(options: {
   pluginDir: string;
   runtimeRoot: string;
-  source: ProductionPluginSource;
+  source: RuntimePluginSource;
   importPlugin: (pluginEntry: string) => Promise<void>;
 }): Promise<{
   packageName: string;
@@ -67,7 +75,7 @@ export function prepareRuntimePlugin(options: {
 export function prepareRuntimePluginTransaction(options: {
   pluginDir: string;
   runtimeRoot: string;
-  source: ProductionPluginSource;
+  source: RuntimePluginSource;
   importPlugin: (pluginEntry: string) => Promise<void>;
   finalizeRuntime: () => Promise<void>;
 }): Promise<{

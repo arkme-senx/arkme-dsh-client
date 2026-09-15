@@ -31,6 +31,22 @@ export interface ElectronRuntimeManifest {
     harness: ElectronRuntimeArtifact & { modulesAbi: 148; entry: string; metadata: string };
     requiredPlugin: ElectronRuntimeArtifact & { name: "@senguoyun/dsh-arkme"; target: string };
   };
+  compatibility?: ElectronRuntimeCompatibility;
+}
+
+export interface ElectronRuntimeCodeRange {
+  min: number;
+  max: number;
+}
+
+export interface ElectronRuntimeCompatibility {
+  shellVersionCode: number;
+  clientHarnessRange: ElectronRuntimeCodeRange;
+  pluginHarnessRange: ElectronRuntimeCodeRange;
+  clientMaxHarnessVersionCode: number;
+  pluginMaxHarnessVersionCode: number;
+  clientRuleRevision: number;
+  pluginRuleRevision: number;
 }
 
 export interface ElectronRuntimeContext {
@@ -39,6 +55,10 @@ export interface ElectronRuntimeContext {
   shellVersion: string;
   electronMajor: number;
   modulesAbi: number;
+}
+
+export interface ElectronRuntimeManifestValidationOptions {
+  requiredShellVersionCode?: number;
 }
 
 export type CandidateDecision = "current" | "newer" | "stale";
@@ -54,7 +74,8 @@ export function isElectronRuntimeReleaseId(value: unknown): value is string {
 
 export function parseElectronRuntimeManifest(
   document: unknown,
-  context: ElectronRuntimeContext
+  context: ElectronRuntimeContext,
+  options: ElectronRuntimeManifestValidationOptions = {}
 ): ElectronRuntimeManifest {
   const root = objectValue(document, "manifest");
   const target = objectValue(root.target, "target");
@@ -100,10 +121,59 @@ export function parseElectronRuntimeManifest(
     throw new RuntimeArtifactValidationError("ARTIFACT_IDENTITY_INVALID", "Electron runtime artifact identity is invalid", "manifest");
   }
   const manifest = root as unknown as ElectronRuntimeManifest;
+  if (options.requiredShellVersionCode !== undefined) {
+    validateNetworkCompatibility(manifest, options.requiredShellVersionCode);
+  }
   if (manifest.releaseId !== deriveElectronRuntimeReleaseId(manifest)) {
     throw new RuntimeArtifactValidationError("RELEASE_IDENTITY_MISMATCH", "Electron runtime release identity does not match its artifact set", "manifest");
   }
   return manifest;
+}
+
+function validateNetworkCompatibility(
+  manifest: ElectronRuntimeManifest,
+  expectedShellVersionCode: number
+): void {
+  const compatibility = manifest.compatibility;
+  if (
+    !positiveUint32(expectedShellVersionCode)
+    || !isCompatibility(compatibility)
+    || compatibility.shellVersionCode !== expectedShellVersionCode
+    || !inRange(manifest.artifacts.harness.versionCode, compatibility.clientHarnessRange)
+    || !inRange(manifest.artifacts.harness.versionCode, compatibility.pluginHarnessRange)
+    || !inRange(compatibility.clientMaxHarnessVersionCode, compatibility.clientHarnessRange)
+    || !inRange(compatibility.pluginMaxHarnessVersionCode, compatibility.pluginHarnessRange)
+    || compatibility.clientMaxHarnessVersionCode < manifest.artifacts.harness.versionCode
+    || compatibility.pluginMaxHarnessVersionCode < manifest.artifacts.harness.versionCode
+  ) {
+    throw new RuntimeArtifactValidationError(
+      "MANIFEST_COMPATIBILITY_INVALID",
+      "Electron runtime manifest compatibility metadata is invalid",
+      "manifest"
+    );
+  }
+}
+
+function isCompatibility(value: unknown): value is ElectronRuntimeCompatibility {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const compatibility = value as Partial<ElectronRuntimeCompatibility>;
+  return positiveUint32(compatibility.shellVersionCode)
+    && validRange(compatibility.clientHarnessRange)
+    && validRange(compatibility.pluginHarnessRange)
+    && positiveUint32(compatibility.clientMaxHarnessVersionCode)
+    && positiveUint32(compatibility.pluginMaxHarnessVersionCode)
+    && positiveSafeInteger(compatibility.clientRuleRevision)
+    && positiveSafeInteger(compatibility.pluginRuleRevision);
+}
+
+function validRange(value: unknown): value is ElectronRuntimeCodeRange {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const range = value as Partial<ElectronRuntimeCodeRange>;
+  return positiveUint32(range.min) && positiveUint32(range.max) && range.min <= range.max;
+}
+
+function inRange(value: number, range: ElectronRuntimeCodeRange): boolean {
+  return value >= range.min && value <= range.max;
 }
 
 export function deriveElectronRuntimeReleaseId(manifest: ElectronRuntimeManifest): string {
@@ -180,4 +250,12 @@ function objectValue(value: unknown, label: string): Record<string, unknown> {
 
 function positiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function positiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function positiveUint32(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 0xffffffff;
 }

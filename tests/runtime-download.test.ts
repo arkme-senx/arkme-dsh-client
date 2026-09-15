@@ -165,3 +165,23 @@ describe("runtime artifact download", () => {
     expect(progress.at(-1)).toBe(100);
   });
 });
+
+
+test("preserves a truncated transfer as resumable rather than a bad artifact", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "runtime-truncated-transfer-"));
+  temporaryDirectories.push(root);
+  const destination = path.join(root, "artifact.tar.zst");
+  const bytes = Buffer.from("complete-artifact");
+  const artifact = {url: "https://d.jiwo.cc/artifact.tar.zst", sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.length};
+  let failure: unknown;
+  try {
+    await downloadRuntimeArtifact({artifact, destination, retryDelaysMs: [0], fetcher: async () => new Response(bytes.subarray(0, 4))});
+  } catch (error) { failure = error; }
+  expect(failure).toMatchObject({name: "RuntimeNetworkWaitingError", permanent: false});
+  expect(await readFile(`${destination}.part`)).toEqual(bytes.subarray(0, 4));
+  await downloadRuntimeArtifact({artifact, destination, retryDelaysMs: [0], fetcher: async (_url, init) => {
+    expect(new Headers(init?.headers).get("Range")).toBe("bytes=4-");
+    return new Response(bytes.subarray(4), {status:206, headers:{"content-range":`bytes 4-${bytes.length - 1}/${bytes.length}`}});
+  }});
+  expect(await readFile(destination)).toEqual(bytes);
+});

@@ -225,6 +225,13 @@ h1 {
   margin-top: 32px;
 }
 
+.network-waiting-footer {
+  margin: 18px auto 0;
+  color: #7c8699;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .button {
   padding: 9px 15px;
   border: 1px solid #d8deea;
@@ -279,6 +286,10 @@ h1 {
   .message,
   .failure-suggestion,
   .workspace-row {
+    color: #939db2;
+  }
+
+  .network-waiting-footer {
     color: #939db2;
   }
 

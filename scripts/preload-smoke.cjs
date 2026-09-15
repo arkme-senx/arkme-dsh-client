@@ -1,5 +1,10 @@
 const { app, BrowserWindow, ipcMain, nativeImage } = require("electron");
 const path = require("node:path");
+const { mkdtempSync } = require("node:fs");
+const os = require("node:os");
+const isolatedPreloadProfile = mkdtempSync(path.join(os.tmpdir(), "arkme-preload-smoke-"));
+app.setPath("userData", isolatedPreloadProfile);
+app.setPath("sessionData", path.join(isolatedPreloadProfile, "session"));
 const { pathToFileURL } = require("node:url");
 const { inflateSync } = require("node:zlib");
 
@@ -30,8 +35,14 @@ app.whenReady().then(async () => {
     ) {
       throw new Error("Windows badge dot must decode as a red circle on a transparent canvas");
     }
+    // This data: document is not an armed Harness trial. Its readiness bridge
+    // must be present but must not receive a main-owned document nonce.
+    ipcMain.on("arkme-runtime:page-ready-nonce", event => { event.returnValue = null; });
     ipcMain.on("arkme-runtime:harness-version", event => {
       event.returnValue = "preload-smoke";
+    });
+    ipcMain.on("arkme-app-update:app-version", event => {
+      event.returnValue = "1.2.3-smoke";
     });
     ipcMain.on("arkme-desktop:attention-capabilities", event => {
       event.returnValue = {
@@ -45,6 +56,18 @@ app.whenReady().then(async () => {
       event.returnValue = true;
     });
     ipcMain.handle("arkme:runtime-update-notice:snapshot", () => null);
+    ipcMain.handle("arkme-app-update:notice", () => ({
+      schemaVersion: 1,
+      revision: 1,
+      expanded: false,
+      state: {
+        status: "current",
+        currentVersion: "1.2.3-smoke",
+        currentVersionCode: 1,
+        canAutoInstall: false
+      },
+      websiteOpening: false
+    }));
     window = new BrowserWindow({
       show: false,
       webPreferences: {
@@ -64,6 +87,7 @@ app.whenReady().then(async () => {
 
     const result = await window.webContents.executeJavaScript(`({
       present: window.arkmeDesktop?.startupAuthGate === true,
+      readinessBridgeAvailable: typeof window.arkmeDesktop?.notifyHarnessReady === "function",
       frozen: Object.isFrozen(window.arkmeDesktop),
       attentionFrozen: Object.isFrozen(window.arkmeDesktop?.attention),
       notificationFacadeFrozen: Object.isFrozen(window.arkmeDesktopNotifications),
@@ -74,9 +98,16 @@ app.whenReady().then(async () => {
       notificationPermissionSubscriptionAvailable: typeof window.arkmeDesktopNotifications?.onPermissionChanged === "function",
       badgeMode: window.arkmeDesktop?.attention?.badgeMode,
       harnessVersion: window.arkmeDesktop?.harnessVersion,
+      appUpdateUi: window.arkmeDesktop?.appUpdateUi,
+      appVersion: window.arkmeDesktop?.appVersion,
+      appUpdateBridgeFrozen: Object.isFrozen(window.arkmeDesktop?.update),
+      appUpdateOpenAvailable: typeof window.arkmeDesktop?.update?.open === "function",
+      appUpdateSubscriptionAvailable: typeof window.arkmeDesktop?.update?.onChanged === "function",
+      appUpdateShowInFolderAbsent: !("showInFolder" in (window.arkmeDesktop?.update ?? {})),
     })`);
     if (
       !result.present
+      || !result.readinessBridgeAvailable
       || !result.frozen
       || !result.attentionFrozen
       || !result.notificationFacadeFrozen
@@ -87,6 +118,12 @@ app.whenReady().then(async () => {
       || !result.notificationPermissionSubscriptionAvailable
       || result.badgeMode !== "count"
       || result.harnessVersion !== "preload-smoke"
+      || result.appUpdateUi !== true
+      || result.appVersion !== "1.2.3-smoke"
+      || !result.appUpdateBridgeFrozen
+      || !result.appUpdateOpenAvailable
+      || !result.appUpdateSubscriptionAvailable
+      || !result.appUpdateShowInFolderAbsent
     ) {
       const details = preloadErrors.length > 0 ? `\n${preloadErrors.join("\n")}` : "";
       throw new Error(`Arkme desktop capability was not exposed: ${JSON.stringify(result)}${details}`);

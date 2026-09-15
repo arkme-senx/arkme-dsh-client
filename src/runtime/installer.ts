@@ -36,11 +36,15 @@ export async function installElectronRuntimeRelease(
   notify("download");
   const harnessDownload = path.join(options.downloadsPath, `${manifest.artifacts.harness.sha256}.tar.zst`);
   const pluginDownload = path.join(options.downloadsPath, `${manifest.artifacts.requiredPlugin.sha256}.tar.zst`);
-  await Promise.all([
+  const downloads = new AbortController();
+  let downloadFailure: unknown;
+  const results = await Promise.allSettled([
     downloadRuntimeArtifact({
       artifact: manifest.artifacts.harness,
       destination: harnessDownload,
       fetcher: options.fetcher,
+      signal: downloads.signal,
+      retryDelaysMs: [0],
       onProgress: percent => {
         progress.harnessPercent = percent;
         notify("download");
@@ -50,12 +54,22 @@ export async function installElectronRuntimeRelease(
       artifact: manifest.artifacts.requiredPlugin,
       destination: pluginDownload,
       fetcher: options.fetcher,
+      signal: downloads.signal,
+      retryDelaysMs: [0],
       onProgress: percent => {
         progress.pluginPercent = percent;
         notify("download");
       }
     })
-  ]);
+  ].map(async task => {
+    try { return await task; }
+    catch (error) {
+      if (downloadFailure === undefined) downloadFailure = error;
+      downloads.abort();
+      throw error;
+    }
+  }));
+  if (results.some(result => result.status === "rejected")) throw downloadFailure;
   notify("verify");
 
   await extractTarZstd(harnessDownload, stagingPath, {

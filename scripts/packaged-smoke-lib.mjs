@@ -51,3 +51,34 @@ async function walk(root, relative = "") {
   }
   return paths;
 }
+
+export function resolvePackagedRuntimeCacheRoot(userDataPath, packagedEpochSource) {
+  const matches = [...String(packagedEpochSource).matchAll(/^export const RUNTIME_CACHE_EPOCH = ([1-9]\d*);$/gm)];
+  if (matches.length !== 1 || !Number.isSafeInteger(Number(matches[0][1]))) {
+    throw new Error("Cannot identify the runtime cache epoch in the shipped app");
+  }
+  return path.join(userDataPath, "runtime-manager", "electron-v1", `cache-epoch-${matches[0][1]}`);
+}
+
+export function hasCompletedPackagedRuntimeStartup({ state, release, log }) {
+  if (typeof state?.activeReleaseId !== "string" || release?.releaseId !== state.activeReleaseId
+      || state.probationReleaseId !== undefined) return false;
+  let completedAt = -1;
+  for (const match of log.matchAll(/runtime-candidate-complete (\{[^\n]*\})/g)) {
+    try { if (JSON.parse(match[1]).releaseId === state.activeReleaseId) completedAt = match.index; }
+    catch { /* Incomplete final log writes are retried by the caller. */ }
+  }
+  if (completedAt < 0) return false;
+  // Candidate completion in the shipped main process follows authenticated
+  // plugin health and real hidden-page readiness. Never extract its credentials
+  // or replay unauthenticated HTTP calls from this external smoke process.
+  for (const match of log.matchAll(/render-ready (\{[^\n]*\})/g)) {
+    if (match.index <= completedAt) continue;
+    try {
+      const url = new URL(JSON.parse(match[1]).url);
+      if (url.protocol === "http:" && url.hostname === "127.0.0.1" && url.port
+          && !url.username && !url.password && !url.search && !url.hash && url.pathname === "/") return true;
+    } catch { /* Ignore partial or invalid events. */ }
+  }
+  return false;
+}

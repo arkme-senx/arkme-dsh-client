@@ -7,6 +7,7 @@ const message = params.get("message") ?? "";
 const displayTitle = params.get("title") ?? "";
 const suggestion = params.get("suggestion") ?? "";
 const technicalDetails = params.get("technicalDetails") ?? "";
+const presentation = params.get("presentation") ?? "";
 const showWorkspaceAction = params.get("showWorkspaceAction") !== "0";
 const showReloadRuntimeAction = params.get("showReloadRuntimeAction") === "1";
 
@@ -32,6 +33,7 @@ const reloadRuntimeAction = document.querySelector("#reload-runtime-action");
 const downloadStage = document.querySelector("#download-stage");
 const verifyStage = document.querySelector("#verify-stage");
 const installStage = document.querySelector("#install-stage");
+const networkWaitingFooter = document.querySelector("#network-waiting-footer");
 
 document.body.dataset.environment = environment;
 document.title = isTestEnvironment ? "arkme Test" : "arkme";
@@ -53,16 +55,20 @@ if (kind === "runtime-installing") {
     if (progress?.kind === "runtime-installing") renderRuntimeInstalling(progress);
   });
 } else if (kind === "failed") {
+  const networkWaiting = presentation === "runtime-network-waiting";
   document.body.dataset.state = "failed";
-  title.textContent = displayTitle || "DeepSeek Harness 启动失败";
-  messageElement.textContent = message || "本地 Harness 服务未能启动";
-  failureSuggestion.textContent = suggestion;
-  failureSuggestion.hidden = suggestion.length === 0;
+  document.body.dataset.presentation = presentation;
+  title.textContent = networkWaiting ? "需要联网完成运行环境升级" : displayTitle || "DeepSeek Harness 启动失败";
+  messageElement.textContent = networkWaiting ? "已下载进度和本地数据会保留。" : message || "本地 Harness 服务未能启动";
+  failureSuggestion.textContent = networkWaiting ? "" : suggestion;
+  failureSuggestion.hidden = networkWaiting || suggestion.length === 0;
+  networkWaitingFooter.textContent = networkWaiting ? "网络恢复后，请点击“重试”继续。" : "";
+  networkWaitingFooter.hidden = !networkWaiting;
   technicalDetailsElement.textContent = technicalDetails.length === 0 ? "" : `技术信息：${technicalDetails}`;
   technicalDetailsElement.hidden = technicalDetails.length === 0;
-  chooseWorkspaceAction.hidden = !showWorkspaceAction;
-  retryAction.hidden = showReloadRuntimeAction;
-  reloadRuntimeAction.hidden = !showReloadRuntimeAction;
+  chooseWorkspaceAction.hidden = networkWaiting || !showWorkspaceAction;
+  retryAction.hidden = networkWaiting ? false : showReloadRuntimeAction;
+  reloadRuntimeAction.hidden = networkWaiting || !showReloadRuntimeAction;
   spinner.hidden = true;
   failureIcon.hidden = false;
   actions.hidden = false;

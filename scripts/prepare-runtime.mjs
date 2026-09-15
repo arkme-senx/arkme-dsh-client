@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { access, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { assertRuntimePluginReady, stageLocalRuntimePlugin } from "./local-runtime-plugin.mjs";
 import { materializeRuntimeNodeModules } from "./materialize-runtime-node-modules.mjs";
 import { installBundledPnpmShim } from "./install-bundled-pnpm-shim.mjs";
 import { patchDshBundledPnpm } from "./patch-dsh-bundled-pnpm.mjs";
@@ -97,10 +98,15 @@ const stagedPlugin = path.join(
   "@senguoyun",
   "dsh-arkme"
 );
+const localPluginDir = process.env.ARKME_RUNTIME_LOCAL_PLUGIN_DIR?.trim();
+const runtimePluginSource = localPluginDir
+  ? await stageLocalRuntimePlugin({ localPluginDir, pluginDir: stagedPlugin })
+  : productionPluginSource;
+assertRuntimePluginReady(JSON.parse(await readFile(path.join(stagedPlugin, "package.json"), "utf8")));
 await prepareRuntimePluginTransaction({
   pluginDir: stagedPlugin,
   runtimeRoot,
-  source: productionPluginSource,
+  source: runtimePluginSource,
   importPlugin: async (stagedPluginEntry) => run(
     process.execPath,
     [

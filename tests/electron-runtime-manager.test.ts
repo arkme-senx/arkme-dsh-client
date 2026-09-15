@@ -51,7 +51,7 @@ async function installFixture(manifest: ElectronRuntimeManifest, stagingPath: st
 
 function createManager(
   root: string,
-  fetchManifest: () => Promise<ElectronRuntimeManifest>,
+  fetchManifest: (baseline?: ElectronRuntimeManifest) => Promise<ElectronRuntimeManifest>,
   installed: string[] = []
 ): ElectronRuntimeManager {
   return new ElectronRuntimeManager({
@@ -73,6 +73,35 @@ function dshEntry(root: string, releaseId: string): string {
 }
 
 describe("ElectronRuntimeManager", () => {
+  test("passes the active and pending releases as compatible-feed baselines while staging", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "electron-runtime-compatible-baseline-"));
+    temporaryDirectories.push(root);
+    const current = release("electron-runtime-v1-compatible-current", 1, 1);
+    const pending = release("electron-runtime-v1-compatible-pending", 2, 2);
+    let next = current;
+    const baselines: Array<ElectronRuntimeManifest | undefined> = [];
+    const manager = new ElectronRuntimeManager({
+      root,
+      environment: "prod",
+      manifestContext,
+      fetchManifest: async (baseline?: ElectronRuntimeManifest) => {
+        baselines.push(baseline);
+        return next;
+      },
+      installRelease: installFixture,
+      validateRelease: async () => undefined
+    });
+
+    await manager.prepareForLaunch();
+    await manager.completeCandidate();
+    next = pending;
+    await expect(manager.stageLatest()).resolves.toBe("staged");
+    next = pending;
+    await expect(manager.stageLatest()).resolves.toBe("staged");
+
+    expect(baselines).toEqual([undefined, current, pending]);
+  });
+
   test("counts the bootstrap manifest request toward the background update cooldown", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "electron-runtime-bootstrap-cooldown-"));
     temporaryDirectories.push(root);
@@ -755,5 +784,237 @@ describe("ElectronRuntimeManager", () => {
     })));
     expect(after).toEqual(before);
     await expect(access(path.join(productionUserData, "runtime-manager"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+
+describe("runtime acquisition recovery", () => {
+  test("resumes a failed install after restart without fetching a second manifest", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-acquisition-offline-"));
+    temporaryDirectories.push(root);
+    const target = release("unused", 2, 3);
+    const first = new ElectronRuntimeManager({
+      root, environment: "prod", manifestContext,
+      fetchManifest: async () => target,
+      installRelease: async () => { throw new Error("connection lost after downloads"); },
+      validateRelease: async () => undefined
+    });
+    await expect(first.prepareForLaunch()).rejects.toThrow("connection lost");
+    const second = createManager(root, async () => { throw new Error("offline manifest request"); });
+    const result = await second.prepareForLaunch();
+    expect(result.releaseId).toBe(target.releaseId);
+    expect(result.probation).toBe(true);
+    expect(JSON.parse(await readFile(path.join(root, "state.json"), "utf8")).badReleases).toEqual([]);
+    await second.completeCandidate();
+    await expect(access(path.join(root, "acquisition.json"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("does not retry a definitively bad acquisition forever", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-acquisition-bad-"));
+    temporaryDirectories.push(root);
+    const bad = release("unused", 2, 2);
+    const next = release("unused", 3, 3);
+    const first = new ElectronRuntimeManager({
+      root, environment: "prod", manifestContext,
+      fetchManifest: async () => bad,
+      installRelease: async () => { throw new RuntimeArtifactValidationError("ARTIFACT_DIGEST_MISMATCH", "bad bytes"); },
+      validateRelease: async () => undefined
+    });
+    await expect(first.prepareForLaunch()).rejects.toThrow();
+    expect((await createManager(root, async () => next).prepareForLaunch()).releaseId).toBe(next.releaseId);
+  });
+
+  test("leaves acquisition downloads referenced while an unrelated candidate completes", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-acquisition-retain-"));
+    temporaryDirectories.push(root);
+    const active = release("unused", 1, 1);
+    const candidate = release("unused", 2, 2);
+    let next = active;
+    const manager = new ElectronRuntimeManager({
+      root, environment: "prod", manifestContext,
+      fetchManifest: async () => next,
+      installRelease: async (manifest, staging) => {
+        if (manifest.releaseId === candidate.releaseId) {
+          await mkdir(path.join(root, "downloads"), { recursive: true });
+          await writeFile(path.join(root, "downloads", `${manifest.artifacts.harness.sha256}.tar.zst.part`), "partial");
+          throw new Error("network unavailable");
+        }
+        await installFixture(manifest, staging);
+      },
+      validateRelease: async () => undefined
+    });
+    await manager.prepareForLaunch();
+    await manager.completeCandidate();
+    next = candidate;
+    await expect(manager.stageLatest()).rejects.toThrow("network unavailable");
+    // A subsequent bootstrap uses the working active immediately, preserving the resumable update.
+    expect((await manager.prepareForLaunch()).releaseId).toBe(active.releaseId);
+    expect(await readFile(path.join(root, "downloads", `${candidate.artifacts.harness.sha256}.tar.zst.part`), "utf8")).toBe("partial");
+  });
+});
+
+
+describe("cache epoch isolation", () => {
+  test("does not launch legacy active or fallback state offline and leaves its files intact", async () => {
+    const userData = await mkdtemp(path.join(os.tmpdir(), "runtime-cache-epoch-"));
+    temporaryDirectories.push(userData);
+    const oldRoot = path.join(userData, "runtime-manager", "electron-v1");
+    const legacy = release("unused", 1, 1);
+    const old = createManager(oldRoot, async () => legacy);
+    await old.prepareForLaunch();
+    await old.completeCandidate();
+    const oldState = await readFile(path.join(oldRoot, "state.json"), "utf8");
+    const { resolveRuntimeCacheRoot, readPreviousRuntimeBaseline } = await import("../src/runtime/cache-epoch.js");
+    const newRoot = resolveRuntimeCacheRoot(userData);
+    const baseline = await readPreviousRuntimeBaseline(userData, "prod", manifestContext);
+    expect(baseline?.releaseId).toBe(legacy.releaseId);
+    await expect(createManager(newRoot, async () => { throw new Error("offline"); }).prepareForLaunch()).rejects.toThrow("offline");
+    expect(await readFile(path.join(oldRoot, "state.json"), "utf8")).toBe(oldState);
+    await expect(access(dshEntry(oldRoot, legacy.releaseId))).resolves.toBeUndefined();
+    const fresh = createManager(newRoot, async () => release("unused", 2, 2));
+    await fresh.prepareForLaunch();
+    await fresh.completeCandidate();
+    expect((await createManager(newRoot, async () => { throw new Error("offline"); }).prepareForLaunch()).manifest.artifacts.harness.versionCode).toBe(2);
+  });
+
+  test("does not import another environment's previous component baseline", async () => {
+    const userData = await mkdtemp(path.join(os.tmpdir(), "runtime-cache-environment-"));
+    temporaryDirectories.push(userData);
+    const oldRoot = path.join(userData, "runtime-manager", "electron-v1");
+    const old = createManager(oldRoot, async () => release("unused", 1, 1));
+    await old.prepareForLaunch(); await old.completeCandidate();
+    const { readPreviousRuntimeBaseline } = await import("../src/runtime/cache-epoch.js");
+    expect(await readPreviousRuntimeBaseline(userData, "test", manifestContext)).toBeUndefined();
+  });
+});
+
+describe('committed candidate recovery and lazy Code baseline', () => {
+  test('committed decision promotes the exact attempted local candidate before bootstrap rollback', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'runtime-committed-recovery-')); temporaryDirectories.push(root);
+    const target = release('unused', 2, 2);
+    const first = createManager(root, async () => target);
+    await first.prepareForLaunch();
+    const resumed = createManager(root, async () => {throw new Error('offline');});
+    await resumed.recoverCommittedCandidate(target.releaseId);
+    expect((await resumed.prepareForLaunch()).probation).toBe(false);
+    await expect(resumed.recoverCommittedCandidate(target.releaseId)).resolves.toBeUndefined();
+    await expect(resumed.recoverCommittedCandidate(release('unused',3,3).releaseId)).rejects.toThrow();
+  });
+
+  test.each([[1, 2], [3, 1]])('rejects initial Code regression %s/%s before installing', async (harness, plugin) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'runtime-initial-baseline-')); temporaryDirectories.push(root);
+    let installed = false;
+    const manager = new ElectronRuntimeManager({root,environment:'prod',manifestContext,
+      readInitialBaseline:async () => release('unused',2,2),
+      fetchManifest:async () => release('unused',harness,plugin),
+      installRelease:async () => {installed=true;},validateRelease:async()=>undefined});
+    await expect(manager.prepareForLaunch()).rejects.toThrow('Code');
+    expect(installed).toBe(false);
+  });
+
+  test('reads initial baseline only when no usable local release or acquisition exists', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'runtime-lazy-baseline-')); temporaryDirectories.push(root);
+    let reads = 0;
+    const target=release('unused',2,2);
+    const first = new ElectronRuntimeManager({root,environment:'prod',manifestContext,
+      readInitialBaseline:async()=>{reads++;return target;},fetchManifest:async baseline=>{expect(baseline?.releaseId).toBe(target.releaseId);return target;},
+      installRelease:async()=>{throw new Error('interrupted');},validateRelease:async()=>undefined});
+    await expect(first.prepareForLaunch()).rejects.toThrow('interrupted');
+    expect(reads).toBe(1);
+    const resumed = new ElectronRuntimeManager({root,environment:'prod',manifestContext,
+      readInitialBaseline:async()=>{throw new Error('must remain lazy');},fetchManifest:async()=>{throw new Error('offline');},
+      installRelease:installFixture,validateRelease:async()=>undefined});
+    await resumed.prepareForLaunch(); await resumed.completeCandidate();
+    expect((await resumed.prepareForLaunch()).probation).toBe(false);
+  });
+});
+
+test.each(['interrupted','manual'] as const)('retries a complete fresh-epoch %s candidate offline without a fallback', async mode => {
+ const root=await mkdtemp(path.join(os.tmpdir(),'runtime-offline-trial-'));temporaryDirectories.push(root);
+ const target=release('unused',2,2);const first=createManager(root,async()=>target);
+ await first.prepareForLaunch();
+ if(mode==='manual') await first.rollbackCandidate({phase:'harness-start',scope:'unknown',code:'START_FAILED',reason:'local startup failed'});
+ const next=createManager(root,async()=>{throw new Error('must not fetch');});
+ const recovered=await next.prepareForLaunch();
+ expect(recovered.releaseId).toBe(target.releaseId);expect(recovered.probation).toBe(true);
+});
+
+describe('manual recovery from a failed acquisition', () => {
+  async function failedAcquisition(code = 'RUNTIME_START_FAILED', reason = 'local startup failed') {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'runtime-failed-acquisition-'));
+    temporaryDirectories.push(root);
+    const old = release('old', 2, 2);
+    const first = createManager(root, async () => old);
+    await first.prepareForLaunch();
+    await first.rollbackCandidate({ phase: 'harness-start', scope: 'unknown', code, reason });
+    return {root, old};
+  }
+
+  test('manual retry refreshes the failed pair with its Code baseline and preserves downloaded Harness bytes', async () => {
+    const {root, old} = await failedAcquisition();
+    const next = release('new', 2, 3);
+    const cached = path.join(root, 'downloads', `${old.artifacts.harness.sha256}.tar.zst`);
+    await writeFile(cached, 'cached Harness');
+    const fetch = vi.fn(async () => next);
+    const manager = createManager(root, fetch);
+    const [a, b] = await Promise.all([
+      manager.prepareForLaunch(undefined, {manualRetry: true}),
+      manager.prepareForLaunch(undefined, {manualRetry: true})
+    ]);
+    expect(a.releaseId).toBe(next.releaseId);
+    expect(b.releaseId).toBe(next.releaseId);
+    expect(fetch).toHaveBeenCalledExactlyOnceWith(old);
+    expect(await readFile(cached, 'utf8')).toBe('cached Harness');
+    expect(JSON.parse(await readFile(path.join(root, 'acquisition.json'), 'utf8')).manifest.releaseId).toBe(next.releaseId);
+  });
+
+  test('offline manual retry retains the old acquisition, files and failure record', async () => {
+    const {root} = await failedAcquisition();
+    const before = await readFile(path.join(root, 'acquisition.json'), 'utf8');
+    const state = await readFile(path.join(root, 'state.json'), 'utf8');
+    const manager = createManager(root, async () => {throw new Error('offline');});
+    await expect(manager.prepareForLaunch(undefined, {manualRetry: true})).rejects.toThrow('offline');
+    expect(await readFile(path.join(root, 'acquisition.json'), 'utf8')).toBe(before);
+    expect(await readFile(path.join(root, 'state.json'), 'utf8')).toBe(state);
+  });
+
+  test('rejects a component Code regression without replacing the acquisition', async () => {
+    const {root} = await failedAcquisition();
+    const before = await readFile(path.join(root, 'acquisition.json'), 'utf8');
+    const manager = createManager(root, async () => release('regressed', 1, 3));
+    await expect(manager.prepareForLaunch(undefined, {manualRetry: true})).rejects.toThrow('Code');
+    expect(await readFile(path.join(root, 'acquisition.json'), 'utf8')).toBe(before);
+  });
+
+  test.each(['PLUGIN_DESKTOP_READINESS_UNSUPPORTED', 'RUNTIME_START_FAILED'])('does not relaunch the same incompatible pair (%s)', async code => {
+    const reason = 'Required plugin does not support desktop Harness readiness v1';
+    const {root, old} = await failedAcquisition(code, reason);
+    const installed: string[] = [];
+    const fetch = vi.fn(async () => old);
+    const manager = createManager(root, fetch, installed);
+    await expect(manager.prepareForLaunch(undefined, {manualRetry: true})).rejects.toThrow(reason);
+    expect(fetch).toHaveBeenCalledExactlyOnceWith(old);
+    expect(installed).toEqual([]);
+    expect(JSON.parse(await readFile(path.join(root, 'state.json'), 'utf8')).candidateReleaseId).toBeUndefined();
+  });
+
+  test('background checks with no active release skip without fetching or claiming current', async () => {
+    const {root} = await failedAcquisition();
+    const fetch = vi.fn(async () => release('new', 2, 3));
+    await expect(createManager(root, fetch).stageLatest()).resolves.toBe('no-active');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  test('manual retry still resumes an unfinished install locally without refreshing the manifest', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'runtime-partial-manual-'));
+    temporaryDirectories.push(root);
+    const old = release('old', 2, 2);
+    const first = new ElectronRuntimeManager({root, environment: 'prod', manifestContext,
+      fetchManifest: async () => old, installRelease: async () => {throw new Error('download interrupted');},
+      validateRelease: async () => undefined});
+    await expect(first.prepareForLaunch()).rejects.toThrow('download interrupted');
+    const fetch = vi.fn(async () => {throw new Error('must stay offline');});
+    await expect(createManager(root, fetch).prepareForLaunch(undefined, {manualRetry: true})).resolves.toMatchObject({releaseId: old.releaseId});
+    expect(fetch).not.toHaveBeenCalled();
   });
 });

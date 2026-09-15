@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { describe, expect, test } from "vitest";
+import { createStatusPageUrl } from "../src/status-url.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -81,6 +82,17 @@ async function renderStatus(search: string): Promise<RenderedStatus> {
 }
 
 describe("status UI", () => {
+  test("selects the dedicated network waiting presentation from the runtime failure title", () => {
+    const result = new URL(createStatusPageUrl("/app/dist/ui/status.html", {
+      kind: "failed",
+      message: "需要联网完成运行环境升级",
+      logPath: "/tmp/harness.log",
+      displayTitle: "需要联网完成运行环境升级",
+      suggestion: "已下载进度和本地数据会保留。\n\n网络恢复后，请点击“重试”继续。",
+      showWorkspaceAction: false
+    }));
+    expect(result.searchParams.get("presentation")).toBe("runtime-network-waiting");
+  });
   test("displays arkme as the client brand", async () => {
     const html = await readFile(path.join(projectRoot, "src", "ui", "status.html"), "utf8");
 
@@ -190,6 +202,19 @@ describe("status UI", () => {
 
     expect(elements.get("reload-runtime-action")?.hidden).toBe(true);
     expect(elements.get("retry-action")?.hidden).toBe(false);
+  });
+
+  test("renders the approved manual network recovery state without automatic retry", async () => {
+    const { elements } = await renderStatus("?kind=failed&presentation=runtime-network-waiting&technicalDetails=fetch%20failed");
+
+    expect(elements.get("title")?.textContent).toBe("需要联网完成运行环境升级");
+    expect(elements.get("message")?.textContent).toBe("已下载进度和本地数据会保留。");
+    expect(elements.get("failure-suggestion")?.hidden).toBe(true);
+    expect(elements.get("network-waiting-footer")?.textContent).toBe("网络恢复后，请点击“重试”继续。");
+    expect(elements.get("network-waiting-footer")?.hidden).toBe(false);
+    expect(elements.get("retry-action")?.hidden).toBe(false);
+    expect(elements.get("choose-workspace-action")?.hidden).toBe(true);
+    expect(elements.get("reload-runtime-action")?.hidden).toBe(true);
   });
 
   test("renders download, verification and installation as explicit stages", async () => {
