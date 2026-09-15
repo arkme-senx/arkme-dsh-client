@@ -485,6 +485,9 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.send("arkme-runtime:page-ready", harnessReadyNonce);
     },
     startupAuthGate: true as const,
+    device: Object.freeze({
+      snapshot: async () => await ipcRenderer.invoke("arkme-desktop:device-snapshot")
+    }),
     appUpdate: true as const,
     appUpdateUi: true as const,
     appVersion: ipcRenderer.sendSync("arkme-app-update:app-version") as string,
@@ -517,6 +520,9 @@ contextBridge.exposeInMainWorld(
 );
 
 contextBridge.exposeInMainWorld("arkmeDesktopNotifications", Object.freeze({
+  async applyDirectoryBadge(count: number): Promise<boolean> {
+    return await ipcRenderer.invoke("arkme-desktop:directory-badge", count) as boolean;
+  },
   permission(): DesktopNotificationPermission {
     return parseDesktopAttentionCapabilities(
       ipcRenderer.sendSync("arkme-desktop:attention-capabilities") as unknown

@@ -5,6 +5,7 @@ import { assertPreviousHarnessExited } from "./harness-process-lifetime.js";
 import { RuntimeDataTransactionStore, type RuntimeDataTransaction } from "./runtime-data-transaction.js";
 import { commitRuntimeUpgrade, recoverRuntimeUpgrade, restoreFailedRuntimeTrial } from "./runtime-upgrade.js";
 import { RUNTIME_CACHE_EPOCH, readPreviousRuntimeBaseline, resolveRuntimeCacheRoot } from "./runtime/cache-epoch.js";
+import { createDesktopDeviceReader } from "./desktop-device.js";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { access, appendFile, mkdir, readFile } from "node:fs/promises";
@@ -1442,6 +1443,21 @@ function appUpdateSender(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEv
   };
 }
 
+function isCurrentAppUpdateSender(event: Electron.IpcMainInvokeEvent): boolean {
+  const senderFrame = event.senderFrame;
+  return senderFrame !== null
+    && senderFrame === event.sender.mainFrame
+    && isCurrentHarnessSender(event.sender.id, senderFrame.url);
+}
+
+const readDesktopDevice = createDesktopDeviceReader();
+ipcMain.handle("arkme-desktop:directory-badge", (event, count: unknown) => (
+  isCurrentAppUpdateSender(event) && nativeBadges.applyDirectoryCount(count).accepted
+));
+ipcMain.handle("arkme-desktop:device-snapshot", event => (
+  isCurrentAppUpdateSender(event) ? readDesktopDevice() : null
+));
+
 function createMainWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -1492,6 +1508,7 @@ function createMainWindow(): void {
     if (!desktopNotificationDocumentNavigationInvalidatesConsumer(isInPlace, isMainFrame)) return;
     harnessPageReadiness.navigation(mainWindow?.webContents.id ?? -1);
     logDiagnostic("did-start-main-frame-navigation", { url });
+    nativeBadges.releaseDirectory();
     desktopNotifications.markHarnessLoading();
   });
   mainWindow.webContents.on("did-finish-load", () => {
@@ -1515,12 +1532,14 @@ function createMainWindow(): void {
     logDiagnostic("preload-error", { preloadPath, error: error.stack ?? error.message });
   });
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    nativeBadges.releaseDirectory();
     logDiagnostic("render-process-gone", details);
   });
   mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
     logDiagnostic("renderer-console", { level, message, line, sourceId });
   });
   mainWindow.on("closed", () => {
+    nativeBadges.releaseDirectory();
     mainWindow = null;
     renderRuntimeProgressPage = null;
   });

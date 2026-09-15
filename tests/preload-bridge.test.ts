@@ -195,6 +195,14 @@ async function executePreload(
 }
 
 describe("desktop notification preload", () => {
+  it("forwards only the directory badge count through the dedicated bridge", async () => {
+    const { exposed, invokeCalls } = await executePreload("0.1.0-rc.8");
+    const bridge = exposed.arkmeDesktopNotifications as { applyDirectoryBadge(count: number): Promise<boolean> };
+    await bridge.applyDirectoryBadge(3);
+    await bridge.applyDirectoryBadge(0);
+    expect(invokeCalls.filter(call => call.channel === "arkme-desktop:directory-badge"))
+      .toEqual([{ channel: "arkme-desktop:directory-badge", args: [3] }, { channel: "arkme-desktop:directory-badge", args: [0] }]);
+  });
   it("exposes only the bounded notification API and announces activation readiness", async () => {
     const source = await readFile(path.join(process.cwd(), "src", "preload.cts"), "utf8");
 
@@ -765,4 +773,14 @@ it("readiness bridge uses the main-owned document nonce and exposes no nonce arg
   const unauthorized = await executePreload("0.1.1-rc.2");
   (unauthorized.exposed.arkmeDesktop as {notifyHarnessReady:()=>void}).notifyHarnessReady();
   expect(unauthorized.sendCalls.some(call => call.channel === "arkme-runtime:page-ready")).toBe(false);
+});
+describe("desktop device preload", () => {
+  it("exposes the device snapshot through the bounded main-process reader", async () => {
+    const { exposed, invokeCalls } = await executePreload("test");
+    const desktop = exposed.arkmeDesktop as { device: { snapshot(): Promise<unknown> } };
+    await desktop.device.snapshot();
+    expect(invokeCalls).toContainEqual({ channel: "arkme-desktop:device-snapshot", args: [] });
+    const main = await readFile(path.join(process.cwd(), "src", "main.ts"), "utf8");
+    expect(main).toContain('isCurrentAppUpdateSender(event) ? readDesktopDevice() : null');
+  });
 });
