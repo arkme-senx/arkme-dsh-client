@@ -1,3 +1,4 @@
+import { createDesktopDeviceReader } from "./desktop-device.js";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { access, appendFile, mkdir, readFile } from "node:fs/promises";
@@ -1226,6 +1227,11 @@ function isCurrentAppUpdateSender(event: Electron.IpcMainInvokeEvent): boolean {
     && senderFrame === event.sender.mainFrame
     && isCurrentHarnessSender(event.sender.id, senderFrame.url);
 }
+
+const readDesktopDevice = createDesktopDeviceReader();
+ipcMain.handle("arkme-desktop:device-snapshot", event => (
+  isCurrentAppUpdateSender(event) ? readDesktopDevice() : null
+));
 
 ipcMain.handle("arkme-app-update:status", event => (
   isCurrentAppUpdateSender(event) ? appUpdateController?.snapshotNow() ?? null : null

@@ -298,6 +298,9 @@ contextBridge.exposeInMainWorld(
   "arkmeDesktop",
   Object.freeze({
     startupAuthGate: true as const,
+    device: Object.freeze({
+      snapshot: async () => await ipcRenderer.invoke("arkme-desktop:device-snapshot")
+    }),
     appUpdate: true as const,
     runtimeManaged: true as const,
     ...(harnessVersion === undefined ? {} : { harnessVersion }),
