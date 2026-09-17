@@ -95,6 +95,7 @@ import {
 } from "./harness-supervisor.js";
 import { installHarnessPermissionPolicy } from "./harness-permission-policy.js";
 import { registerMacWindowDragRegionReinstall } from "./mac-window-drag.js";
+import { MacPointerWindowDrag } from "./mac-pointer-window-drag.js";
 import { MacNotificationPermissionReader } from "./macos-notification-permission.js";
 import { createMacCoreLocationDriver } from "./macos-core-location.js";
 import { createDesktopNativeBadgeAdapter } from "./native-badge-adapter.js";
@@ -223,6 +224,7 @@ logDiagnostic("process-start", {
 });
 
 let mainWindow: BrowserWindow | null = null;
+let macPointerWindowDrag: MacPointerWindowDrag | undefined;
 let harnessAuthSession: HarnessAuthSession | null = null;
 let harnessCookieInstaller: HarnessCookieInstaller | null = null;
 const harnessPageReadiness = new HarnessPageReadiness();
@@ -886,6 +888,10 @@ function currentHarnessMainFrameUrl(event: Electron.IpcMainEvent): string | unde
   return isCurrentHarnessSender(event.sender.id, senderFrame.url) ? senderFrame.url : undefined;
 }
 
+ipcMain.on("arkme-desktop:window-drag", (event, message: unknown) => {
+  if (currentHarnessMainFrameUrl(event) !== undefined) macPointerWindowDrag?.accept(message);
+});
+
 async function launchHarnessRuntime(
   initialRuntime: LaunchRuntime,
   paths: HarnessLaunchPaths,
@@ -1478,6 +1484,17 @@ function createMainWindow(): void {
   });
 
   harnessCookieInstaller = new HarnessCookieInstaller(mainWindow.webContents.session.cookies);
+  if (process.platform === "darwin") {
+    const drag = new MacPointerWindowDrag(process.platform, mainWindow);
+    macPointerWindowDrag = drag;
+    mainWindow.on("blur", () => drag.cancel());
+    mainWindow.on("hide", () => drag.cancel());
+    mainWindow.on("minimize", () => drag.cancel());
+    mainWindow.on("maximize", () => drag.cancel());
+    mainWindow.on("enter-full-screen", () => drag.cancel());
+    mainWindow.on("closed", () => drag.cancel());
+    mainWindow.webContents.on("did-start-navigation", () => drag.cancel());
+  }
   installHarnessPermissionPolicy(mainWindow.webContents.session, {
     getActiveHarnessOrigin: () => activeHarnessOrigin,
     getMainWebContentsId: () => {

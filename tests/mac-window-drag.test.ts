@@ -1,6 +1,26 @@
 import { describe, expect, test, vi } from "vitest";
+import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 describe("macOS window drag region", () => {
+  test.skipIf(process.platform !== "darwin")("switches native drag styles with active tab state, restores fallback and installs idempotently", async () => {
+    const { installMacWindowDragRegion } = await import("../src/mac-window-drag.js");
+    let script = "";
+    await installMacWindowDragRegion("darwin", {
+      isDestroyed: () => false,
+      webContents: { executeJavaScript: async value => { script = value; } }
+    });
+    const env: NodeJS.ProcessEnv = { ...process.env, ARKME_TEST_DRAG_SCRIPT: script };
+    delete env.ELECTRON_RUN_AS_NODE;
+    const electron = createRequire(import.meta.url)("electron") as string;
+    const { stdout } = await promisify(execFile)(electron, [
+      fileURLToPath(new URL("./fixtures/mac-window-drag.cjs", import.meta.url))
+    ], { env, timeout: 25_000 });
+    expect(stdout).toContain("mac-window-drag passed");
+  }, 30_000);
+
   test("installs an idempotent drag region only on live macOS windows", async () => {
     const policy = await import("../src/mac-window-drag.js").catch(() => ({}));
     const install = (policy as {
