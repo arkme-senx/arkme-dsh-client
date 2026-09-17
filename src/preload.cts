@@ -485,6 +485,11 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.send("arkme-runtime:page-ready", harnessReadyNonce);
     },
     startupAuthGate: true as const,
+    ...(process.platform === "darwin" ? {
+      windowDrag: Object.freeze({ send: (message: unknown): void => {
+        ipcRenderer.send("arkme-desktop:window-drag", message);
+      } })
+    } : {}),
     device: Object.freeze({
       snapshot: async () => await ipcRenderer.invoke("arkme-desktop:device-snapshot")
     }),
