@@ -1,5 +1,24 @@
 import { contextBridge, ipcRenderer } from "electron";
 
+// This runs before either the root Harness runtime or its same-origin iframe.
+// localStorage is only the official boot handoff; the account file is authoritative.
+const sessionSelectionBootstrap = ipcRenderer.sendSync("arkme-session-selection:bootstrap") as unknown;
+let sessionSelectionLease: string | undefined;
+let sessionSelectionRestore: string | null | undefined;
+let sessionSelectionRevision = 0;
+let sessionSelectionAcknowledgedRevision = 0;
+if (sessionSelectionBootstrap !== null && typeof sessionSelectionBootstrap === "object"
+  && "sessionId" in sessionSelectionBootstrap && "lease" in sessionSelectionBootstrap) {
+  const { sessionId, lease } = sessionSelectionBootstrap;
+  if ((sessionId === null || typeof sessionId === "string") && (lease === null || typeof lease === "string")) {
+    sessionSelectionRestore = sessionId === null ? null : JSON.stringify({ sessionId,
+      ...("subagentAddress" in sessionSelectionBootstrap ? { subagentAddress: sessionSelectionBootstrap.subagentAddress } : {}) });
+    if (sessionId === null) localStorage.removeItem("dsh.sessions.current");
+    else localStorage.setItem("dsh.sessions.current", sessionSelectionRestore!);
+    if (typeof lease === "string") sessionSelectionLease = lease;
+  }
+}
+
 interface DesktopNotificationRequest {
   eventUid: string;
   sourceRef: string;
@@ -479,6 +498,24 @@ let harnessReadyNotified = false;
 contextBridge.exposeInMainWorld(
   "arkmeDesktop",
   Object.freeze({
+    ...(sessionSelectionRestore === undefined ? {} : { sessionSelection: Object.freeze({
+      // Read-only trial/guest frames need the same race-free boot handoff.
+      restore: (): string | null => sessionSelectionRestore ?? null,
+      save: async (sessionId: string, subagentAddress?: { parentSessionId: string; childSessionId: string; mode: "one-shot" | "continuable" }): Promise<boolean> => {
+        if (sessionSelectionLease === undefined) return false;
+        const revision = ++sessionSelectionRevision;
+        const accepted = await ipcRenderer.invoke(
+          "arkme-session-selection:save", { lease: sessionSelectionLease, sessionId,
+            ...(subagentAddress === undefined ? {} : { subagentAddress }) }
+        ) === true;
+        if (accepted && revision > sessionSelectionAcknowledgedRevision) {
+          sessionSelectionAcknowledgedRevision = revision;
+          sessionSelectionRestore = JSON.stringify({ sessionId,
+            ...(subagentAddress === undefined ? {} : { subagentAddress }) });
+        }
+        return accepted;
+      }
+    }) }),
     notifyHarnessReady(): void {
       if (harnessReadyNotified || typeof harnessReadyNonce !== "string" || harnessReadyNonce === "") return;
       harnessReadyNotified = true;

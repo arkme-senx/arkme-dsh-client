@@ -8,6 +8,7 @@ Arkme 是一个面向 macOS、Windows 和 Linux 桌面客户端。它会在本�
 
 - 自动启动、监控和重启本机 Harness 服务
 - 自动创建默认工作区，并保存最近使用的项目目录
+- 按账号与本机会话容器保存最后选中的 DSH 会话，重启后优先恢复
 - 管理 Harness 与 Arkme 插件运行环境，支持后台更新、完整性校验和失败回滚
 - 检查并下载 Arkme 桌面客户端更新
 - 使用系统目录选择器、桌面通知和单实例窗口
@@ -152,6 +153,7 @@ Arkme 包含两条相互独立的更新链路：
 - `settings.json`：最近一次有效的项目目录
 - `dsh-account-scopes.json`：当前账号与本机会话容器的不透明归属索引
 - `dsh-containers/<container-ref>/dsh/`：按游客或 Arkme 账号隔离的 Harness 设置、Profile、会话及扩展数据
+- `dsh-containers/<container-ref>/session-selection.json`：该账号容器最后选中的会话 ID、格式版本和更新时间；不包含消息内容
 - `logs/desktop-startup.log`：桌面客户端启动与运行时诊断日志
 - `logs/harness.log`：Harness 服务的标准输出和标准错误日志
 - `runtime-manager/electron-v1/`：当前、候选、历史、暂存和下载的运行环境数据
@@ -159,6 +161,18 @@ Arkme 包含两条相互独立的更新链路：
 这些文件属于本机用户数据，不应提交到源码仓库。仓库的 `.gitignore` 已排除根目录 `settings.json`、环境变量文件、常见凭据文件、数据库和构建产物。
 
 从旧版本首次升级时，已有的 `dsh/` 会在 Harness 停止后的下一次启动中原子迁移：已登录时整体归入当前 Arkme 账号，未登录时归入游客空间。退出登录会切换到全新的游客容器；重新登录账号时只启动该账号拥有的容器，不会展示其他账号的会话。同一账号存在多个本机会话容器时，可通过应用菜单中的“会话空间”切换。
+
+### 恢复上次选中的 DSH 会话
+
+需要同时使用支持会话选择保存的桌面壳与 Arkme 插件。插件在内嵌 Harness 中订阅公开的 `sessions.list`，只保存就绪且有效的 `current`；切换到其他页面、退出登录和重连产生的临时空值不会清除记录。主进程根据当前账号容器决定文件路径，按顺序原子写入，并在正常退出前等待已接收的写入完成。页面只持有本次文档的保存凭证，账号切换后旧凭证失效。
+
+启动时先读取账号文件，再加载页面。preload 在 Harness 脚本之前把选择写入官方 `dsh.sessions.current` 启动存储键，因此随机端口变化不再导致选择丢失。内嵌页面在所有启动脚本之前安装一个只针对该键的 `localStorage.getItem` 读取适配，从父页面 preload 缓存读取，避免外层 runtime 的临时空状态覆盖启动选择；其他键、写操作和 sessionStorage 均沿用浏览器行为。localStorage 仅作为当前启动的传递入口；本地账号文件才是持久化来源。没有记录时清除该键，避免复用端口时读到其他账号的旧选择。升级验证窗口可以恢复，但不能保存选择。子会话另保存官方 `currentAddress` 的父子 ID 与模式，恢复时作为 `subagentAddress` 传入。
+
+Harness 自身负责在会话列表成功加载后校验与恢复；原会话不存在时才走原有默认流程。临时列表错误不会触发默认创建。首次启用不会扫描旧端口的浏览器存储，第一次有效选择后开始保存；不额外恢复草稿或滚动位置。
+
+回归检查：账号 A 选择有历史消息的会话后重启，确认会话 ID 不变且列表数量不增加；快速切换后退出应恢复最后选择；切到账号 B 后验证独立保存，再登录 A 验证恢复；删除保存的会话后验证默认流程。自动化覆盖位于桌面壳 `tests/session-selection.test.ts`、`tests/preload-bridge.test.ts` 和插件 `tests/harness-session-selection*.test.ts`。
+
+`pnpm run test:session-selection:electron` 使用真实 Electron 的隔离 preload、同源 iframe 和临时账号目录验证跨端口恢复、启动读写竞争和账号隔离，不读取真实用户数据。默认读取同级 `arkme-dsh-plugin` 工作区中的启动适配脚本；其他布局可设置 `ARKME_PLUGIN_PATH` 指向插件源码目录。
 
 ## 参与贡献
 

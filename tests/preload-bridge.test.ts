@@ -67,6 +67,9 @@ async function executePreload(
   harnessVersion: unknown,
   options: {
     snapshot?: unknown | Promise<unknown>;
+    sessionSelection?: unknown;
+    selectionSave?: (value: unknown) => Promise<boolean>;
+    storage?: Pick<Storage, "getItem" | "setItem" | "removeItem">;
     appSnapshot?: unknown | Promise<unknown>;
     attention?: unknown;
     harnessReadyNonce?: unknown;
@@ -107,6 +110,7 @@ async function executePreload(
     ipcRenderer: {
       invoke: async (channel: string, ...args: unknown[]) => {
         invokeCalls.push({ channel, args });
+        if (channel === "arkme-session-selection:save" && options.selectionSave) return options.selectionSave(args[0]);
         if (channel === "arkme-app-update:notice") return options.appSnapshot ?? null;
         if (channel === "arkme:runtime-update-notice:snapshot") return options.snapshot ?? {
           schemaVersion: 1,
@@ -142,6 +146,7 @@ async function executePreload(
           }
           return true;
         }
+        if (channel === "arkme-session-selection:bootstrap") return options.sessionSelection ?? null;
         if (channel === "arkme-runtime:page-ready-nonce") return options.harnessReadyNonce ?? null;
         if (channel === "arkme-desktop:attention-capabilities") return options.attention ?? {
           schemaVersion: 1,
@@ -160,6 +165,7 @@ async function executePreload(
     },
     Date: { now: options.now ?? Date.now },
     document,
+    localStorage: options.storage,
     Notification: {
       get permission() { return notificationPermission; },
       async requestPermission() {
@@ -229,6 +235,7 @@ describe("desktop notification preload", () => {
     };
 
     expect(syncChannels).toEqual([
+      "arkme-session-selection:bootstrap",
       "arkme-runtime:harness-version",
       "arkme:desktop-notification:permission-state",
       "arkme-desktop:attention-capabilities",
@@ -783,4 +790,67 @@ describe("desktop device preload", () => {
     const main = await readFile(path.join(process.cwd(), "src", "main.ts"), "utf8");
     expect(main).toContain('isCurrentAppUpdateSender(event) ? readDesktopDevice() : null');
   });
+});
+
+
+describe("account session selection preload", () => {
+  it("seeds the official restore key before page scripts and binds saves to this document lease", async () => {
+    const values = new Map<string, string>();
+    const storage = { getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); }, removeItem: (key: string) => { values.delete(key); } };
+    const preload = await executePreload("0.1.5-rc.2", { storage, sessionSelection: { lease: "document-A", sessionId: "session-A" } });
+    expect(JSON.parse(values.get("dsh.sessions.current")!)).toEqual({ sessionId: "session-A" });
+    const bridge = (preload.exposed.arkmeDesktop as { sessionSelection: { restore(): string | null; save(sessionId: string): Promise<boolean> } }).sessionSelection;
+    // The outer runtime may clear the underlying key before the iframe boots.
+    values.set("dsh.sessions.current", "{}");
+    expect(bridge.restore()).toBe('{"sessionId":"session-A"}');
+    expect(await bridge.save("session-B")).toBe(true);
+    expect(bridge.restore()).toBe('{"sessionId":"session-B"}');
+    expect(preload.invokeCalls.at(-1)).toEqual({ channel: "arkme-session-selection:save", args: [{ lease: "document-A", sessionId: "session-B" }] });
+  });
+
+  it("clears a previous origin selection for a fresh account but leaves unrelated storage alone", async () => {
+    const values = new Map([["dsh.sessions.current", '{"sessionId":"other-account"}'], ["theme", "dark"]]);
+    const storage = { getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); }, removeItem: (key: string) => { values.delete(key); } };
+    await executePreload("0.1.5-rc.2", { storage, sessionSelection: { lease: "document-B", sessionId: null } });
+    expect(values.has("dsh.sessions.current")).toBe(false);
+    expect(values.get("theme")).toBe("dark");
+  });
+
+  it("does not enable persistence on status, guest or trial pages", async () => {
+    const storage = { getItem: () => null, setItem() {}, removeItem() {} };
+    for (const sessionSelection of [null, { lease: null, sessionId: null }, { lease: null, sessionId: "trial" }]) {
+      const preload = await executePreload("0.1.5-rc.2", { storage, sessionSelection });
+      const bridge = (preload.exposed.arkmeDesktop as { sessionSelection?: { restore(): string | null; save(id: string): Promise<boolean> } }).sessionSelection;
+      if (sessionSelection === null) expect(bridge).toBeUndefined();
+      else {
+        expect(await bridge!.save("must-not-persist")).toBe(false);
+        expect(bridge!.restore()).toBe(sessionSelection.sessionId === null ? null : '{"sessionId":"trial"}');
+      }
+      expect(preload.invokeCalls.some(call => call.channel === "arkme-session-selection:save")).toBe(false);
+    }
+  });
+});
+
+
+it("retains the latest acknowledged restore value when a newer save fails", async () => {
+  let resolveB!: (value: boolean) => void;
+  let rejectC!: (error: Error) => void;
+  const b = new Promise<boolean>(resolve => { resolveB = resolve; });
+  const c = new Promise<boolean>((_resolve, reject) => { rejectC = reject; });
+  const preload = await executePreload("0.1.5-rc.2", {
+    storage: { getItem: () => null, setItem() {}, removeItem() {} },
+    sessionSelection: { lease: "doc", sessionId: "A" },
+    selectionSave: value => (value as { sessionId: string }).sessionId === "B" ? b : c
+  });
+  const bridge = (preload.exposed.arkmeDesktop as { sessionSelection: { restore(): string | null; save(id: string): Promise<boolean> } }).sessionSelection;
+  const saveB = bridge.save("B");
+  const saveC = bridge.save("C").catch(() => false);
+  resolveB(true);
+  await saveB;
+  expect(bridge.restore()).toBe('{"sessionId":"B"}');
+  rejectC(new Error("disk full"));
+  await saveC;
+  expect(bridge.restore()).toBe('{"sessionId":"B"}');
 });

@@ -17,6 +17,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:session-selection:electron": "pnpm run build && electron tests/fixtures/session-selection-electron.cjs",
     "dev": "node scripts/run-development.mjs",
     "run:prod": "node scripts/run-packaged-shell.mjs prod",
     "run:test": "node scripts/run-packaged-shell.mjs test",
