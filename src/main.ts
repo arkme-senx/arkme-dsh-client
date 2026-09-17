@@ -1622,6 +1622,10 @@ function installNavigationPolicy(window: BrowserWindow): void {
 }
 
 async function renderState(state: HarnessState | RuntimeInstallProgress): Promise<void> {
+  if (state.kind === "starting") {
+    lastHarnessReadyState = null;
+    bufferedHarnessReadyState = null;
+  }
   const window = mainWindow;
   if (window === null || window.isDestroyed()) return;
 
