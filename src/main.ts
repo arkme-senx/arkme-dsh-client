@@ -1,3 +1,4 @@
+import { DesktopSessionSelection } from "./session-selection.js";
 import { harnessCookieHeader, type HarnessAuthSession } from "./harness-auth-session.js";
 import { HarnessCookieInstaller } from "./harness-cookie-install.js";
 import { HarnessPageReadiness, localHarnessMountFailure, settleHarnessPageRendering } from "./harness-page-ready.js";
@@ -240,6 +241,7 @@ let logPath = "";
 let actionQueue: Promise<void> = Promise.resolve();
 let directoryPickerBridge: DirectoryPickerBridge | null = null;
 let desktopCapabilityBridge: DesktopCapabilityBridge | null = null;
+const desktopSessionSelection = new DesktopSessionSelection();
 let accountScopeStore: DshAccountScopeStore | null = null;
 let activeAccountScope: DshAccountScopeLaunch | null = null;
 let accountScopeChoices: DshAccountScopeChoice[] = [];
@@ -561,6 +563,8 @@ function registerApplicationLifecycle(): void {
 }
 
 async function stopHarnessForExit(): Promise<void> {
+  desktopSessionSelection.invalidate();
+  await desktopSessionSelection.flush();
   await controller?.stop("quit");
   await harnessCookieInstaller?.idle();
 }
@@ -680,6 +684,7 @@ async function configureAccountScopeForRuntime(
   userDataPath: string,
   runtime: LaunchRuntime
 ): Promise<void> {
+  desktopSessionSelection.invalidate();
   const store = new DshAccountScopeStore(userDataPath, undefined, async (source, target) => {
     await runtimeDataStore?.transferCommittedIdentity(source, target);
   });
@@ -764,6 +769,7 @@ async function revealAttestedHarness(): Promise<void> {
 }
 
 async function renderAccountScopeWaiting(): Promise<void> {
+  desktopSessionSelection.invalidate();
   const window = mainWindow;
   if (window === null || window.isDestroyed()) return;
   activeHarnessOrigin = null;
@@ -795,6 +801,7 @@ function scheduleAccountScopeRelaunch(): void {
 }
 
 async function switchAccountScopeRuntime(): Promise<void> {
+  desktopSessionSelection.invalidate();
   const store = accountScopeStore;
   const runtime = activeLaunchRuntime;
   if (store === null || runtime === null) throw new Error("DSH account scope runtime is unavailable");
@@ -1286,6 +1293,9 @@ async function validateCandidateHarnessPage(runtime: LaunchRuntime, authenticate
   trial.webContents.on("preload-error", () => probeAbort.abort());
   trial.once("closed", () => probeAbort.abort());
   try {
+    if (activeAccountScope === null || !await desktopSessionSelection.prepare(
+      trial.webContents.id, authenticated.url, activeAccountScope, false
+    )) throw new Error("DSH trial session selection was superseded");
     await Promise.all([trial.loadURL(authenticated.url), probe.ready]);
     const verifiedGeneration = documentGeneration;
     await settleHarnessPageRendering(script => trial.webContents.executeJavaScript(script), trialSignal);
@@ -1295,6 +1305,7 @@ async function validateCandidateHarnessPage(runtime: LaunchRuntime, authenticate
   } catch (error) {
     throw localMountError ?? error;
   } finally {
+    desktopSessionSelection.invalidate(trial.webContents.id);
     probe.dispose();
     if (!trial.isDestroyed()) trial.destroy();
   }
@@ -1455,6 +1466,17 @@ function isCurrentAppUpdateSender(event: Electron.IpcMainInvokeEvent): boolean {
     && senderFrame === event.sender.mainFrame
     && isCurrentHarnessSender(event.sender.id, senderFrame.url);
 }
+
+ipcMain.on("arkme-session-selection:bootstrap", event => {
+  event.returnValue = desktopSessionSelection.bootstrap(appUpdateSender(event));
+});
+ipcMain.handle("arkme-session-selection:save", (event, value: unknown) => {
+  if (!accountScopeReady || !isCurrentAppUpdateSender(event)) return false;
+  return desktopSessionSelection.save(appUpdateSender(event), value).catch(error => {
+    logDiagnostic("session-selection-save-failed", error);
+    throw error;
+  });
+});
 
 const readDesktopDevice = createDesktopDeviceReader();
 ipcMain.handle("arkme-desktop:directory-badge", (event, count: unknown) => (
@@ -1620,10 +1642,14 @@ async function renderState(state: HarnessState | RuntimeInstallProgress): Promis
       const readiness = harnessPageReadiness.arm(window.webContents.id, state.url, authenticated.signal);
       void readiness.ready.catch(() => undefined);
     }
+    if (activeAccountScope === null || !await desktopSessionSelection.prepare(
+      window.webContents.id, state.url, activeAccountScope
+    )) return;
     const intent = deepLinks.peek();
     await window.loadURL(intent === undefined ? state.url : createExtensionShareHarnessUrl(state.url, intent));
     if (intent !== undefined) deepLinks.markDelivered(intent);
   } else if (state.kind === "runtime-installing" && renderRuntimeProgressPage !== null) {
+    desktopSessionSelection.invalidate();
     activeHarnessOrigin = null;
     desktopNotifications.markHarnessLoading();
     const renderMode = await renderRuntimeProgressPage(state);
@@ -1634,6 +1660,7 @@ async function renderState(state: HarnessState | RuntimeInstallProgress): Promis
       pluginPercent: state.pluginPercent
     });
   } else {
+    desktopSessionSelection.invalidate();
     activeHarnessOrigin = null;
     desktopNotifications.markHarnessLoading();
     const url = createStatusPageUrl(statusHtmlPath, state, runtimeEnvironment);
