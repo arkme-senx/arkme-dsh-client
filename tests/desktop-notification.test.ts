@@ -18,6 +18,17 @@ import {
 } from "../src/desktop-notification.js";
 
 describe("desktop notification permission state", () => {
+  it.each([
+    "com.senx.arkme.harness",
+    "cc.jiwo.arkme.test",
+    "cc.jiwo.arkme.local-test"
+  ])("opens macOS notification settings for the running app %s", appId => {
+    const url = new URL(desktopNotificationSettingsUrl("darwin", appId)!);
+    expect(url.protocol).toBe("x-apple.systempreferences:");
+    expect(url.pathname).toBe("com.apple.preference.notifications");
+    expect(url.searchParams.get("id")).toBe(appId);
+  });
+
   it("maps real permission state into a truthful native capability", () => {
     expect(parseDesktopNotificationPermissionState("granted")).toBe("granted");
     expect(parseDesktopNotificationPermissionState("system-managed")).toBeUndefined();

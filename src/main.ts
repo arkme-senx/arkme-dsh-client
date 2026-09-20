@@ -471,7 +471,7 @@ ipcMain.on(DESKTOP_NOTIFICATION_PERMISSION_STATE_CHANNEL, (event, value: unknown
 });
 ipcMain.handle(DESKTOP_NOTIFICATION_OPEN_SETTINGS_CHANNEL, async event => {
   if (!isCurrentHarnessSender(event.sender.id, event.senderFrame?.url ?? event.sender.getURL())) return false;
-  const settingsUrl = desktopNotificationSettingsUrl(process.platform);
+  const settingsUrl = desktopNotificationSettingsUrl(process.platform, appIdentity.appId);
   if (settingsUrl === undefined) return false;
   try {
     await shell.openExternal(settingsUrl);
