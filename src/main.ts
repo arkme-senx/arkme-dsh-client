@@ -1,3 +1,4 @@
+import { installAttachmentPreviewNative } from "./attachment-preview-native.js";
 import { installLongArticleWindowIpc } from "./long-article-window-ipc.js";
 import { DesktopSessionSelection } from "./session-selection.js";
 import { harnessCookieHeader, type HarnessAuthSession } from "./harness-auth-session.js";
@@ -1608,6 +1609,7 @@ function createMainWindow(): void {
 }
 
 function installNavigationPolicy(window: BrowserWindow): void {
+  const attachmentPreview = installAttachmentPreviewNative(window, () => activeHarnessOrigin);
   const handleNavigation = (event: Electron.Event, targetUrl: string) => {
     const decision = decideNavigation(targetUrl, {
       statusPageUrl,
@@ -1623,7 +1625,10 @@ function installNavigationPolicy(window: BrowserWindow): void {
   window.webContents.on("will-navigate", handleNavigation);
   window.webContents.on("will-redirect", handleNavigation);
   window.webContents.on("will-attach-webview", (event) => event.preventDefault());
-  window.webContents.setWindowOpenHandler(({ url }) => {
+  window.webContents.setWindowOpenHandler(details => {
+    const preview = attachmentPreview.handle(details);
+    if (preview) return preview;
+    const { url } = details;
     const decision = decideNavigation(url, {
       statusPageUrl,
       harnessOrigin: activeHarnessOrigin
