@@ -1,3 +1,4 @@
+import { installConversationWindowIpc } from './conversation-window-ipc.js';
 import { installAttachmentPreviewNative } from "./attachment-preview-native.js";
 import { installLongArticleWindowIpc } from "./long-article-window-ipc.js";
 import { DesktopSessionSelection } from "./session-selection.js";
@@ -1471,7 +1472,16 @@ function isCurrentAppUpdateSender(event: Electron.IpcMainInvokeEvent): boolean {
     && isCurrentHarnessSender(event.sender.id, senderFrame.url);
 }
 
+const conversationWindows = installConversationWindowIpc({
+  main: () => mainWindow,
+  origin: () => activeHarnessOrigin,
+  scope: () => JSON.stringify([activeHarnessOrigin, activeAccountScope?.dshHome, accountScopeReady]),
+  preload: () => resolveArkmePreloadPath(moduleDirectory, app.isPackaged, process.resourcesPath),
+});
+
 const longArticleWindows = installLongArticleWindowIpc({
+  conversationSender: id => conversationWindows.isActive(id),
+  changed: () => conversationWindows.publish(-1, {kind: 'changed'}),
   main: () => mainWindow,
   origin: () => activeHarnessOrigin,
   scope: () => JSON.stringify([activeHarnessOrigin, activeAccountScope?.dshHome, accountScopeReady]),
@@ -1494,7 +1504,7 @@ ipcMain.handle("arkme-desktop:directory-badge", (event, count: unknown) => (
   isCurrentAppUpdateSender(event) && nativeBadges.applyDirectoryCount(count).accepted
 ));
 ipcMain.handle("arkme-desktop:device-snapshot", event => (
-  isCurrentAppUpdateSender(event) ? readDesktopDevice() : null
+  (isCurrentAppUpdateSender(event) || (event.senderFrame === event.sender.mainFrame && conversationWindows.isActive(event.sender.id))) ? readDesktopDevice() : null
 ));
 
 function createMainWindow(): void {
@@ -1547,6 +1557,9 @@ function createMainWindow(): void {
   }, statusHtmlPath, runtimeEnvironment);
 
   lockWindowTitle(mainWindow, appName);
+  mainWindow.on('closed', () => conversationWindows.closeAll());
+  mainWindow.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) conversationWindows.closeAll(); });
+  mainWindow.webContents.on('render-process-gone', () => conversationWindows.closeAll());
   installNavigationPolicy(mainWindow);
   registerMacWindowDragRegionReinstall(process.platform, mainWindow, error => {
     logDiagnostic("mac-window-drag-region-failed", error);
