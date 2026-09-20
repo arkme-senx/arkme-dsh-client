@@ -848,3 +848,37 @@ function boundedNonBlankString(value: unknown, maxLength: number): value is stri
     && value.length <= maxLength
     && value.trim().length > 0;
 }
+
+// Dedicated article bridge: never expose generic IPC to web content.
+const articlePrefix = "arkme-long-article:";
+let pendingArticleClose = false;
+const articleCloseListeners = new Set<() => void>();
+ipcRenderer.on(articlePrefix + "request-close", () => {
+  pendingArticleClose = true;
+  if (articleCloseListeners.size) { pendingArticleClose = false; for (const listener of articleCloseListeners) listener(); }
+});
+contextBridge.exposeInMainWorld("arkmeLongArticle", Object.freeze({
+  version: 2,
+  open: (target: unknown) => ipcRenderer.invoke(articlePrefix + "open", target),
+  account: (account: string | null) => ipcRenderer.invoke(articlePrefix + "account", account),
+  context: () => ipcRenderer.invoke(articlePrefix + "context"),
+  active: () => ipcRenderer.invoke(articlePrefix + "active"),
+  close: () => ipcRenderer.invoke(articlePrefix + "close"),
+  cancelClose: () => { pendingArticleClose = false; return ipcRenderer.invoke(articlePrefix + "cancel-close"); },
+  published: (item: unknown) => ipcRenderer.invoke(articlePrefix + "published", item),
+  onClose: (listener: () => void) => {
+    articleCloseListeners.add(listener);
+    void ipcRenderer.invoke(articlePrefix + "ready").catch(() => {});
+    if (pendingArticleClose) { pendingArticleClose = false; queueMicrotask(listener); }
+    return () => { articleCloseListeners.delete(listener); };
+  },
+  onInvalidated: (listener: () => void) => {
+    const handler = () => listener(); ipcRenderer.on(articlePrefix + "invalidated", handler);
+    return () => { ipcRenderer.removeListener(articlePrefix + "invalidated", handler); };
+  },
+  onCreated: (listener: (value: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown) => listener(value);
+    ipcRenderer.on(articlePrefix + "created", handler);
+    return () => { ipcRenderer.removeListener(articlePrefix + "created", handler); };
+  },
+}));

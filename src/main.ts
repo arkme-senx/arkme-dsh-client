@@ -1,3 +1,4 @@
+import { installLongArticleWindowIpc } from "./long-article-window-ipc.js";
 import { DesktopSessionSelection } from "./session-selection.js";
 import { harnessCookieHeader, type HarnessAuthSession } from "./harness-auth-session.js";
 import { HarnessCookieInstaller } from "./harness-cookie-install.js";
@@ -554,6 +555,7 @@ function registerApplicationLifecycle(): void {
   });
 
   app.on("before-quit", (event) => {
+    if (longArticleWindows.requestQuit(() => app.quit())) { event.preventDefault(); return; }
     appQuitGuard?.handleBeforeQuit(event);
   });
   app.on("will-quit", () => {
@@ -563,6 +565,7 @@ function registerApplicationLifecycle(): void {
 }
 
 async function stopHarnessForExit(): Promise<void> {
+  if (longArticleWindows.size > 0) throw new Error("请先保存并关闭长文窗口，再重试更新或退出");
   desktopSessionSelection.invalidate();
   await desktopSessionSelection.flush();
   await controller?.stop("quit");
@@ -1467,6 +1470,13 @@ function isCurrentAppUpdateSender(event: Electron.IpcMainInvokeEvent): boolean {
     && isCurrentHarnessSender(event.sender.id, senderFrame.url);
 }
 
+const longArticleWindows = installLongArticleWindowIpc({
+  main: () => mainWindow,
+  origin: () => activeHarnessOrigin,
+  scope: () => JSON.stringify([activeHarnessOrigin, activeAccountScope?.dshHome, accountScopeReady]),
+  preload: () => resolveArkmePreloadPath(moduleDirectory, app.isPackaged, process.resourcesPath),
+});
+
 ipcMain.on("arkme-session-selection:bootstrap", event => {
   event.returnValue = desktopSessionSelection.bootstrap(appUpdateSender(event));
 });
@@ -1576,6 +1586,9 @@ function createMainWindow(): void {
   });
   mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
     logDiagnostic("renderer-console", { level, message, line, sourceId });
+  });
+  mainWindow.on("close", event => {
+    if (longArticleWindows.requestQuit(() => mainWindow?.close())) event.preventDefault();
   });
   mainWindow.on("closed", () => {
     nativeBadges.releaseDirectory();
