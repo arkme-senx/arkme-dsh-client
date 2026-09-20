@@ -788,7 +788,7 @@ describe("desktop device preload", () => {
     await desktop.device.snapshot();
     expect(invokeCalls).toContainEqual({ channel: "arkme-desktop:device-snapshot", args: [] });
     const main = await readFile(path.join(process.cwd(), "src", "main.ts"), "utf8");
-    expect(main).toContain('isCurrentAppUpdateSender(event) ? readDesktopDevice() : null');
+    expect(main).toContain('(isCurrentAppUpdateSender(event) || (event.senderFrame === event.sender.mainFrame && conversationWindows.isActive(event.sender.id))) ? readDesktopDevice() : null');
   });
 });
 

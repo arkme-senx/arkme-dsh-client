@@ -6,12 +6,14 @@ export function installLongArticleWindowIpc(options: {
   origin(): string | null;
   scope(): string;
   preload(): string;
+  conversationSender?(id: number): boolean;
+  changed?(): void;
 }): LongArticleWindows {
   const sameOrigin = (url: string) => { try { return new URL(url).origin === options.origin(); } catch { return false; } };
   const childOrigins = new Map<number, string>();
   const manager = new LongArticleWindows({
     scope: options.scope,
-    notify: value => { const main = options.main(); if (main && !main.isDestroyed()) main.webContents.send(prefix + "created", value); },
+    notify: value => { options.changed?.(); const main = options.main(); if (main && !main.isDestroyed()) main.webContents.send(prefix + "created", value); },
     create: () => {
       const main = options.main();
       if (!main || main.isDestroyed() || !sameOrigin(main.webContents.getURL())) throw new Error("Arkme is not ready");
@@ -53,7 +55,7 @@ export function installLongArticleWindowIpc(options: {
     manager.setAccount(account as string | null); return true;
   });
   ipcMain.handle(prefix + "open", async (event, value: unknown) => {
-    if (!mainSender(event)) throw new Error("Untrusted article opener");
+    if (!mainSender(event) && !(trusted(event) && options.conversationSender?.(event.sender.id))) throw new Error("Untrusted article opener");
     await manager.open(value); return true;
   });
   ipcMain.handle(prefix + "context", event => childSender(event) ? manager.context(event.sender.id) : null);

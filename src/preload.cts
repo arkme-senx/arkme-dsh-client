@@ -889,3 +889,26 @@ contextBridge.exposeInMainWorld("arkmeAttachmentPreview", Object.freeze({
   focus: () => ipcRenderer.send("arkme-attachment-preview", "focus"),
   close: () => ipcRenderer.send("arkme-attachment-preview", "close"),
 }));
+
+// Conversation windows expose only scoped lifecycle/state methods, never arbitrary IPC.
+const conversationPrefix = 'arkme-conversation:';
+contextBridge.exposeInMainWorld('arkmeConversation', Object.freeze({
+ version: 1,
+ open: (target: unknown) => ipcRenderer.invoke(conversationPrefix + 'open', target),
+ account: (account: string | null) => ipcRenderer.invoke(conversationPrefix + 'account', account),
+ context: () => ipcRenderer.invoke(conversationPrefix + 'context'),
+ active: () => ipcRenderer.invoke(conversationPrefix + 'active'),
+ close: () => ipcRenderer.invoke(conversationPrefix + 'close'),
+ focusMain: (target?: unknown) => ipcRenderer.invoke(conversationPrefix + 'focus-main', target),
+ requestCall: (mediaType: 'audio' | 'video') => ipcRenderer.invoke(conversationPrefix + 'call', mediaType),
+ snapshot: (account: string) => ipcRenderer.invoke(conversationPrefix + 'snapshot', account),
+ publish: (event: unknown, account: string) => ipcRenderer.invoke(conversationPrefix + 'publish', event, account),
+ acquire: (key: string, account: string, token: string) => ipcRenderer.invoke(conversationPrefix + 'acquire', key, account, token),
+ consumed: (key: string, account: string, token: string) => ipcRenderer.invoke(conversationPrefix + 'consumed', key, account, token),
+ release: (key: string, account: string, token: string) => ipcRenderer.invoke(conversationPrefix + 'release', key, account, token),
+ onEvent: (listener: (value: unknown) => void) => {
+  const handler = (_event: Electron.IpcRendererEvent, value: unknown) => listener(value);
+  ipcRenderer.on(conversationPrefix + 'event', handler);
+  return () => { ipcRenderer.removeListener(conversationPrefix + 'event', handler); };
+ },
+}));
