@@ -44,8 +44,11 @@ export function isMacNotificationsNotAllowedError(error: string | undefined): bo
   return typeof error === "string" && /UNErrorDomain(?:\s+error|错误)\s*1\b/iu.test(error);
 }
 
-export function desktopNotificationSettingsUrl(platform: NodeJS.Platform): string | undefined {
-  if (platform === "darwin") return "x-apple.systempreferences:com.apple.preference.notifications";
+export function desktopNotificationSettingsUrl(platform: NodeJS.Platform, appId?: string): string | undefined {
+  if (platform === "darwin") {
+    const settingsUrl = "x-apple.systempreferences:com.apple.preference.notifications";
+    return appId ? `${settingsUrl}?id=${encodeURIComponent(appId)}` : settingsUrl;
+  }
   if (platform === "win32") return "ms-settings:notifications";
   return undefined;
 }
