@@ -882,3 +882,10 @@ contextBridge.exposeInMainWorld("arkmeLongArticle", Object.freeze({
     return () => { ipcRenderer.removeListener(articlePrefix + "created", handler); };
   },
 }));
+
+// Capability marker plus narrowly scoped lifecycle actions; no generic IPC.
+contextBridge.exposeInMainWorld("arkmeAttachmentPreview", Object.freeze({
+  version: 1,
+  focus: () => ipcRenderer.send("arkme-attachment-preview", "focus"),
+  close: () => ipcRenderer.send("arkme-attachment-preview", "close"),
+}));

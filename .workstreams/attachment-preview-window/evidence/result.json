@@ -1,0 +1,21 @@
+{
+  "checks": [
+    "cached file opens preview; chat input remains usable",
+    "save picker belongs to child; cancellation is not an error",
+    "single native window for file and image",
+    "copy uses child clipboard and image conversion",
+    "outside click retains preview",
+    "keyboard paging",
+    "video mounts in child",
+    "switching attachments stops real video playback",
+    "close/reopen, remembered size, hidden single-item navigation",
+    "logout clears native child"
+  ],
+  "screenshots": [
+    "preview-file-macos.png",
+    "chat-macos.png",
+    "preview-image-macos.png",
+    "preview-small-macos.png"
+  ],
+  "status": "passed"
+}
