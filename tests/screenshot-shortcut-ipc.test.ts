@@ -11,4 +11,10 @@ beforeEach(()=>{vi.clearAllMocks();m.register.mockReturnValue(true);const wc:any
 it('routes background trigger to the main window without activating it',()=>{m.register.mock.calls[0]![1]!();expect(owner.webContents.send).toHaveBeenCalledWith('arkme-screenshot:shortcut-trigger')});
 it('rejects untrusted and iframe writes',()=>{expect(()=>call('set',{...event(),senderFrame:{url:'https://evil.test'}},'Control+B')).toThrow();expect(m.write).not.toHaveBeenCalled()});
 it('releases recording after navigation and removes listeners after cancel',()=>{call('record',event(),true);owner.webContents.emit('did-start-navigation');expect(m.register).toHaveBeenCalledTimes(2);for(let i=0;i<15;i++){call('record',event(),true);call('record',event(),false)}expect(owner.webContents.listenerCount('destroyed')).toBe(0)});
-it('persists and broadcasts confirmed changes',()=>{call('set',event(),'Control+Alt+B');expect(m.rename).toHaveBeenCalled();expect(owner.webContents.send).toHaveBeenCalledWith('arkme-screenshot:shortcut-changed',{accelerator:'Control+Alt+B',available:true})});
+it('persists and broadcasts confirmed changes',()=>{call('set',event(),'Control+Alt+B');expect(m.rename).toHaveBeenCalled();expect(owner.webContents.send).toHaveBeenCalledWith('arkme-screenshot:shortcut-changed',{accelerator:'Control+Alt+B',available:true,recording:false})});
+
+it('broadcasts recording pause and resume to all screenshot entry points',()=>{
+ call('record',event(),true);expect(call('get',event())).toMatchObject({recording:true});
+ m.register.mock.calls[0]![1]!();expect(owner.webContents.send.mock.calls.some((args:any[])=>args[0]==='arkme-screenshot:shortcut-trigger')).toBe(false);
+ call('record',event(),false);expect(call('get',event())).toMatchObject({recording:false});
+});

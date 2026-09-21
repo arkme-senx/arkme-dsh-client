@@ -11,7 +11,7 @@ interface Active {
 }
 export function installScreenshotIpc(options: {
  main(): BrowserWindow | null; origin(): string | null; scope(): string; preload(): string;
- allowed(id: number): boolean;
+ allowed(id: number): boolean; blocked?(): boolean;
 }) {
  let active: Active | undefined;
  const trusted = (e: IpcMainInvokeEvent) => {
@@ -25,6 +25,7 @@ export function installScreenshotIpc(options: {
  screen.on('display-added', cancel); screen.on('display-removed', cancel); screen.on('display-metrics-changed', cancel);
  ipcMain.handle(prefix+'capture', async (e, requestId: unknown) => {
   if (!trusted(e) || !options.allowed(e.sender.id)) throw new Error('截图来源已失效');
+  if (options.blocked?.()) throw new Error('正在设置截图快捷键，请关闭设置弹窗后再截图');
   if (typeof requestId !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(requestId)) throw new Error('无效的截图请求');
   if (active) throw new Error('正在截屏，请先完成或取消');
   const owner=BrowserWindow.fromWebContents(e.sender);

@@ -14,14 +14,15 @@ export function installScreenshotShortcut(options:{main():BrowserWindow|null;ori
   const target=focused && options.allowed(focused.webContents.id)?focused:options.main();
   if(target && !target.isDestroyed() && options.allowed(target.webContents.id))target.webContents.send('arkme-screenshot:shortcut-trigger');
  },saved);
- const publish=()=>{for(const w of BrowserWindow.getAllWindows())if(!w.isDestroyed()&&options.allowed(w.webContents.id))w.webContents.send('arkme-screenshot:shortcut-changed',controller.snapshot());};
- ipcMain.handle('arkme-screenshot:shortcut-get',e=>trusted(e)?controller.snapshot():null);
- ipcMain.handle('arkme-screenshot:shortcut-set',(e,key:unknown)=>{if(!trusted(e))throw Error('快捷键设置来源已失效');if(recording!==undefined&&recording!==e.sender.id)throw Error('另一窗口正在编辑快捷键');const result=controller.set(key);publish();return result;});
+ const snapshot=()=>({...controller.snapshot(),recording:recording!==undefined});
+ const publish=()=>{for(const w of BrowserWindow.getAllWindows())if(!w.isDestroyed()&&options.allowed(w.webContents.id))w.webContents.send('arkme-screenshot:shortcut-changed',snapshot());};
+ ipcMain.handle('arkme-screenshot:shortcut-get',e=>trusted(e)?snapshot():null);
+ ipcMain.handle('arkme-screenshot:shortcut-set',(e,key:unknown)=>{if(!trusted(e))throw Error('快捷键设置来源已失效');if(recording!==undefined&&recording!==e.sender.id)throw Error('另一窗口正在编辑快捷键');controller.set(key);publish();return snapshot();});
  ipcMain.handle('arkme-screenshot:shortcut-record',(e,value:unknown)=>{
   if(!trusted(e)||typeof value!=='boolean')return false;
   if(value){
    if(recording!==undefined)return recording===e.sender.id;
-   recording=e.sender.id;controller.pause(true);
+   recording=e.sender.id;controller.pause(true);publish();
    const release=()=>{releaseRecording=undefined;e.sender.removeListener('destroyed',release);e.sender.removeListener('did-start-navigation',release);if(recording===e.sender.id){recording=undefined;controller.pause(false);publish();}};
    releaseRecording=release;
    e.sender.once('destroyed',release);e.sender.once('did-start-navigation',release);
@@ -29,4 +30,5 @@ export function installScreenshotShortcut(options:{main():BrowserWindow|null;ori
   return true;
  });
  app.once('will-quit',()=>controller.dispose());
+ return {isRecording:()=>recording!==undefined};
 }

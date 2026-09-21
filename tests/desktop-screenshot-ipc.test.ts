@@ -1,6 +1,6 @@
 import {EventEmitter} from 'node:events';
 import {beforeEach,afterEach,expect,it,vi} from 'vitest';
-const mocks=vi.hoisted(()=>({handlers:new Map<string,Function>(),windows:[] as any[],sources:vi.fn(),save:vi.fn(),write:vi.fn(),scope:'a',displayEvents:new Map<string,Function>(),displays:[] as any[],nativeWindows:[] as any[],physicalBounds:vi.fn(),load:vi.fn(),construct:vi.fn()}));
+const mocks=vi.hoisted(()=>({handlers:new Map<string,Function>(),windows:[] as any[],sources:vi.fn(),save:vi.fn(),write:vi.fn(),scope:'a',blocked:false,displayEvents:new Map<string,Function>(),displays:[] as any[],nativeWindows:[] as any[],physicalBounds:vi.fn(),load:vi.fn(),construct:vi.fn()}));
 vi.mock('../src/native-screenshot-windows.js',()=>({readScreenshotWindows:()=>mocks.nativeWindows}));
 vi.mock('node:fs/promises',()=>({writeFile:mocks.write}));
 vi.mock('electron',async()=>{
@@ -24,10 +24,10 @@ let owner:any;
 const event=(window:any,frame?:any)=>({sender:window.webContents,senderFrame:frame??window.webContents.mainFrame});
 const call=(name:string,e:any,...args:any[])=>mocks.handlers.get('arkme-screenshot:'+name)!(e,...args);
 const png=()=>{const b=Buffer.alloc(33);Buffer.from([137,80,78,71,13,10,26,10]).copy(b);b.writeUInt32BE(13,8);b.write('IHDR',12);b.writeUInt32BE(100,16);b.writeUInt32BE(50,20);return b.toString('base64')};
-beforeEach(()=>{vi.useFakeTimers();mocks.handlers.clear();mocks.windows.length=0;mocks.scope='a';mocks.construct.mockReset();mocks.load.mockReset();mocks.nativeWindows=[];mocks.physicalBounds.mockImplementation((_window:any,bounds:any)=>bounds);mocks.write.mockReset();mocks.save.mockReset();mocks.sources.mockReset();
+beforeEach(()=>{vi.useFakeTimers();mocks.handlers.clear();mocks.windows.length=0;mocks.scope='a';mocks.blocked=false;mocks.construct.mockReset();mocks.load.mockReset();mocks.nativeWindows=[];mocks.physicalBounds.mockImplementation((_window:any,bounds:any)=>bounds);mocks.write.mockReset();mocks.save.mockReset();mocks.sources.mockReset();
  mocks.displays=[{id:10,bounds:{x:-800,y:0,width:800,height:600},size:{width:800,height:600},scaleFactor:2}];
  owner=new BrowserWindow();mocks.sources.mockResolvedValue([{display_id:'10',thumbnail:{isEmpty:()=>false,getSize:()=>({width:1600,height:1200}),toPNG:()=>Buffer.from('frame')}}]);
- installScreenshotIpc({main:()=>owner,origin:()=> 'http://localhost:1234',scope:()=>mocks.scope,preload:()=>'/preload',allowed:id=>id===owner.webContents.id});
+ installScreenshotIpc({blocked:()=>mocks.blocked,main:()=>owner,origin:()=> 'http://localhost:1234',scope:()=>mocks.scope,preload:()=>'/preload',allowed:id=>id===owner.webContents.id});
 });
 afterEach(()=>{for(const w of mocks.windows)if(!w.destroyed)w.destroy();vi.useRealTimers();vi.unstubAllGlobals()});
 async function start(){const result=call('capture',event(owner),'request');await vi.advanceTimersByTimeAsync(200);return {result,child:mocks.windows[1]}}
@@ -144,4 +144,9 @@ it('handles pending navigation rejection when a later overlay fails to initializ
  const result=call('capture',event(owner),'request');const failed=expect(result).rejects.toThrow('overlay init failed');
  await vi.advanceTimersByTimeAsync(1);await failed;
  expect(mocks.windows[1].destroyed).toBe(true);
+});
+
+it('blocks every capture while shortcut recording is active and resumes afterward',async()=>{
+ mocks.blocked=true;await expect(call('capture',event(owner),'request')).rejects.toThrow('设置截图快捷键');expect(mocks.sources).not.toHaveBeenCalled();
+ mocks.blocked=false;const {result}=await start();expect(mocks.sources).toHaveBeenCalled();call('cancel',event(owner),'request');await result;
 });

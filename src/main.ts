@@ -1513,8 +1513,9 @@ let screenshotIpcInstalled = false;
 function createMainWindow(): void {
   if (!screenshotIpcInstalled) {
     screenshotIpcInstalled = true;
-    installScreenshotShortcut({main:()=>mainWindow,origin:()=>activeHarnessOrigin,allowed:id=>accountScopeReady && (id===mainWindow?.webContents.id || conversationWindows.isActive(id))});
+    const screenshotShortcut = installScreenshotShortcut({main:()=>mainWindow,origin:()=>activeHarnessOrigin,allowed:id=>accountScopeReady && (id===mainWindow?.webContents.id || conversationWindows.isActive(id))});
     installScreenshotIpc({
+      blocked: screenshotShortcut.isRecording,
       main: () => mainWindow, origin: () => activeHarnessOrigin,
       scope: () => JSON.stringify([activeHarnessOrigin, activeAccountScope?.dshHome, accountScopeReady]),
       preload: () => resolveArkmePreloadPath(moduleDirectory, app.isPackaged, process.resourcesPath),
