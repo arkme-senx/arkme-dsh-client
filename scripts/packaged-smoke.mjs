@@ -96,7 +96,7 @@ if (preloadProbe.status !== 0) {
   const output = `${preloadProbe.stdout ?? ""}${preloadProbe.stderr ?? ""}`.trim();
   throw new Error(`Packaged Arkme preload smoke failed${output ? `\n${output}` : ""}`);
 }
-const packagedEpochSource = extractFile(configLayout.appAsar, "dist/runtime/cache-epoch.js").toString("utf8");
+const packagedEpochSource = extractFile(configLayout.appAsar, path.join("dist", "runtime", "cache-epoch.js")).toString("utf8");
 resolvePackagedRuntimeCacheRoot("/smoke-preflight", packagedEpochSource);
 if (smokeArgs.includes("--preflight-only")) {
   console.log("packaged Arkme preflight passed: runtime-free layout, updater config and preload; dynamic runtime activation was not exercised");
