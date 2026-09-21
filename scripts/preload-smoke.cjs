@@ -37,6 +37,7 @@ app.whenReady().then(async () => {
     }
     // This data: document is not an armed Harness trial. Its readiness bridge
     // must be present but must not receive a main-owned document nonce.
+    ipcMain.on("arkme-session-selection:bootstrap", event => { event.returnValue = null; });
     ipcMain.on("arkme-runtime:page-ready-nonce", event => { event.returnValue = null; });
     ipcMain.on("arkme-runtime:harness-version", event => {
       event.returnValue = "preload-smoke";
