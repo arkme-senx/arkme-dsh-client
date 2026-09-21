@@ -1,7 +1,7 @@
 {
   "name": "arkme",
-  "version": "0.3.0",
-  "versionCode": 10,
+  "version": "0.3.3",
+  "versionCode": 13,
   "private": true,
   "author": "Jotmo",
   "description": "A secure Electron desktop shell for DeepSeek Harness",
@@ -71,7 +71,7 @@
     "yaml": "2.9.0"
   },
   "build": {
-    "extends": "file:electron-builder.cjs",
+    "extends": "./electron-builder.cjs",
     "appId": "com.senx.arkme.harness",
     "productName": "arkme",
     "protocols": [
