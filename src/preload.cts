@@ -912,3 +912,24 @@ contextBridge.exposeInMainWorld('arkmeConversation', Object.freeze({
   return () => { ipcRenderer.removeListener(conversationPrefix + 'event', handler); };
  },
 }));
+
+// Dedicated, versioned screenshot bridge. Every call is authorized again in main.
+contextBridge.exposeInMainWorld('arkmeScreenshot', Object.freeze({
+  version: 1,
+  capture: (requestId: string) => ipcRenderer.invoke('arkme-screenshot:capture', requestId),
+  cancel: (requestId: string) => ipcRenderer.invoke('arkme-screenshot:cancel', requestId),
+  context: () => ipcRenderer.invoke('arkme-screenshot:context'),
+  ready: () => ipcRenderer.invoke('arkme-screenshot:ready'),
+  select: () => ipcRenderer.invoke('arkme-screenshot:select'),
+  close: () => ipcRenderer.invoke('arkme-screenshot:close'),
+  complete: (png: string) => ipcRenderer.invoke('arkme-screenshot:complete', png),
+  save: (png: string) => ipcRenderer.invoke('arkme-screenshot:save', png),
+}));
+
+contextBridge.exposeInMainWorld('arkmeScreenshotShortcut', Object.freeze({
+ get:()=>ipcRenderer.invoke('arkme-screenshot:shortcut-get'),
+ set:(key:string)=>ipcRenderer.invoke('arkme-screenshot:shortcut-set',key),
+ record:(value:boolean)=>ipcRenderer.invoke('arkme-screenshot:shortcut-record',value),
+ onChanged:(listener:(value:unknown)=>void)=>{const handler=(_event:Electron.IpcRendererEvent,value:unknown)=>listener(value);ipcRenderer.on('arkme-screenshot:shortcut-changed',handler);return ()=>ipcRenderer.removeListener('arkme-screenshot:shortcut-changed',handler);},
+ onTrigger:(listener:()=>void)=>{const handler=()=>listener();ipcRenderer.on('arkme-screenshot:shortcut-trigger',handler);return ()=>ipcRenderer.removeListener('arkme-screenshot:shortcut-trigger',handler);}
+}));

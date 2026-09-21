@@ -1,3 +1,5 @@
+import {installScreenshotShortcut} from './screenshot-shortcut-ipc.js';
+import { installScreenshotIpc } from './desktop-screenshot-ipc.js';
 import { installConversationWindowIpc } from './conversation-window-ipc.js';
 import { installAttachmentPreviewNative } from "./attachment-preview-native.js";
 import { installLongArticleWindowIpc } from "./long-article-window-ipc.js";
@@ -1507,7 +1509,20 @@ ipcMain.handle("arkme-desktop:device-snapshot", event => (
   (isCurrentAppUpdateSender(event) || (event.senderFrame === event.sender.mainFrame && conversationWindows.isActive(event.sender.id))) ? readDesktopDevice() : null
 ));
 
+let screenshotIpcInstalled = false;
 function createMainWindow(): void {
+  if (!screenshotIpcInstalled) {
+    screenshotIpcInstalled = true;
+    const screenshotShortcut = installScreenshotShortcut({main:()=>mainWindow,origin:()=>activeHarnessOrigin,allowed:id=>accountScopeReady && (id===mainWindow?.webContents.id || conversationWindows.isActive(id))});
+    installScreenshotIpc({
+      blocked: screenshotShortcut.isRecording,
+      main: () => mainWindow, origin: () => activeHarnessOrigin,
+      scope: () => JSON.stringify([activeHarnessOrigin, activeAccountScope?.dshHome, accountScopeReady]),
+      preload: () => resolveArkmePreloadPath(moduleDirectory, app.isPackaged, process.resourcesPath),
+      allowed: id => accountScopeReady && (id === mainWindow?.webContents.id || conversationWindows.isActive(id)),
+    });
+  }
+
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
