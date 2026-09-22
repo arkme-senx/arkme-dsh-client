@@ -1,3 +1,4 @@
+import type { ArkmeAppUpdateSnapshot } from "./app-update.js";
 import type { RuntimeInstallProgress } from "./runtime/manager.js";
 
 export const RUNTIME_UPDATE_NOTICE_SNAPSHOT_CHANNEL = "arkme:runtime-update-notice:snapshot";
@@ -16,6 +17,8 @@ export interface RuntimeUpdateNoticeSnapshot {
 
 export interface RuntimeUpdateNativeNotification {
   show(): void;
+  close(): void;
+  onClose(listener: () => void): void;
   onClick(listener: () => void): void;
   onFailed(listener: (error: string) => void): void;
 }
@@ -67,16 +70,41 @@ export class RuntimeUpdateNoticeCoordinator {
   private currentAttemptId: string | undefined;
   private current: RuntimeUpdateNoticeSnapshot | undefined;
   private restartRequested = false;
+  private suppressedByAppUpdate = false;
+  private readonly nativeNotifications = new Map<RuntimeUpdateNativeNotification, string>();
 
   constructor(private readonly options: RuntimeUpdateNoticeCoordinatorOptions) {}
 
+  setAppUpdateState(state: Pick<ArkmeAppUpdateSnapshot, "status" | "canAutoInstall">): void {
+    const suppressed = state.canAutoInstall && (
+      state.status === "available" || state.status === "downloading"
+      || state.status === "downloaded" || state.status === "installing"
+    );
+    if (suppressed === this.suppressedByAppUpdate) return;
+    this.suppressedByAppUpdate = suppressed;
+    this.publish();
+    if (suppressed) {
+      for (const [notification, messageId] of this.nativeNotifications) {
+        try { notification.close(); }
+        catch (error) { this.nativeNotificationFailed(messageId, error); }
+      }
+      this.nativeNotifications.clear();
+    }
+    // Restoring the page notice must not replay old native notifications.
+  }
+
+  private displaySnapshot(snapshot: RuntimeUpdateNoticeSnapshot): RuntimeUpdateNoticeSnapshot {
+    // Keep the user's dismissal separate from temporary client-update suppression.
+    return { ...snapshot, visible: snapshot.visible && !this.suppressedByAppUpdate };
+  }
+
   snapshot(senderUrl: string): RuntimeUpdateNoticeSnapshot | null {
     if (!this.isCurrentHarnessPage(senderUrl) || this.current === undefined) return null;
-    return { ...this.current };
+    return this.displaySnapshot(this.current);
   }
 
   beginInstallation(attemptId: string): RuntimeUpdateNoticeSnapshot {
-    if (this.currentAttemptId === attemptId && this.current !== undefined) return { ...this.current };
+    if (this.currentAttemptId === attemptId && this.current !== undefined) return this.displaySnapshot(this.current);
     this.currentAttemptId = attemptId;
     this.restartRequested = false;
     return this.transition(attemptId, "installing");
@@ -125,7 +153,7 @@ export class RuntimeUpdateNoticeCoordinator {
     this.publish();
     this.options.diagnostic?.(kind, { messageId: this.current.messageId });
     this.showNativeNotificationIfNeeded(this.current);
-    return { ...this.current };
+    return this.displaySnapshot(this.current);
   }
 
   private publish(): void {
@@ -136,10 +164,11 @@ export class RuntimeUpdateNoticeCoordinator {
       || window.isDestroyed()
       || !this.isCurrentHarnessPage(window.getCurrentUrl())
     ) return;
-    window.send(RUNTIME_UPDATE_NOTICE_CHANGED_CHANNEL, { ...this.current });
+    window.send(RUNTIME_UPDATE_NOTICE_CHANGED_CHANNEL, this.displaySnapshot(this.current));
   }
 
   private showNativeNotificationIfNeeded(snapshot: RuntimeUpdateNoticeSnapshot): void {
+    if (this.suppressedByAppUpdate) return;
     const window = this.options.getWindow();
     if (
       window !== null
@@ -159,11 +188,18 @@ export class RuntimeUpdateNoticeCoordinator {
       return;
     }
     if (notification === undefined) return;
+    const activeNotification = notification;
+    this.nativeNotifications.set(activeNotification, snapshot.messageId);
+    notification.onClose(() => { this.nativeNotifications.delete(activeNotification); });
     notification.onClick(() => { this.restoreAndFocusWindow(); });
-    notification.onFailed(error => { this.nativeNotificationFailed(snapshot.messageId, error); });
+    notification.onFailed(error => {
+      this.nativeNotifications.delete(activeNotification);
+      this.nativeNotificationFailed(snapshot.messageId, error);
+    });
     try {
       notification.show();
     } catch (error) {
+      this.nativeNotifications.delete(activeNotification);
       this.nativeNotificationFailed(snapshot.messageId, error);
     }
   }
