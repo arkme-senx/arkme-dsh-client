@@ -1,33 +1,33 @@
 import {EventEmitter} from 'node:events';
 import {beforeEach,afterEach,expect,it,vi} from 'vitest';
-const mocks=vi.hoisted(()=>({handlers:new Map<string,Function>(),windows:[] as any[],sources:vi.fn(),save:vi.fn(),write:vi.fn(),scope:'a',blocked:false,displayEvents:new Map<string,Function>(),displays:[] as any[],nativeWindows:[] as any[],physicalBounds:vi.fn(),load:vi.fn(),construct:vi.fn()}));
+const mocks=vi.hoisted(()=>({handlers:new Map<string,Function>(),windows:[] as any[],sources:vi.fn(),save:vi.fn(),write:vi.fn(),scope:'a',blocked:false,allowed:true,displayEvents:new Map<string,Function>(),displays:[] as any[],nativeWindows:[] as any[],physicalBounds:vi.fn(),load:vi.fn(),construct:vi.fn(),clipboard:vi.fn()}));
 vi.mock('../src/native-screenshot-windows.js',()=>({readScreenshotWindows:()=>mocks.nativeWindows}));
 vi.mock('node:fs/promises',()=>({writeFile:mocks.write}));
 vi.mock('electron',async()=>{
  const {EventEmitter}=await import('node:events');let id=1;
  class Window extends EventEmitter {
   destroyed=false;visible=true;webContents:any;options:any;
-  constructor(options:any={}) {super();mocks.construct();this.options=options;const contents:any=new EventEmitter();contents.id=id++;contents.mainFrame={url:'http://localhost:1234/'};contents.getURL=()=>contents.mainFrame.url;contents.session={};contents.setWindowOpenHandler=()=>{};this.webContents=contents;mocks.windows.push(this)}
+  constructor(options:any={}) {super();mocks.construct();this.options=options;const contents:any=new EventEmitter();contents.id=id++;contents.mainFrame={url:'http://localhost:1234/'};contents.getURL=()=>contents.mainFrame.url;contents.session={};contents.send=vi.fn();contents.setWindowOpenHandler=()=>{};this.webContents=contents;mocks.windows.push(this)}
   static fromWebContents(c:any){return mocks.windows.find(w=>w.webContents===c)}
-  isDestroyed(){return this.destroyed} isVisible(){return this.visible} hide(){this.visible=false} show(){this.visible=true} focus=vi.fn(); showInactive(){this.visible=true}
+  isMinimized(){return false} restore(){} isDestroyed(){return this.destroyed} isVisible(){return this.visible} hide(){this.visible=false} show(){this.visible=true} focus=vi.fn(); showInactive(){this.visible=true}
   setAlwaysOnTop(){} workspaceOptions:any; setVisibleOnAllWorkspaces(_visible:boolean,options:any){this.workspaceOptions=options} getBounds(){return this.options}
   async loadURL(url:string){this.webContents.mainFrame.url=url;this.visible=false;await mocks.load(this)}
   destroy(){this.destroyed=true;this.emit('closed')}
  }
  return {BrowserWindow:Window,ipcMain:{handle:(k:string,v:Function)=>mocks.handlers.set(k,v)},desktopCapturer:{getSources:mocks.sources},dialog:{showSaveDialog:mocks.save},
- nativeImage:{createFromBuffer:()=>({isEmpty:()=>false})},screen:{on:(k:string,v:Function)=>mocks.displayEvents.set(k,v),
+ clipboard:{writeImage:mocks.clipboard},nativeImage:{createFromBuffer:(bytes:Buffer)=>({isEmpty:()=>false,toPNG:()=>bytes})},screen:{on:(k:string,v:Function)=>mocks.displayEvents.set(k,v),
  dipToScreenRect:mocks.physicalBounds,getAllDisplays:()=>mocks.displays,getCursorScreenPoint:()=>({x:0,y:0}),getDisplayNearestPoint:()=>({id:10}),getDisplayMatching:()=>({id:10})}};
 });
 import {BrowserWindow} from 'electron';
 import {installScreenshotIpc} from '../src/desktop-screenshot-ipc.js';
-let owner:any;
+let owner:any, controller:ReturnType<typeof installScreenshotIpc>;
 const event=(window:any,frame?:any)=>({sender:window.webContents,senderFrame:frame??window.webContents.mainFrame});
 const call=(name:string,e:any,...args:any[])=>mocks.handlers.get('arkme-screenshot:'+name)!(e,...args);
 const png=()=>{const b=Buffer.alloc(33);Buffer.from([137,80,78,71,13,10,26,10]).copy(b);b.writeUInt32BE(13,8);b.write('IHDR',12);b.writeUInt32BE(100,16);b.writeUInt32BE(50,20);return b.toString('base64')};
-beforeEach(()=>{vi.useFakeTimers();mocks.handlers.clear();mocks.windows.length=0;mocks.scope='a';mocks.blocked=false;mocks.construct.mockReset();mocks.load.mockReset();mocks.nativeWindows=[];mocks.physicalBounds.mockImplementation((_window:any,bounds:any)=>bounds);mocks.write.mockReset();mocks.save.mockReset();mocks.sources.mockReset();
+beforeEach(()=>{vi.useFakeTimers();mocks.handlers.clear();mocks.clipboard.mockReset();mocks.windows.length=0;mocks.scope='a';mocks.blocked=false;mocks.allowed=true;mocks.construct.mockReset();mocks.load.mockReset();mocks.nativeWindows=[];mocks.physicalBounds.mockImplementation((_window:any,bounds:any)=>bounds);mocks.write.mockReset();mocks.save.mockReset();mocks.sources.mockReset();
  mocks.displays=[{id:10,bounds:{x:-800,y:0,width:800,height:600},size:{width:800,height:600},scaleFactor:2}];
  owner=new BrowserWindow();mocks.sources.mockResolvedValue([{display_id:'10',thumbnail:{isEmpty:()=>false,getSize:()=>({width:1600,height:1200}),toPNG:()=>Buffer.from('frame')}}]);
- installScreenshotIpc({blocked:()=>mocks.blocked,main:()=>owner,origin:()=> 'http://localhost:1234',scope:()=>mocks.scope,preload:()=>'/preload',allowed:id=>id===owner.webContents.id});
+ controller=installScreenshotIpc({blocked:()=>mocks.blocked,main:()=>owner,origin:()=> 'http://localhost:1234',scope:()=>mocks.scope,preload:()=>'/preload',allowed:id=>mocks.allowed && id===owner.webContents.id});
 });
 afterEach(()=>{for(const w of mocks.windows)if(!w.destroyed)w.destroy();vi.useRealTimers();vi.unstubAllGlobals()});
 async function start(){const result=call('capture',event(owner),'request');await vi.advanceTimersByTimeAsync(200);return {result,child:mocks.windows[1]}}
@@ -37,7 +37,7 @@ it('keeps opener visible, captures physical pixels and returns only the editor r
  expect(call('context',event(owner))).toBeNull();expect(call('context',event(child))).toMatchObject({width:1600,height:1200});
  expect(child.options.x).toBe(-800);call('ready',event(child));expect(child.visible).toBe(true);
  call('select',event(child));expect(call('complete',event(child),png())).toBe(true);
- await expect(result).resolves.toMatchObject({status:'captured',mimeType:'image/png'});expect(owner.visible).toBe(true);expect(child.destroyed).toBe(true);
+ await expect(result).resolves.toMatchObject({status:'captured',mimeType:'image/png'});expect(owner.visible).toBe(true);expect(child.destroyed).toBe(true);expect(mocks.clipboard).not.toHaveBeenCalled();
 });
 it('rejects subframes and unrelated windows',async()=>{
  await expect(call('capture',event(owner,{url:'http://localhost:1234/'}),'request')).rejects.toThrow('来源');
@@ -149,4 +149,79 @@ it('handles pending navigation rejection when a later overlay fails to initializ
 it('blocks every capture while shortcut recording is active and resumes afterward',async()=>{
  mocks.blocked=true;await expect(call('capture',event(owner),'request')).rejects.toThrow('设置截图快捷键');expect(mocks.sources).not.toHaveBeenCalled();
  mocks.blocked=false;const {result}=await start();expect(mocks.sources).toHaveBeenCalled();call('cancel',event(owner),'request');await result;
+});
+
+// No renderer listener or conversation composer exists in these shortcut captures.
+it.each(['recordings','chat','settings','minimized'])('copies shortcut results independently of the %s page',async page=>{
+ owner.webContents.mainFrame.url='http://localhost:1234/?page='+page;
+ if(page==='minimized')owner.visible=false;
+ const result=controller.captureClipboard(owner);await vi.advanceTimersByTimeAsync(200);
+ const child=mocks.windows[1];expect(child).toBeDefined();
+ expect(call('complete',event(child),png())).toBe(true);await result;
+ expect(mocks.clipboard).toHaveBeenCalledOnce();
+ expect(mocks.clipboard.mock.calls[0]![0].toPNG().toString('base64')).toBe(png());
+ expect(owner.focus).not.toHaveBeenCalled();expect(child.destroyed).toBe(true);
+});
+it('does not replace the clipboard on shortcut cancellation or account invalidation',async()=>{
+ for(const invalidate of [false,true]){
+  const result=controller.captureClipboard(owner);await vi.advanceTimersByTimeAsync(200);
+  const child=mocks.windows.at(-1);
+  if(invalidate){mocks.scope='changed';expect(call('complete',event(child),png())).toBe(false);await vi.advanceTimersByTimeAsync(250);}
+  else call('close',event(child));
+  await result;expect(mocks.clipboard).not.toHaveBeenCalled();
+ }
+});
+it('keeps a failed clipboard completion open for retry',async()=>{
+ const result=controller.captureClipboard(owner);await vi.advanceTimersByTimeAsync(200);const child=mocks.windows[1];
+ mocks.clipboard.mockImplementationOnce(()=>{throw new Error('clipboard unavailable')});
+ expect(()=>call('complete',event(child),png())).toThrow('clipboard unavailable');expect(child.destroyed).toBe(false);
+ expect(call('complete',event(child),png())).toBe(true);await result;expect(child.destroyed).toBe(true);
+});
+it('ignores repeated global triggers while an attachment capture is active',async()=>{
+ const {result,child}=await start();await controller.captureClipboard(owner);
+ expect(mocks.windows).toHaveLength(2);call('complete',event(child),png());await expect(result).resolves.toMatchObject({status:'captured'});
+ expect(mocks.clipboard).not.toHaveBeenCalled();
+});
+it('blocks shortcut capture while editing shortcuts and rejects foreign origins',async()=>{
+ mocks.blocked=true;await expect(controller.captureClipboard(owner)).rejects.toThrow('设置截图快捷键');
+ mocks.blocked=false;owner.webContents.mainFrame.url='https://evil.test/';
+ await expect(controller.captureClipboard(owner)).rejects.toThrow('来源');expect(mocks.sources).not.toHaveBeenCalled();
+});
+
+it('never copies a completion after its owner loses permission, even before the watchdog runs',async()=>{
+ const result=controller.captureClipboard(owner);await vi.advanceTimersByTimeAsync(200);const child=mocks.windows[1];
+ mocks.allowed=false;expect(call('complete',event(child),png())).toBe(false);expect(mocks.clipboard).not.toHaveBeenCalled();
+ await vi.advanceTimersByTimeAsync(250);await result;
+});
+
+it('hands edited PNG to the main DSH surface and closes only after its acknowledgement',async()=>{
+ const {result,child}=await start();
+ const ask=call('ask-dsh',event(child),png());await Promise.resolve();
+ const [channel,payload]=owner.webContents.send.mock.calls.at(-1)!;
+ expect(channel).toBe('arkme-screenshot:ask-dsh-request');expect(payload.contentBase64).toBe(png());expect(child.destroyed).toBe(false);
+ expect(call('ask-dsh-result',event(child),{requestId:payload.requestId,ok:true})).toBe(false);
+ expect(call('ask-dsh-result',event(owner),{requestId:payload.requestId,ok:true})).toBe(true);
+ await expect(ask).resolves.toBe(true);await expect(result).resolves.toEqual({status:'cancelled'});
+ expect(owner.webContents.send).toHaveBeenLastCalledWith('arkme-screenshot:ask-dsh-activate',{requestId:payload.requestId});
+ expect(mocks.clipboard).not.toHaveBeenCalled();expect(child.destroyed).toBe(true);
+});
+it('keeps the editor after DSH preparation fails and reuses the operation on retry',async()=>{
+ const {result,child}=await start();
+ const ask=call('ask-dsh',event(child),png());const failed=expect(ask).rejects.toThrow('附件失败');await Promise.resolve();
+ const first=owner.webContents.send.mock.calls.at(-1)![1];
+ call('ask-dsh-result',event(owner),{requestId:first.requestId,ok:false,error:'附件失败'});await failed;expect(child.destroyed).toBe(false);
+ const retry=call('ask-dsh',event(child),png());await Promise.resolve();const second=owner.webContents.send.mock.calls.at(-1)![1];
+ expect(second.operationId).toBe(first.operationId);expect(second.requestId).not.toBe(first.requestId);
+ call('ask-dsh-result',event(owner),{requestId:second.requestId,ok:true});await retry;await result;
+});
+it('cancels pending DSH work on scope invalidation and rejects late replies',async()=>{
+ const {result,child}=await start();const ask=call('ask-dsh',event(child),png());const rejected=expect(ask).rejects.toThrow();await Promise.resolve();
+ const payload=owner.webContents.send.mock.calls.at(-1)![1];mocks.scope='other';await vi.advanceTimersByTimeAsync(250);await rejected;await result;
+ expect(call('ask-dsh-result',event(owner),{requestId:payload.requestId,ok:true})).toBe(false);
+ expect(owner.webContents.send).toHaveBeenCalledWith('arkme-screenshot:ask-dsh-cancel',{requestId:payload.requestId});
+});
+it('does not dispatch invalid PNG or overlapping DSH requests',async()=>{
+ const {result,child}=await start();await expect(call('ask-dsh',event(child),'invalid')).rejects.toThrow();expect(owner.webContents.send).not.toHaveBeenCalled();
+ const ask=call('ask-dsh',event(child),png());await Promise.resolve();await expect(call('ask-dsh',event(child),png())).resolves.toBe(false);
+ const payload=owner.webContents.send.mock.calls.at(-1)![1];call('ask-dsh-result',event(owner),{requestId:payload.requestId,ok:true});await ask;await result;
 });

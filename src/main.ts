@@ -1517,8 +1517,8 @@ let screenshotIpcInstalled = false;
 function createMainWindow(): void {
   if (!screenshotIpcInstalled) {
     screenshotIpcInstalled = true;
-    const screenshotShortcut = installScreenshotShortcut({main:()=>mainWindow,origin:()=>activeHarnessOrigin,allowed:id=>accountScopeReady && (id===mainWindow?.webContents.id || conversationWindows.isActive(id))});
-    installScreenshotIpc({
+    const screenshotShortcut = installScreenshotShortcut({capture:owner=>screenshotIpc.captureClipboard(owner),main:()=>mainWindow,origin:()=>activeHarnessOrigin,allowed:id=>accountScopeReady && (id===mainWindow?.webContents.id || conversationWindows.isActive(id))});
+    const screenshotIpc = installScreenshotIpc({
       blocked: screenshotShortcut.isRecording,
       main: () => mainWindow, origin: () => activeHarnessOrigin,
       scope: () => JSON.stringify([activeHarnessOrigin, activeAccountScope?.dshHome, accountScopeReady]),
