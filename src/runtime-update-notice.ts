@@ -308,6 +308,9 @@ export const RUNTIME_UPDATE_NOTICE_CSS = `
   pointer-events: none;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
+/* Floating cards overlap native header drag regions. Exclude the card, not the stack's transparent padding. */
+#arkme-runtime-update-notice .arkme-runtime-update-notice__card,
+#arkme-runtime-update-notice .arkme-runtime-update-notice__card * { -webkit-app-region: no-drag; }
 #arkme-runtime-update-notice .arkme-runtime-update-notice__card {
   display: flex;
   align-items: center;
