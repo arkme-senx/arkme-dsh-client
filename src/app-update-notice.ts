@@ -187,6 +187,9 @@ export const APP_UPDATE_NOTICE_CSS = `
 }
 #arkme-runtime-update-notice[data-app-installing="true"] button { pointer-events: none; opacity: .5; }
 #arkme-app-update-notice { order: 0; width: fit-content; max-width: 100%; color: #20283b; font-size: 13px; pointer-events: auto; }
+/* Floating cards overlap native header drag regions. Exclude the card, not the stack's transparent padding. */
+#arkme-app-update-notice .arkme-app-update-card,
+#arkme-app-update-notice .arkme-app-update-card * { -webkit-app-region: no-drag; }
 #arkme-app-update-notice .arkme-app-update-card {
   display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: start; gap: 10px;
   box-sizing: border-box; padding: 13px 16px; border: 1px solid rgba(109,126,163,.18);
