@@ -382,6 +382,8 @@ const runtimeUpdateNotices = new RuntimeUpdateNoticeCoordinator({
     const notification = new Notification({ title, body });
     return {
       show: () => { notification.show(); },
+      close: () => { notification.close(); },
+      onClose: listener => { notification.once("close", listener); },
       onClick: listener => { notification.once("click", listener); },
       onFailed: listener => {
         notification.once("failed", (_event, error) => { listener(error); });
@@ -1382,7 +1384,9 @@ async function installAppUpdateController(currentVersionCode: number): Promise<v
     } : {})
   });
   appUpdateNotices.attach(appUpdateController);
+  runtimeUpdateNotices.setAppUpdateState(appUpdateController.snapshotNow());
   appUpdateController.subscribe(snapshot => {
+    runtimeUpdateNotices.setAppUpdateState(snapshot);
     if (snapshot.status === "failed" && snapshot.failureStage === "install") appQuitGuard?.restoreGuardedQuit();
     if (snapshot.status !== "downloading") logDiagnostic("app-update-state", {
       status: snapshot.status, versionCode: snapshot.latestVersionCode, failureStage: snapshot.failureStage, error: snapshot.error
