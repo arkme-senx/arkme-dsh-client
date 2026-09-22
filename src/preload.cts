@@ -924,6 +924,23 @@ contextBridge.exposeInMainWorld('arkmeScreenshot', Object.freeze({
   close: () => ipcRenderer.invoke('arkme-screenshot:close'),
   complete: (png: string) => ipcRenderer.invoke('arkme-screenshot:complete', png),
   save: (png: string) => ipcRenderer.invoke('arkme-screenshot:save', png),
+  askDsh: (png: string) => ipcRenderer.invoke('arkme-screenshot:ask-dsh', png),
+  askDshResult: (reply: {requestId:string;ok:boolean;error?:string}) => ipcRenderer.invoke('arkme-screenshot:ask-dsh-result', reply),
+  onAskDsh: (listener: (request: {requestId:string;operationId:string;contentBase64:string;fileName:string}) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, request: {requestId:string;operationId:string;contentBase64:string;fileName:string}) => listener(request);
+    ipcRenderer.on('arkme-screenshot:ask-dsh-request', handler);
+    return () => ipcRenderer.removeListener('arkme-screenshot:ask-dsh-request', handler);
+  },
+  onAskDshCancel: (listener: (request: {requestId:string}) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, request: {requestId:string}) => listener(request);
+    ipcRenderer.on('arkme-screenshot:ask-dsh-cancel', handler);
+    return () => ipcRenderer.removeListener('arkme-screenshot:ask-dsh-cancel', handler);
+  },
+  onAskDshActivate: (listener: (request: {requestId:string}) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, request: {requestId:string}) => listener(request);
+    ipcRenderer.on('arkme-screenshot:ask-dsh-activate', handler);
+    return () => ipcRenderer.removeListener('arkme-screenshot:ask-dsh-activate', handler);
+  },
 }));
 
 contextBridge.exposeInMainWorld('arkmeScreenshotShortcut', Object.freeze({

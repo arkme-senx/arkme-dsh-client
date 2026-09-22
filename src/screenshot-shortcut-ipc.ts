@@ -1,8 +1,8 @@
-import {app,BrowserWindow,globalShortcut,ipcMain,type IpcMainInvokeEvent} from 'electron';
+import {app,BrowserWindow,dialog,globalShortcut,ipcMain,type IpcMainInvokeEvent} from 'electron';
 import {readFileSync,writeFileSync,renameSync} from 'node:fs';
 import path from 'node:path';
 import {ScreenshotShortcut} from './screenshot-shortcut.js';
-export function installScreenshotShortcut(options:{main():BrowserWindow|null;origin():string|null;allowed(id:number):boolean}){
+export function installScreenshotShortcut(options:{main():BrowserWindow|null;origin():string|null;allowed(id:number):boolean;capture(owner:BrowserWindow):Promise<void>}){
  const file=path.join(app.getPath('userData'),'screenshot-shortcut.json');
  let saved:unknown;try{saved=JSON.parse(readFileSync(file,'utf8')).accelerator;}catch{}
  let recording:number|undefined;
@@ -12,7 +12,9 @@ export function installScreenshotShortcut(options:{main():BrowserWindow|null;ori
   if(recording!==undefined)return;
   const focused=BrowserWindow.getFocusedWindow();
   const target=focused && options.allowed(focused.webContents.id)?focused:options.main();
-  if(target && !target.isDestroyed() && options.allowed(target.webContents.id))target.webContents.send('arkme-screenshot:shortcut-trigger');
+  if(target && !target.isDestroyed() && options.allowed(target.webContents.id)) {
+   void options.capture(target).catch(error=>dialog.showErrorBox('截图失败',error instanceof Error?error.message:'无法开始截图，请重试'));
+  }
  },saved);
  const snapshot=()=>({...controller.snapshot(),recording:recording!==undefined});
  const publish=()=>{for(const w of BrowserWindow.getAllWindows())if(!w.isDestroyed()&&options.allowed(w.webContents.id))w.webContents.send('arkme-screenshot:shortcut-changed',snapshot());};
