@@ -16,7 +16,8 @@ describe("desktop device snapshot", () => {
     expect(await a).toEqual({ schemaVersion: 1, computerName: "我的 MacBook Pro", networkType: "wifi" });
     expect(read).toHaveBeenCalledTimes(3);
     await snapshot();
-    expect(read).toHaveBeenCalledTimes(6);
+    expect(read).toHaveBeenCalledTimes(5);
+    expect(read.mock.calls.filter(([file]) => file.endsWith("scutil"))).toHaveLength(1);
   });
   it("falls back without guessing when OS commands fail or the platform is unsupported", async () => {
     const read = vi.fn(async () => "");
