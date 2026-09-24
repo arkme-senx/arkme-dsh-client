@@ -14,7 +14,8 @@ import { RUNTIME_CACHE_EPOCH, readPreviousRuntimeBaseline, resolveRuntimeCacheRo
 import { createDesktopDeviceReader } from "./desktop-device.js";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { access, appendFile, mkdir, readFile } from "node:fs/promises";
+import { access, mkdir, readFile } from "node:fs/promises";
+import { RotatingLog } from "./rotating-log.js";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -201,14 +202,19 @@ const diagnosticLogPath = path.join(
   "logs",
   "desktop-startup.log"
 );
+const diagnosticLog = new RotatingLog(diagnosticLogPath);
+const diagnosticLogReady = mkdir(path.dirname(diagnosticLogPath), { recursive: true });
+void diagnosticLogReady.catch(() => undefined);
 
 function logDiagnostic(message: string, details?: unknown): void {
   const suffix = details === undefined
     ? ""
     : ` ${details instanceof Error ? details.stack ?? details.message : JSON.stringify(details)}`;
   const line = `${new Date().toISOString()} ${message}${suffix}\n`;
-  void mkdir(path.dirname(diagnosticLogPath), { recursive: true })
-    .then(() => appendFile(diagnosticLogPath, line, { encoding: "utf8", mode: 0o600 }))
+  void diagnosticLogReady
+    .then(() => {
+      if (!diagnosticLog.destroyed && diagnosticLog.writableLength < diagnosticLog.writableHighWaterMark) diagnosticLog.write(line);
+    })
     .catch(() => undefined);
 }
 
@@ -1618,7 +1624,7 @@ function createMainWindow(): void {
     logDiagnostic("render-process-gone", details);
   });
   mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
-    logDiagnostic("renderer-console", { level, message, line, sourceId });
+    logDiagnostic("renderer-console", { level, message: message.slice(0, 4000), line, sourceId: sourceId.slice(0, 512) });
   });
   mainWindow.on("close", event => {
     if (longArticleWindows.requestQuit(() => mainWindow?.close())) event.preventDefault();

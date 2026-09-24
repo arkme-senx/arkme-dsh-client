@@ -42,12 +42,14 @@ export function createDesktopDeviceReader(
   readSsid = macWifiSsid,
 ): () => Promise<DesktopDeviceSnapshot> {
   let pending: Promise<DesktopDeviceSnapshot> | undefined;
+  // The machine name is stable for this reader's lifetime; network facts remain fresh.
+  let computerName: Promise<string> | undefined;
   return () => pending ??= (async (): Promise<DesktopDeviceSnapshot> => {
     if (platform !== "darwin") return {
       schemaVersion: 1, computerName: fallbackName().slice(0, 80), networkType: "unknown",
     };
     const [name, route, ports] = await Promise.all([
-      readText("/usr/sbin/scutil", ["--get", "ComputerName"]),
+      computerName ??= readText("/usr/sbin/scutil", ["--get", "ComputerName"]),
       readText("/sbin/route", ["-n", "get", "default"]),
       readText("/usr/sbin/networksetup", ["-listallhardwareports"]),
     ]);
