@@ -15,7 +15,7 @@ import {
 } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import semver from "semver";
 import { isElectronRuntimeReleaseId } from "./runtime/manifest.js";
@@ -92,6 +92,7 @@ export interface ProvisionArkmeWebProfileOptions {
   packageManager?: ProfilePackageManager;
   runtimeManaged?: boolean;
   runtimeReleaseId?: string;
+  localSessionStore?: { root: string; accountRef: string };
 }
 
 export interface RuntimeManagedProfileTransaction {
@@ -257,10 +258,9 @@ export async function provisionArkmeWebProfile(
     }
   };
   const profilePatchPath = path.join(profileDir, "cordis.patch.yml");
-  if (options.environment === "test") {
-    await writeTextAtomically(profilePatchPath, TEST_PROFILE_PATCH);
-  } else {
-    await writeIfMissing(profilePatchPath, PROFILE_PATCH_TEMPLATE);
+  if (!options.localSessionStore) {
+    if (options.environment === "test") await writeTextAtomically(profilePatchPath, TEST_PROFILE_PATCH);
+    else await writeIfMissing(profilePatchPath, PROFILE_PATCH_TEMPLATE);
   }
   await writeIfMissing(
     path.join(profileDir, "pnpm-workspace.yaml"),
@@ -334,6 +334,16 @@ export async function provisionArkmeWebProfile(
         await ensurePluginSymlink(profileDir, embeddedPlugin.path);
       }
     }
+  }
+
+  if (options.localSessionStore) {
+    const { localSessionProfilePatch } = await import(pathToFileURL(path.join(installedPluginDir, "lib", "local-session-store.js")).href) as {
+      localSessionProfilePatch(input: { pluginDir: string; root: string; accountRef: string; environment: string; dshVersion: string; basePatch: string }): string;
+    };
+    await writeTextAtomically(profilePatchPath, localSessionProfilePatch({
+      ...options.localSessionStore, pluginDir: installedPluginDir, environment: options.environment ?? "prod",
+      dshVersion: options.dshVersion ?? "", basePatch: TEST_PROFILE_PATCH
+    }));
   }
 
   const finalHealth = await inspectPluginDirectory(installedPluginDir);
