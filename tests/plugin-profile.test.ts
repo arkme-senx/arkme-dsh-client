@@ -24,6 +24,18 @@ afterEach(async () => {
 });
 
 describe("provisionArkmeWebProfile", () => {
+  test("delegates account-scoped composition to the installed plugin", async () => {
+    const fixture = await createFixture();
+    await writeFile(path.join(fixture.pluginDir, "lib", "local-session-store.js"),
+      'export function localSessionProfilePatch(input) { return JSON.stringify(input) }');
+    const root = path.join(fixture.dshHome, "..", "shared sessions");
+    await provisionArkmeWebProfile({dshHome: fixture.dshHome, pluginDir: fixture.pluginDir, environment: "test", dshVersion: "0.1.5-rc.2", localSessionStore: {root, accountRef: "a".repeat(64)}});
+    const patch = JSON.parse(await readFile(path.join(fixture.dshHome,"profiles","web","cordis.patch.yml"),"utf8"));
+    expect(patch).toMatchObject({root, accountRef: "a".repeat(64), environment: "test", dshVersion: "0.1.5-rc.2"});
+    expect(patch.basePatch).toContain("environment: test");
+    expect(patch.pluginDir).toBe(path.join(fixture.dshHome,"profiles","web","node_modules","@senguoyun","dsh-arkme"));
+  });
+
   test("initializes a web profile that resolves the embedded plugin without pnpm", async () => {
     const fixture = await createFixture("9.8.7-local");
     await provisionArkmeWebProfile({
