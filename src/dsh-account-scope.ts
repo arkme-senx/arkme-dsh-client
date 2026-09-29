@@ -96,9 +96,9 @@ export class DshAccountScopeStore {
     return await this.ensureLaunch(containerRef, created);
   }
 
-  async reconcile(identity: DshAccountIdentity, options: {deferLegacyMigration?: boolean} = {}): Promise<DshAccountScopeReconcileResult> {
+  async reconcile(identity: DshAccountIdentity, options: {deferLegacyMigration?: boolean; relaunchOnAccountClaim?: boolean} = {}): Promise<DshAccountScopeReconcileResult> {
     let result!: DshAccountScopeReconcileResult;
-    const mutation = this.mutationTail.then(async () => { result = await this.reconcileSerial(identity, options.deferLegacyMigration === true); });
+    const mutation = this.mutationTail.then(async () => { result = await this.reconcileSerial(identity, options.deferLegacyMigration === true, options.relaunchOnAccountClaim === true); });
     this.mutationTail = mutation.catch(() => undefined);
     await mutation;
     return result;
@@ -137,7 +137,7 @@ export class DshAccountScopeStore {
     return result;
   }
 
-  private async reconcileSerial(identity: DshAccountIdentity, deferLegacyMigration: boolean): Promise<DshAccountScopeReconcileResult> {
+  private async reconcileSerial(identity: DshAccountIdentity, deferLegacyMigration: boolean, relaunchOnAccountClaim: boolean): Promise<DshAccountScopeReconcileResult> {
     const targetOwner = ownerFor(identity);
     if (deferLegacyMigration) {
       const pendingRegistry = await this.readRegistry();
@@ -174,7 +174,7 @@ export class DshAccountScopeStore {
       };
       registry.accounts[targetOwner.accountRef] = current.containerRef;
       await this.writeRegistry(registry);
-      return { status: "ready", launch: await this.ensureLaunch(current.containerRef, registry) };
+      return { status: relaunchOnAccountClaim ? "relaunch" : "ready", launch: await this.ensureLaunch(current.containerRef, registry) };
     }
 
     const targetRef = targetOwner.kind === "account"

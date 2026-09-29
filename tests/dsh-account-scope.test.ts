@@ -52,6 +52,19 @@ describe("DSH account scope store", () => {
     expect(claimed.owner).toEqual({ kind: "account", accountRef: expect.stringMatching(/^[a-f0-9]{64}$/u) });
   });
 
+  test("relaunches once when claiming a guest requires a different session composition", async () => {
+    const root = await makeTempDirectory("arkme-claim-relaunch-");
+    const store = new DshAccountScopeStore(root, () => "scope_guest_01");
+    const guest = await store.launch();
+    await writeFile(join(guest.dshHome, ".credentials.yaml"), "profile-private");
+    const identity = {kind: "account", userId: 42} as const;
+    const first = await store.reconcile(identity, {relaunchOnAccountClaim: true});
+    expect(first.status).toBe("relaunch");
+    expect(first.launch.dshHome).toBe(guest.dshHome);
+    expect((await store.reconcile(identity, {relaunchOnAccountClaim: true})).status).toBe("ready");
+    expect(await readFile(join(guest.dshHome, ".credentials.yaml"), "utf8")).toBe("profile-private");
+  });
+
   test("moves the legacy DSH home only after relaunch and assigns it to the current account", async () => {
     const userDataPath = await makeTempDirectory("arkme account scope ");
     const legacyHome = join(userDataPath, "dsh");
