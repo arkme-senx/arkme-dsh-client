@@ -1511,7 +1511,7 @@ function createMainWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
-    minWidth: 920,
+    minWidth: 310,
     minHeight: 640,
     show: false,
     title: appName,
