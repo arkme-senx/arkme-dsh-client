@@ -141,6 +141,7 @@ import {
   saveLastWorkspace
 } from "./settings.js";
 import { createStatusPageUrl } from "./status-url.js";
+import { DesktopAccountScopeTransitions } from "./desktop-account-scope-transition.js";
 import { lockWindowTitle } from "./window-title-policy.js";
 import { createWindowsBadgeDotImage } from "./windows-badge-icon.js";
 import {
@@ -257,7 +258,7 @@ let accountScopeStore: DshAccountScopeStore | null = null;
 let activeAccountScope: DshAccountScopeLaunch | null = null;
 let accountScopeChoices: DshAccountScopeChoice[] = [];
 let accountScopeReady = false;
-let accountScopeTransition: { ref: string; identity: DesktopAccountScopeIdentity } | null = null;
+const accountScopeTransitions = new DesktopAccountScopeTransitions();
 let accountScopeRelaunchScheduled = false;
 let lastHarnessReadyState: Extract<HarnessState, { kind: "ready" }> | null = null;
 let activeLaunchRuntime: LaunchRuntime | null = null;
@@ -306,7 +307,7 @@ interface HarnessLaunchPaths {
 
 const desktopAccountScopes: DesktopAccountScopePort = {
   attest: async identity => await attestDesktopAccountScope(identity),
-  prepare: async identity => await prepareDesktopAccountScope(identity),
+  prepare: async (identity, signal) => await prepareDesktopAccountScope(identity, signal),
   commit: async transitionRef => await commitDesktopAccountScope(transitionRef),
   abort: async transitionRef => await abortDesktopAccountScope(transitionRef)
 };
@@ -721,7 +722,7 @@ async function configureAccountScopeForRuntime(
 async function attestDesktopAccountScope(
   identity: DesktopAccountScopeIdentity
 ): Promise<{ status: "ready" | "relaunch" }> {
-  if (accountScopeTransition !== null) throw new Error("DSH account scope transition is already active");
+  if (accountScopeTransitions.active) throw new Error("DSH account scope transition is already active");
   const store = accountScopeStore;
   if (store === null) throw new Error("DSH account scope store is unavailable");
   // Reconciliation only plans legacy moves. The stopped-process relaunch owns
@@ -741,26 +742,33 @@ async function attestDesktopAccountScope(
 }
 
 async function prepareDesktopAccountScope(
-  identity: DesktopAccountScopeIdentity
+  identity: DesktopAccountScopeIdentity,
+  signal?: AbortSignal
 ): Promise<{ transitionRef: string }> {
-  if (accountScopeTransition !== null) throw new Error("DSH account scope transition is already active");
-  const transitionRef = `scope-transition-${randomUUID()}`;
-  accountScopeTransition = { ref: transitionRef, identity };
-  accountScopeReady = false;
-  await renderAccountScopeWaiting();
-  return { transitionRef };
+  const previousReady = accountScopeReady;
+  return await accountScopeTransitions.prepare(identity, {
+    enter: async () => {
+      accountScopeReady = false;
+      await renderAccountScopeWaiting();
+    },
+    restore: async () => {
+      accountScopeReady = previousReady;
+      try { await revealAttestedHarness(); }
+      catch (error) { accountScopeReady = false; throw error; }
+    }
+  }, signal);
 }
 
 async function commitDesktopAccountScope(
   transitionRef: string
 ): Promise<{ status: "ready" | "relaunch" }> {
-  const transition = accountScopeTransition;
+  const transition = accountScopeTransitions.prepared(transitionRef);
   const store = accountScopeStore;
-  if (transition === null || transition.ref !== transitionRef || store === null) {
+  if (store === null) {
     throw new Error("DSH account scope transition is stale");
   }
   const result = await store.reconcile(transition.identity, {deferLegacyMigration: true});
-  accountScopeTransition = null;
+  accountScopeTransitions.complete(transitionRef);
   activeAccountScope = result.launch;
   accountScopeReady = result.status === "ready";
   if (accountScopeReady) {
@@ -772,8 +780,7 @@ async function commitDesktopAccountScope(
 }
 
 async function abortDesktopAccountScope(transitionRef: string): Promise<{ status: "ready" }> {
-  if (accountScopeTransition?.ref !== transitionRef) throw new Error("DSH account scope transition is stale");
-  accountScopeTransition = null;
+  accountScopeTransitions.complete(transitionRef);
   accountScopeReady = true;
   await revealAttestedHarness();
   return { status: "ready" };
@@ -1000,7 +1007,7 @@ async function launchHarnessRuntime(
       });
       if (!restored) throw error;
       activeAccountScope = initialAccountScope;
-      accountScopeTransition = null;
+      accountScopeTransitions.reset();
       accountScopeReady = accountScopeStore === null;
       if (runtime.release?.probation !== true || runtimeManager === null) throw error;
       if (candidateCompleted) throw error;
