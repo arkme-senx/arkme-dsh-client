@@ -39,7 +39,7 @@ export type DesktopAccountScopeIdentity =
 
 export interface DesktopAccountScopePort {
   attest(identity: DesktopAccountScopeIdentity): Promise<{ status: "ready" | "relaunch" }>;
-  prepare(identity: DesktopAccountScopeIdentity): Promise<{ transitionRef: string }>;
+  prepare(identity: DesktopAccountScopeIdentity, signal?: AbortSignal): Promise<{ transitionRef: string }>;
   commit(transitionRef: string): Promise<{ status: "ready" | "relaunch" }>;
   abort(transitionRef: string): Promise<{ status: "ready" }>;
 }
@@ -78,6 +78,7 @@ interface BridgeRequest {
 
 interface BridgeState {
   activeSessionId: string | null;
+  sessionAbort: AbortController;
   authority: string;
   closed: boolean;
 }
@@ -92,7 +93,7 @@ export async function startDesktopCapabilityBridge(
   const maxBodyBytes = positiveLimit(options.maxBodyBytes, DEFAULT_MAX_BODY_BYTES);
   const requestTimeoutMs = positiveLimit(options.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
   const maxConnections = positiveLimit(options.maxConnections, DEFAULT_MAX_CONNECTIONS);
-  const state: BridgeState = { activeSessionId: null, authority: "", closed: false };
+  const state: BridgeState = { activeSessionId: null, sessionAbort: new AbortController(), authority: "", closed: false };
   const server = createServer((request, response) => {
     void handleRequest(request, response, {
       ...options,
@@ -124,17 +125,21 @@ export async function startDesktopCapabilityBridge(
       if (state.closed) throw new Error("Desktop capability bridge is closed");
       if (!boundedString(sessionId, 128)) throw new Error("Desktop capability bridge session is invalid");
       if (state.activeSessionId === sessionId) return;
+      state.sessionAbort.abort();
+      state.sessionAbort = new AbortController();
       state.activeSessionId = sessionId;
       options.badges.beginSession();
     },
     deactivateSession(sessionId: string): void {
       if (state.activeSessionId !== sessionId) return;
+      state.sessionAbort.abort();
       state.activeSessionId = null;
       options.badges.endSession();
     },
     async close(): Promise<void> {
       if (state.closed) return;
       state.closed = true;
+      state.sessionAbort.abort();
       if (state.activeSessionId !== null) options.badges.endSession();
       state.activeSessionId = null;
       await closeServer(server);
@@ -198,10 +203,19 @@ async function handleRequest(
       if (context.accountScopes === undefined) throw new BridgeHttpError(501, "unsupported");
       if (action.action === "account.scope.attest" || action.action === "account.scope.prepare") {
         const identity = parseAccountScopeIdentity(action.payload);
-        const value = action.action === "account.scope.attest"
-          ? await context.accountScopes.attest(identity)
-          : await context.accountScopes.prepare(identity);
-        writeJson(response, 200, { ok: true, value });
+        const disconnected = new AbortController();
+        const onClose = () => { if (!response.writableFinished) disconnected.abort(); };
+        response.once("close", onClose);
+        if (response.destroyed) disconnected.abort();
+        try {
+          const signal = AbortSignal.any([disconnected.signal, context.state.sessionAbort.signal]);
+          const value = action.action === "account.scope.attest"
+            ? await context.accountScopes.attest(identity)
+            : await context.accountScopes.prepare(identity, signal);
+          writeJson(response, 200, { ok: true, value });
+        } finally {
+          response.removeListener("close", onClose);
+        }
         return;
       }
       const transitionRef = parseTransitionRef(action.payload);

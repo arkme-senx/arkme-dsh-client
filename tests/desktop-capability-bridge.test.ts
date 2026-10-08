@@ -175,7 +175,7 @@ describe("desktop capability bridge", () => {
       status: 200, body: { ok: true, value: { status: "ready" } }
     });
     expect(accountScopes.attest).toHaveBeenCalledWith(identity);
-    expect(accountScopes.prepare).toHaveBeenCalledWith(identity);
+    expect(accountScopes.prepare).toHaveBeenCalledWith(identity, expect.any(AbortSignal));
     expect(accountScopes.commit).toHaveBeenCalledWith("transition-1");
     expect(accountScopes.abort).toHaveBeenCalledWith("transition-1");
 
