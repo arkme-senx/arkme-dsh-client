@@ -107,7 +107,15 @@ describe("ArkmeAppUpdateController", () => {
 
   test("uses per-platform latest JSON endpoints and treats a missing release as current", async () => {
     expect(appUpdateFeedURL("https://api.jotmo.cc", "linux", "x64")).toBe("https://api.jotmo.cc/api/public/v1/arkme/app-update/linux/x64/latest");
-    expect(resolveSupportedAppUpdateTarget("darwin", "x64")).toBeNull();
+    expect(appUpdateFeedURL("https://api.jotmo.cc", "win32", "x64")).toBe("https://api.jotmo.cc/api/public/v1/arkme/app-update/win32/x64/latest?installation=jiwo-v3-cc-jiwo-arkme");
+    expect(appUpdateFeedURL("https://api.jotmo.cc", "win32", "x64", "com.senx.arkme.harness")).toBe("https://api.jotmo.cc/api/public/v1/arkme/app-update/win32/x64/latest");
+    expect(appUpdateFeedURL("https://api.jotmo.cc", "darwin", "arm64")).toBe("https://api.jotmo.cc/api/public/v1/arkme/app-update/darwin/arm64/latest?installation=jiwo-v3-cc-jiwo-arkme");
+    expect(appUpdateFeedURL("https://api.jotmo.cc", "darwin", "x64")).toBe("https://api.jotmo.cc/api/public/v1/arkme/app-update/darwin/arm64/latest?installation=jiwo-v3-cc-jiwo-arkme");
+    for (const appId of ["cc.jiwo.arkme.test", "cc.jiwo.arkme.local-test", "com.senx.arkme.harness"]) {
+      expect(appUpdateFeedURL("https://api.jotmo.cc", "darwin", "arm64", appId)).toBe("https://api.jotmo.cc/api/public/v1/arkme/app-update/darwin/arm64/latest");
+    }
+    expect(resolveSupportedAppUpdateTarget("darwin", "x64")).toEqual({ platform: "darwin", arch: "arm64" });
+    expect(resolveSupportedAppUpdateTarget("win32", "arm64")).toBeNull();
     const controller = new ArkmeAppUpdateController({ currentVersion: "1.2.0", currentVersionCode: 1, serviceBaseUrl: "https://api.jotmo.cc", platform: "darwin", arch: "arm64", fetchImpl: async () => new Response(null, { status: 404 }) });
     await expect(controller.checkNow()).resolves.toMatchObject({ status: "current", noUpdateAvailable: true });
   });

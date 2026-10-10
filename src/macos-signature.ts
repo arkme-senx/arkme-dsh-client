@@ -3,6 +3,13 @@ export interface MacCodeSigningDetails {
   teamIdentifier: string;
 }
 
+export function validateMacHelperIdentifiers(identifiers: readonly string[]): void {
+  const prefix = "cc.jiwo.arkme.helper";
+  if (identifiers.length === 0 || identifiers.some(id => id !== prefix && !id.startsWith(`${prefix}.`))) {
+    throw new Error("Signed Helper identifiers must derive from cc.jiwo.arkme.helper");
+  }
+}
+
 const requiredMainProcessEntitlements = [
   "com.apple.security.cs.allow-jit",
   "com.apple.security.cs.allow-unsigned-executable-memory",
@@ -12,9 +19,9 @@ const requiredMainProcessEntitlements = [
 
 export function validateMacCodeSigningDetails(output: string): MacCodeSigningDetails {
   const identifier = detailValue(output, "Identifier");
-  if (identifier !== "com.senx.arkme.harness") {
+  if (identifier !== "cc.jiwo.arkme") {
     throw new Error(
-      `Signed Harness must use identifier com.senx.arkme.harness; received ${identifier ?? "none"}`
+      `Signed Harness must use identifier cc.jiwo.arkme; received ${identifier ?? "none"}`
     );
   }
 

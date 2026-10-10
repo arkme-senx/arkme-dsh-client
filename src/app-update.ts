@@ -69,6 +69,7 @@ type ArkmeAppUpdateControllerOptions = {
   serviceBaseUrl: string;
   platform: UpdatePlatform;
   arch: UpdateArch;
+  appId?: string;
   fetchImpl?: typeof fetch;
   createUpdater?: (feedURL: string, targetVersion: string) => AppUpdaterPort;
   installUpdate?: (
@@ -116,6 +117,11 @@ function updateFeedDirectory(raw: string): string {
 }
 
 export function resolveSupportedAppUpdateTarget(platform: string, arch: string): SupportedAppUpdateTarget | null {
+  if (platform === "darwin" && arch === "x64") {
+    // The legacy API slot is named arm64; production artifacts are Universal.
+    // This selects the APP release feed, never the native Harness architecture.
+    return { platform: "darwin", arch: "arm64" };
+  }
   return (platform === "darwin" && arch === "arm64")
     || (platform === "win32" && arch === "x64")
     || (platform === "linux" && arch === "x64")
@@ -123,11 +129,13 @@ export function resolveSupportedAppUpdateTarget(platform: string, arch: string):
     : null;
 }
 
-export function appUpdateFeedURL(base: string, platform: UpdatePlatform, arch: UpdateArch): string {
-  if (!resolveSupportedAppUpdateTarget(platform, arch)) {
+export function appUpdateFeedURL(base: string, platform: UpdatePlatform, arch: UpdateArch, appId = "cc.jiwo.arkme"): string {
+  const target = resolveSupportedAppUpdateTarget(platform, arch);
+  if (target === null) {
     throw new Error(`unsupported Arkme app update target: ${platform}/${arch}`);
   }
-  return `${origin(base)}/api/public/v1/arkme/app-update/${platform}/${arch}/latest`;
+  const endpoint = `${origin(base)}/api/public/v1/arkme/app-update/${target.platform}/${target.arch}/latest`;
+  return (target.platform === "darwin" || target.platform === "win32") && appId === "cc.jiwo.arkme" ? `${endpoint}?installation=jiwo-v3-cc-jiwo-arkme` : endpoint;
 }
 
 export class ArkmeAppUpdateController {
@@ -178,7 +186,7 @@ export class ArkmeAppUpdateController {
           failureStage: "install",
           error: "上次安装未完成，请重新尝试",
         };
-    this.feedURL = appUpdateFeedURL(options.serviceBaseUrl, options.platform, options.arch);
+    this.feedURL = appUpdateFeedURL(options.serviceBaseUrl, options.platform, options.arch, options.appId);
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.now = options.now ?? Date.now;
     if (options.previousInstallFailure !== undefined) this.lastCheckStartedAtMillis = this.now();

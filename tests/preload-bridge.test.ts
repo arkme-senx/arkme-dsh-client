@@ -155,6 +155,7 @@ async function executePreload(
           badgeMode: "dot"
         };
         if (channel === "arkme-app-update:app-version") return "1.2.0";
+        if (channel === "arkme-app-update:app-version-code") return 277;
         return harnessVersion;
       }
     }
@@ -231,6 +232,7 @@ describe("desktop notification preload", () => {
     const { exposed, syncChannels } = await executePreload("0.1.0-rc.8");
     const desktop = exposed.arkmeDesktop as {
       harnessVersion?: string;
+      appVersionCode?: number;
       attention: { notificationShow: boolean; notificationPermission: string; badgeMode: string };
     };
 
@@ -240,9 +242,12 @@ describe("desktop notification preload", () => {
       "arkme:desktop-notification:permission-state",
       "arkme-desktop:attention-capabilities",
       "arkme-runtime:page-ready-nonce",
-      "arkme-app-update:app-version"
+      "arkme-app-update:app-version",
+      "arkme-app-update:app-version-code"
     ]);
     expect(desktop.harnessVersion).toBe("0.1.0-rc.8");
+    expect(desktop.appVersionCode).toBe(277);
+    expect(Object.isFrozen(desktop)).toBe(true);
     expect(desktop.attention).toEqual({
       schemaVersion: 1,
       notificationShow: true,

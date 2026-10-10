@@ -1,22 +1,23 @@
 import { spawnSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { parse } from "yaml";
 import {
   validateMacCodeSigningDetails,
+  validateMacHelperIdentifiers,
   validateMacLocationUsageDescriptions,
   validateMacMainProcessEntitlements
 } from "../dist/macos-signature.js";
 
-const appPath = path.resolve(process.argv[2] ?? "release/mac-arm64/arkme.app");
+const appPath = path.resolve(process.argv[2] ?? "release/mac-universal/即我.app");
 const { assertAppUpdateConfig } = createRequire(import.meta.url)("./ensure-app-update-config.cjs");
 assertAppUpdateConfig(parse(await readFile(path.join(appPath, "Contents", "Resources", "app-update.yml"), "utf8")));
 const appExecutable = path.join(
   appPath,
   "Contents",
   "MacOS",
-  path.basename(appPath, ".app")
+  "arkme"
 );
 const notificationPermissionModule = path.join(
   appPath,
@@ -52,6 +53,20 @@ if (inspection.error !== undefined || inspection.status !== 0) {
 }
 
 const details = validateMacCodeSigningDetails(`${inspection.stdout ?? ""}${inspection.stderr ?? ""}`);
+const frameworks = path.join(appPath, "Contents/Frameworks");
+const helperIdentifiers = [];
+for (const entry of await readdir(frameworks, { withFileTypes: true })) {
+  if (!entry.isDirectory() || !entry.name.endsWith(".app")) continue;
+  const helper = path.join(frameworks, entry.name);
+  const result = spawnSync("/usr/bin/codesign", ["-dv", "--verbose=4", helper], { encoding: "utf8" });
+  const identifier = /^Identifier=(.+)$/m.exec(`${result.stdout ?? ""}${result.stderr ?? ""}`)?.[1]?.trim();
+  if (result.error || result.status !== 0 || !identifier
+    || identifier !== readPlistString(path.join(helper, "Contents/Info.plist"), "CFBundleIdentifier").trim()) {
+    throw new Error(`Invalid signed Helper identity: ${entry.name}`);
+  }
+  helperIdentifiers.push(identifier);
+}
+validateMacHelperIdentifiers(helperIdentifiers);
 const entitlementInspection = spawnSync(
   "/usr/bin/codesign",
   ["-d", "--entitlements", ":-", appPath],
@@ -72,6 +87,15 @@ validateMacLocationUsageDescriptions({
 });
 
 verifyNestedNativeModule(notificationPermissionModule, appExecutable);
+for (const [tool, args] of [
+  ["/usr/bin/xcrun", ["stapler", "validate", appPath]],
+  ["/usr/sbin/spctl", ["--assess", "--type", "execute", appPath]],
+]) {
+  const result = spawnSync(tool, args, { encoding: "utf8" });
+  if (result.error || result.status !== 0) {
+    throw new Error(`Production application notarization validation failed: ${result.stderr || result.stdout || result.error?.message}`);
+  }
+}
 console.log(
   `Verified signed Harness ${details.identifier} `
   + `(TeamIdentifier=${details.teamIdentifier}, CoreLocation=enabled, notification-permission=enabled)`
@@ -103,6 +127,10 @@ function verifyNestedNativeModule(modulePath, executablePath) {
 
   const appArchitectures = inspectArchitectures(executablePath);
   const moduleArchitectures = inspectArchitectures(modulePath);
+  const frameworkArchitectures = inspectArchitectures(path.join(appPath, "Contents/Frameworks/Electron Framework.framework/Electron Framework"));
+  if (appArchitectures !== "arm64 x86_64" || frameworkArchitectures !== "arm64 x86_64") {
+    throw new Error(`Production macOS releases must be Universal; found app=${appArchitectures}, framework=${frameworkArchitectures}`);
+  }
   if (appArchitectures !== moduleArchitectures) {
     throw new Error(
       `macOS notification permission module architectures ${moduleArchitectures} `

@@ -9,6 +9,7 @@ import {
   assertRuntimeFreePaths,
   assertRuntimeFreeResources,
   normalizeArchivePath,
+  resolvePackagedExecutableName,
   resolvePackagedSmokeEnvironment,
   resolvePackagedRuntimeCacheRoot,
   hasCompletedPackagedRuntimeStartup
@@ -38,7 +39,8 @@ const packagedEnvironment = resolvePackagedSmokeEnvironment(
 const layout = packagedAppLayoutFromRoot(
   configLayout.appRoot,
   platform,
-  packagedEnvironment.environment === "test" ? "arkme Test" : "arkme"
+  resolvePackagedExecutableName(packagedEnvironment.environment,
+    JSON.parse(extractFile(configLayout.appAsar, "dist/runtime-service-config.json").toString("utf8")).migrationTest === true)
 );
 assertRuntimeFreePaths([...packagedFiles]);
 const requiredPackagedFiles = [

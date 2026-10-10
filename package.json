@@ -1,10 +1,10 @@
 {
   "name": "arkme",
-  "version": "0.3.3",
-  "versionCode": 13,
+  "version": "3.0.0",
+  "versionCode": 277,
   "private": true,
   "author": "Jotmo",
-  "description": "A secure Electron desktop shell for DeepSeek Harness",
+  "description": "即我",
   "type": "module",
   "main": "dist/main.js",
   "packageManager": "pnpm@11.19.0",
@@ -29,14 +29,15 @@
     "verify:packaged": "node scripts/packaged-smoke.mjs",
     "verify:packaged-update": "electron scripts/packaged-update-config-smoke.cjs",
     "verify:mac-signature": "node scripts/verify-macos-signature.mjs",
-    "pack": "pnpm run build && electron-builder --mac --universal --dir && node scripts/verify-macos-signature.mjs release/mac-universal/arkme.app",
+    "pack": "pnpm run build && electron-builder --mac --universal --dir && node scripts/verify-macos-signature.mjs release/mac-universal/即我.app",
     "pack:test": "node scripts/run-test-packaging.mjs",
-    "dist": "pnpm run build && electron-builder --mac dmg zip --universal && node scripts/verify-macos-signature.mjs release/mac-universal/arkme.app && ARKME_PACKAGED_APP_ROOT=release/mac-universal/arkme.app node scripts/packaged-smoke.mjs --platform darwin",
+    "dist": "node scripts/build-macos-artifacts.mjs",
     "dist:test:mac": "pnpm run build:test && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --config electron-builder.test-config.cjs --mac dmg zip --universal --publish never --config.mac.forceCodeSigning=false && node scripts/packaged-smoke.mjs --platform darwin --app-root 'release-test-dynamic/mac-universal/arkme Test.app'",
     "dist:test:win": "pnpm run build:test && electron-builder --config electron-builder.test-config.cjs --win nsis zip --x64 --publish never && node scripts/packaged-smoke.mjs --platform win32 --app-root release-test-dynamic/win-unpacked",
     "dist:test:linux": "pnpm run build:test && electron-builder --config electron-builder.test-config.cjs --linux AppImage --x64 --publish never && node scripts/packaged-smoke.mjs --platform linux --app-root release-test-dynamic/linux-unpacked",
     "dist:win": "pnpm run build && pnpm run build:windows-artifacts && node scripts/packaged-smoke.mjs --platform win32",
-    "dist:linux": "pnpm run build && electron-builder --linux AppImage --x64 --publish never && node scripts/packaged-smoke.mjs --platform linux"
+    "dist:linux": "pnpm run build && electron-builder --linux AppImage --x64 --publish never && node scripts/packaged-smoke.mjs --platform linux",
+    "dist:migration:mac": "node scripts/build-macos-migration.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",
@@ -71,9 +72,10 @@
     "yaml": "2.9.0"
   },
   "build": {
-    "extends": "./electron-builder.cjs",
-    "appId": "com.senx.arkme.harness",
-    "productName": "arkme",
+    "extends": "file:electron-builder.cjs",
+    "appId": "cc.jiwo.arkme",
+    "productName": "即我",
+    "executableName": "arkme",
     "protocols": [
       {
         "name": "Arkme Extension Share",
@@ -94,32 +96,30 @@
     ],
     "npmRebuild": true,
     "mac": {
+      "executableName": "即我",
       "category": "public.app-category.developer-tools",
       "icon": "build/icon.icns",
       "entitlements": "build/entitlements.mac.plist",
       "extendInfo": {
-        "NSLocationUsageDescription": "Arkme 仅在你开启位置记录后，将当前位置写入你发送的快记快照。",
-        "NSLocationWhenInUseUsageDescription": "Arkme 仅在你开启位置记录后，将当前位置写入你发送的快记快照。"
+        "CFBundleExecutable": "arkme",
+        "NSLocationUsageDescription": "即我仅在你开启位置记录后，将当前位置写入你发送的快记快照。",
+        "NSLocationWhenInUseUsageDescription": "即我仅在你开启位置记录后，将当前位置写入你发送的快记快照。"
       },
       "forceCodeSigning": true,
       "x64ArchFiles": "**/{*darwin-arm64*,*darwin-x64*}/**/*",
       "target": [
-        {
-          "target": "dmg",
-          "arch": [
-            "universal"
-          ]
-        },
         {
           "target": "zip",
           "arch": [
             "universal"
           ]
         }
-      ]
+      ],
+      "bundleVersion": "277",
+      "minimumSystemVersion": "12.0"
     },
     "win": {
-      "icon": "build/icon.png",
+      "icon": "build/icon.ico",
       "forceCodeSigning": true,
       "signtoolOptions": {
         "certificateSha1": "00ADCF59ACCC45F4643B4A682E32620C206CE66B",
@@ -132,7 +132,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "include": "build/nsis-installer-ui.nsh"
+      "include": "build/nsis-installer-ui.nsh",
+      "guid": "14ace15a-7c69-5467-bedd-7df6c628d51a"
     },
     "linux": {
       "icon": "build/icon.png",

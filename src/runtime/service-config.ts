@@ -10,6 +10,7 @@ export type RuntimeEnvironment = "prod" | "test";
 export interface RuntimeServiceConfig {
   environment: RuntimeEnvironment;
   serviceBaseUrl: string;
+  migrationTest?: true;
 }
 
 const TRUSTED_RUNTIME_SERVICE_ORIGINS = new Set([
@@ -46,7 +47,7 @@ function parsePackagedRuntimeServiceConfig(value: unknown): RuntimeServiceConfig
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Electron runtime packaged service config is invalid");
   }
-  const document = value as { environment?: unknown; serviceBaseUrl?: unknown };
+  const document = value as { environment?: unknown; serviceBaseUrl?: unknown; migrationTest?: unknown };
   const serviceBaseUrl = resolveRuntimeServiceOrigin(
     typeof document.serviceBaseUrl === "string" ? document.serviceBaseUrl : undefined
   );
@@ -56,5 +57,8 @@ function parsePackagedRuntimeServiceConfig(value: unknown): RuntimeServiceConfig
       `Electron runtime packaged environment mismatch: expected ${environment}, received ${String(document.environment)}`
     );
   }
-  return { environment, serviceBaseUrl };
+  if (document.migrationTest !== undefined && (document.migrationTest !== true || environment !== "test")) {
+    throw new Error("Migration test configuration requires the test service and a boolean true marker");
+  }
+  return { environment, serviceBaseUrl, ...(document.migrationTest === true ? { migrationTest: true as const } : {}) };
 }

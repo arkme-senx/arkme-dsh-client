@@ -1,5 +1,7 @@
 # Arkme
 
+3.0 正式桌面外壳对外显示「即我」并使用 Flutter 2.0 图标；正式应用 ID 改为 `cc.jiwo.arkme`，协议及数据目录保持不变。每版长期 PKG+ZIP、Windows EXE 和发布验收见 [即我 3.0 迁移发布说明](docs/jiwo-3-migration-release.md)。
+
 Arkme 是一个面向 macOS、Windows 和 Linux 桌面客户端。它会在本机启动 DeepSeek Harness 服务，并在安全隔离的桌面窗口中打开 Harness Web UI。
 
 生产应用采用“轻量桌面外壳 + 按需运行环境”的结构：安装包不内置 Harness、Arkme 插件或独立 Node.js 运行时。应用首次启动时会下载并校验与当前平台匹配的运行环境，后续可直接使用已验证的本地副本。
@@ -18,7 +20,7 @@ Arkme 是一个面向 macOS、Windows 和 Linux 桌面客户端。它会在本�
 
 | 平台 | 架构 | 正式构建产物 |
 | --- | --- | --- |
-| macOS | Intel 与 Apple 芯片 | Universal `.app`、DMG、ZIP |
+| macOS | Intel 与 Apple 芯片 | Universal `.app`、PKG、ZIP |
 | Windows | x64 | NSIS 安装包、ZIP |
 | Linux | x64 glibc | AppImage |
 
@@ -75,8 +77,9 @@ pnpm run build
 
 | 平台 | 命令 | 主要输出 |
 | --- | --- | --- |
-| macOS 可运行目录 | `pnpm run pack` | `release/mac-universal/arkme.app` |
-| macOS 分发包 | `pnpm run dist` | `release/` 下的 DMG、ZIP、`latest-mac.yml` 与 blockmap |
+| macOS 可运行目录 | `pnpm run pack` | `release/mac-universal/即我.app` |
+| macOS 分发包 | `pnpm run dist` | `release/` 下同源 PKG、ZIP、`latest-mac.yml`、blockmap 与成套校验报告 |
+| macOS 单独重建 PKG | `pnpm run dist:migration:mac`（需已有签名、公证应用） | 底层构建工具；不能代替 `dist` 的成套发布校验 |
 | Windows | `pnpm run dist:win` | `release/` 下的 NSIS、ZIP、`latest.yml` 与 blockmap |
 | Linux | `pnpm run dist:linux` | `release/` 下的 AppImage |
 
@@ -84,11 +87,11 @@ macOS 和 Windows 正式构建需要可用的代码签名环境。Linux 构建�
 
 `electron-builder.cjs` 的 `afterPack` 钩子会在签名前生成 `Contents/Resources/app-update.yml`（Windows 为 `resources/app-update.yml`），包括更新器缓存目录及 Windows 发布者信息。即使使用 `--dir` 构建，也不能省略此文件：传入动态更新目录并不能免除下载器对包内配置的依赖。后续 `--prepackaged` 只允许使用已经包含该文件并完成签名的应用；禁止往已签名/公证的包里直接补文件。
 
-`packaged-smoke.mjs` 已强制验证包内更新配置，并使用安装包中真实的 `electron-updater` 初始化隔离下载缓存。也可以先单独运行 `pnpm run verify:packaged-update /绝对路径/arkme.app/Contents/Resources/app.asar`（Windows 传入对应 `resources/app.asar`），在公证和上传前尽早拒绝缺配置的包。该检查不下载安装更新，也不改变当前安装应用或用户数据。
+`packaged-smoke.mjs` 已强制验证包内更新配置，并使用安装包中真实的 `electron-updater` 初始化隔离下载缓存。也可以先单独运行 `pnpm run verify:packaged-update /绝对路径/即我.app/Contents/Resources/app.asar`（Windows 传入对应 `resources/app.asar`），在公证和上传前尽早拒绝缺配置的包。该检查不下载安装更新，也不改变当前安装应用或用户数据。
 
 发布前运行 `node scripts/verify-app-update-metadata.mjs --platform darwin --release-dir <产物目录> --update-feed-url <HTTPS更新目录>`（Windows 使用 `--platform win32`），校验更新 YAML 的版本、实际更新包的 `vc{versionCode}` 文件名、文件大小和 SHA-512。也可通过 `ARKME_UPDATE_FEED_URL` 指定更新目录；仅本地校验相对路径 YAML 时可省略目录参数。必须先把 YAML、安装包和 blockmap 一起上传到不可变目录，再把该目录（以 `/` 结尾）写入发布记录的 `update_feed_url` 并发布 stable。
 
-`download_url` 可以指向供用户下载安装的 DMG、DMG 的包装文件等；客户端不读取该字段，官网入口固定打开 `https://jiwo.cc`。APP 内更新只从 `update_feed_url` 的 YAML 选择平台安装包（macOS ZIP / Windows NSIS EXE），校验目录边界、版本身份、Version Code、大小、SHA-512，并由 updater 验证下载内容和平台签名。旧的 `--download-url` / `ARKME_UPDATE_DOWNLOAD_URL` 发布校验参数已移除，流水线应改用更新目录参数。检查失败后的重试应重新检查，不能直接下载覆盖最初的错误。
+新 macOS 正式版的 `download_url` 必须指向同一发布记录中的 PKG；客户端不读取该字段，官网入口固定打开 `https://jiwo.cc`。APP 内更新只从 `update_feed_url` 的 YAML 选择平台安装包（macOS ZIP / Windows NSIS EXE），校验目录边界、版本身份、Version Code、大小、SHA-512，并由 updater 验证下载内容和平台签名。旧的 `--download-url` / `ARKME_UPDATE_DOWNLOAD_URL` 发布校验参数已移除，流水线应改用更新目录参数。检查失败后的重试应重新检查，不能直接下载覆盖最初的错误。
 
 所有正式应用包都只包含 Electron 外壳。打包冒烟测试会验证应用资源中没有内置 Harness、Arkme 插件或独立 Node.js 运行时，并使用全新的应用数据目录验证动态运行环境安装与启动流程。
 

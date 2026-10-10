@@ -13,7 +13,7 @@ import { RUNTIME_CACHE_EPOCH, resolveRuntimeCacheRoot } from '../../dist/runtime
 import { hasCompletedPackagedRuntimeStartup } from '../packaged-smoke-lib.mjs';
 
 const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const appRoot = path.resolve(process.argv[2] || '/tmp/arkme-rc2-runtime-free-desktop/mac-arm64/arkme.app');
+const appRoot = path.resolve(process.argv[2] || '/tmp/arkme-rc2-runtime-free-desktop/mac-arm64/即我.app');
 const harnessDirectory = path.resolve(process.argv[3] || '/tmp/arkme-harness-015rc2-local');
 const pluginDirectory = path.resolve(process.argv[4] || path.join(project, '../arkme-dsh-plugin/dist/runtime-artifacts'));
 const appManifest = JSON.parse(await readFile(path.join(project, 'package.json'), 'utf8'));

@@ -9,6 +9,6 @@ module.exports = {
   artifactName: `\${productName}-\${version}-vc${versionCode}-\${arch}.\${ext}`,
   publish: [{
     provider: "generic",
-    url: "https://updates.invalid/arkme/",
+    url: "https://updates.invalid/cc.jiwo.arkme/",
   }],
 };

@@ -26,7 +26,7 @@ export function runtimeDirectory(projectRoot, architecture) {
 export function resolvePackagedAppRoot(configuredPath, projectRoot) {
   return path.resolve(
     projectRoot,
-    configuredPath ?? "release/mac-arm64/arkme.app"
+    configuredPath ?? "release/mac-arm64/即我.app"
   );
 }
 

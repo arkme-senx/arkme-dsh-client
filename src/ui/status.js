@@ -36,7 +36,7 @@ const installStage = document.querySelector("#install-stage");
 const networkWaitingFooter = document.querySelector("#network-waiting-footer");
 
 document.body.dataset.environment = environment;
-document.title = isTestEnvironment ? "arkme Test" : "arkme";
+document.title = isTestEnvironment ? "arkme Test" : "即我";
 brandName.textContent = isTestEnvironment ? "arkme Test" : "arkme";
 environmentBadge.textContent = "测试环境";
 environmentBadge.hidden = !isTestEnvironment;
