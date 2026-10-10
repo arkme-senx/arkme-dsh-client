@@ -25,10 +25,10 @@ describe("packaged shell runner", () => {
     expect(JSON.parse(result.stdout)).toEqual({
       prodMac: {
         environment: "prod",
-        applicationName: "arkme",
-        appRoot: "/project/release/mac-universal/arkme.app",
-        appAsar: "/project/release/mac-universal/arkme.app/Contents/Resources/app.asar",
-        executable: "/project/release/mac-universal/arkme.app/Contents/MacOS/arkme",
+        applicationName: "即我",
+        appRoot: "/project/release/mac-universal/即我.app",
+        appAsar: "/project/release/mac-universal/即我.app/Contents/Resources/app.asar",
+        executable: "/project/release/mac-universal/即我.app/Contents/MacOS/arkme",
         buildCommand: "pnpm pack"
       },
       testMac: {
@@ -41,7 +41,7 @@ describe("packaged shell runner", () => {
       },
       prodWindows: {
         environment: "prod",
-        applicationName: "arkme",
+        applicationName: "即我",
         appRoot: "C:\\project\\release\\win-unpacked",
         appAsar: "C:\\project\\release\\win-unpacked\\resources\\app.asar",
         executable: "C:\\project\\release\\win-unpacked\\arkme.exe",
@@ -57,7 +57,7 @@ describe("packaged shell runner", () => {
       },
       prodLinux: {
         environment: "prod",
-        applicationName: "arkme",
+        applicationName: "即我",
         appRoot: "/project/release/linux-unpacked",
         appAsar: "/project/release/linux-unpacked/resources/app.asar",
         executable: "/project/release/linux-unpacked/arkme",

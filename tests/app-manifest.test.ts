@@ -47,21 +47,28 @@ describe("application manifest", () => {
     };
     const config = await getConfig(projectRoot, null, null);
     const appInfo = {
-      productName: "arkme",
-      sanitizedProductName: "arkme",
+      productName: "即我",
+      sanitizedProductName: "即我",
       version: manifest.version,
     };
 
     for (const [architecture, extension] of [
-      ["universal", "dmg"],
+      ["universal", "pkg"],
       ["universal", "zip"],
       ["x64", "exe"],
       ["x64", "AppImage"],
     ] as const) {
       expect(expandMacro(config.artifactName, architecture, appInfo, { ext: extension })).toBe(
-        `arkme-${manifest.version}-vc${manifest.versionCode}-${architecture}.${extension}`
+        `即我-${manifest.version}-vc${manifest.versionCode}-${architecture}.${extension}`
       );
     }
+  });
+
+  test("requires a paired PKG and ZIP production pipeline without DMG", async () => {
+    const manifest = JSON.parse(await readFile(path.join(projectRoot, "package.json"), "utf8"));
+    expect(manifest.build.mac.target).toEqual([{ target: "zip", arch: ["universal"] }]);
+    expect(manifest.build.mac.minimumSystemVersion).toBe("12.0");
+    expect(manifest.scripts.dist).toContain("node scripts/build-macos-artifacts.mjs");
   });
 
   test("uses the commit-pinned production catalog outside the vendor workspace", async () => {
@@ -85,16 +92,17 @@ describe("application manifest", () => {
     );
   });
 
-  test("packages the client under the arkme product name", async () => {
+  test("packages the production client as 即我 while keeping its internal package and executable names", async () => {
     const manifest = JSON.parse(
       await readFile(path.join(projectRoot, "package.json"), "utf8")
     ) as {
       name: string;
-      build: { appId: string; productName: string };
+      build: { appId: string; productName: string; executableName: string };
     };
 
     expect(manifest.name).toBe("arkme");
-    expect(manifest.build.productName).toBe("arkme");
+    expect(manifest.build.productName).toBe("即我");
+    expect(manifest.build.executableName).toBe("arkme");
   });
 
   test("uses the public application identity", async () => {
@@ -102,7 +110,7 @@ describe("application manifest", () => {
       await readFile(path.join(projectRoot, "package.json"), "utf8")
     ) as { build: { appId: string } };
 
-    expect(manifest.build.appId).toBe("com.senx.arkme.harness");
+    expect(manifest.build.appId).toBe("cc.jiwo.arkme");
   });
 
   test("sets the Windows app identity before Electron initializes notifications", async () => {
@@ -151,10 +159,19 @@ describe("application manifest", () => {
       };
     };
 
-    const expected = "Arkme 仅在你开启位置记录后，将当前位置写入你发送的快记快照。";
+    const expected = "即我仅在你开启位置记录后，将当前位置写入你发送的快记快照。";
     expect(manifest.build.mac.extendInfo).toEqual({
+      CFBundleExecutable: "arkme",
       NSLocationUsageDescription: expected,
       NSLocationWhenInUseUsageDescription: expected
+    });
+    const testConfigModule = await import(
+      `${pathToFileURL(path.join(projectRoot, "electron-builder.test-config.cjs")).href}?location=${Date.now()}`
+    );
+    expect(testConfigModule.default.mac.extendInfo).toEqual({
+      CFBundleExecutable: "arkme Test",
+      NSLocationUsageDescription: "Arkme 仅在你开启位置记录后，将当前位置写入你发送的快记快照。",
+      NSLocationWhenInUseUsageDescription: "Arkme 仅在你开启位置记录后，将当前位置写入你发送的快记快照。"
     });
     expect(manifest.build.mac.entitlements).toBe("build/entitlements.mac.plist");
     expect(manifest.build.mac.entitlementsInherit).toBeUndefined();
@@ -186,7 +203,8 @@ describe("application manifest", () => {
     ) as { scripts: Record<string, string>; build: { linux?: { target?: unknown } } };
 
     expect(manifest.scripts["verify:packaged"]).toBe("node scripts/packaged-smoke.mjs");
-    expect(manifest.scripts.dist).toContain("node scripts/packaged-smoke.mjs --platform darwin");
+    const pipeline = await readFile(path.join(projectRoot, "scripts/build-macos-artifacts.mjs"), "utf8");
+    expect(pipeline).toContain("'scripts/packaged-smoke.mjs', '--platform', 'darwin'");
     expect(manifest.scripts["dist:win"]).toContain(
       "node scripts/packaged-smoke.mjs --platform win32"
     );
@@ -211,11 +229,10 @@ describe("application manifest", () => {
       "node scripts/verify-macos-signature.mjs"
     );
     expect(manifest.scripts.pack).toContain(
-      "node scripts/verify-macos-signature.mjs release/mac-universal/arkme.app"
+      "node scripts/verify-macos-signature.mjs release/mac-universal/即我.app"
     );
-    expect(manifest.scripts.dist).toContain(
-      "node scripts/verify-macos-signature.mjs release/mac-universal/arkme.app"
-    );
+    const pipeline = await readFile(path.join(projectRoot, "scripts/build-macos-artifacts.mjs"), "utf8");
+    expect(pipeline).toContain("'scripts/verify-macos-signature.mjs', appRoot");
     expect(manifest.build.mac.forceCodeSigning).toBe(true);
     const signatureCheck = await readFile(path.join(projectRoot, "scripts/verify-macos-signature.mjs"), "utf8");
     expect(signatureCheck).toContain("assertAppUpdateConfig");
@@ -282,10 +299,10 @@ describe("application manifest", () => {
       "utf8"
     )) as { supportedArchitectures?: { os?: string[]; cpu?: string[] } };
 
-    expect(manifest.scripts.dist).toContain("--universal");
-    expect(manifest.scripts.dist).toContain(
-      "ARKME_PACKAGED_APP_ROOT=release/mac-universal/arkme.app"
-    );
+    const pipeline = await readFile(path.join(projectRoot, "scripts/build-macos-artifacts.mjs"), "utf8");
+    expect(pipeline).toContain("'--universal'");
+    expect(pipeline).toContain("'mac-universal/即我.app'");
+    expect(pipeline).toContain("{ ARKME_PACKAGED_APP_ROOT: appRoot }");
     expect(manifest.build.beforePack).toBeUndefined();
     expect(manifest.build.mac.target.every(({ arch }) => arch.includes("universal"))).toBe(true);
     expect(manifest.build.mac.x64ArchFiles).toBe(
@@ -313,14 +330,15 @@ describe("application manifest", () => {
       scripts: Record<string, string>;
       build: {
         extraResources?: Array<{ from: string; to: string }>;
-        nsis?: { include?: string; oneClick?: boolean };
+        nsis?: { include?: string; oneClick?: boolean; guid?: string };
       };
     };
 
     expect(manifest.build.extraResources).toBeUndefined();
     expect(manifest.build.nsis).toEqual({
       oneClick: false,
-      include: "build/nsis-installer-ui.nsh"
+      include: "build/nsis-installer-ui.nsh",
+      guid: "14ace15a-7c69-5467-bedd-7df6c628d51a"
     });
     const installerUiPath = manifest.build.nsis?.include;
     if (installerUiPath === undefined) {
@@ -363,23 +381,40 @@ describe("application manifest", () => {
       await readFile(path.join(projectRoot, "package.json"), "utf8")
     ) as {
       scripts: Record<string, string>;
-      build: { appId: string; productName: string; protocols: Array<{ schemes: string[] }> };
+      build: {
+        appId: string;
+        productName: string;
+        executableName: string;
+        nsis: { guid: string };
+        protocols: Array<{ schemes: string[] }>;
+        mac: { icon: string };
+        win: { icon: string };
+        linux: { icon: string };
+      };
     };
     const testConfigModule = await import(
       `${pathToFileURL(path.join(projectRoot, "electron-builder.test-config.cjs")).href}?test=${Date.now()}`
     );
     const testBuild = testConfigModule.default as typeof manifest.build;
+    expect(testBuild.nsis.guid).not.toBe(manifest.build.nsis.guid);
 
     expect(manifest.build).toMatchObject({
-      appId: "com.senx.arkme.harness",
-      productName: "arkme",
+      appId: "cc.jiwo.arkme",
+      productName: "即我",
+      executableName: "arkme",
       protocols: [{ schemes: ["arkme"] }]
     });
     expect(testBuild).toMatchObject({
       appId: "cc.jiwo.arkme.test",
       productName: "arkme Test",
+      executableName: "arkme Test",
       protocols: [{ schemes: ["arkme-test"] }]
     });
+    expect(manifest.build.mac.icon).toBe("build/icon.icns");
+    expect(manifest.build.win.icon).toBe("build/icon.ico");
+    expect(testBuild.mac.icon).toBe("build/icon-test.icns");
+    expect(testBuild.win.icon).toBe("build/icon-test.png");
+    expect(testBuild.linux.icon).toBe("build/icon-test.png");
     expect(manifest.scripts["dist:test:mac"]).toContain("--config electron-builder.test-config.cjs");
     expect(manifest.scripts["dist:test:win"]).toContain("--config electron-builder.test-config.cjs");
     expect(manifest.scripts["dist:test:linux"]).toContain("--config electron-builder.test-config.cjs");

@@ -42,6 +42,13 @@ export function resolvePackagedSmokeEnvironment(rawConfig) {
   throw new Error(`Packaged runtime service origin is not trusted: ${String(document.serviceBaseUrl)}`);
 }
 
+export function resolvePackagedExecutableName(environment, migrationTest = false) {
+  if (environment !== "prod" && environment !== "test") {
+    throw new Error(`Unsupported packaged environment: ${String(environment)}`);
+  }
+  return environment === "test" && !migrationTest ? "arkme Test" : "arkme";
+}
+
 async function walk(root, relative = "") {
   const paths = [];
   for (const entry of await readdir(path.join(root, relative), { withFileTypes: true })) {

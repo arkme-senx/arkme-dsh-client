@@ -93,10 +93,10 @@ describe("status UI", () => {
     }));
     expect(result.searchParams.get("presentation")).toBe("runtime-network-waiting");
   });
-  test("displays arkme as the client brand", async () => {
+  test("uses 即我 for the window title while preserving the internal Arkme brand", async () => {
     const html = await readFile(path.join(projectRoot, "src", "ui", "status.html"), "utf8");
 
-    expect(html).toContain("<title>arkme</title>");
+    expect(html).toContain("<title>即我</title>");
     expect(html).toContain('aria-label="arkme"');
     expect(html).toContain('id="brand-name"');
   });

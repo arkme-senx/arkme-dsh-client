@@ -31,7 +31,7 @@ export function packagedAppLayout(projectRoot, platform = process.platform) {
     const appRoot = path.join(projectRoot, "release", "linux-unpacked");
     return packagedAppLayoutFromRoot(appRoot, platform);
   }
-  const appRoot = path.join(projectRoot, "release", "mac-arm64", "arkme.app");
+  const appRoot = path.join(projectRoot, "release", "mac-arm64", "即我.app");
   return packagedAppLayoutFromRoot(appRoot, platform);
 }
 

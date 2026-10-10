@@ -6,6 +6,7 @@ import {
   assertRuntimeFreePaths,
   assertRuntimeFreeResources,
   normalizeArchivePath,
+  resolvePackagedExecutableName,
   resolvePackagedSmokeEnvironment
 } from "../scripts/packaged-smoke-lib.mjs";
 
@@ -16,6 +17,11 @@ afterEach(async () => {
 });
 
 describe("runtime-free packaged shell", () => {
+  test("uses the stable internal executable name for production and test smoke runs", () => {
+    expect(resolvePackagedExecutableName("prod")).toBe("arkme");
+    expect(resolvePackagedExecutableName("test")).toBe("arkme Test");
+  });
+
   test("derives the smoke-test data root from the packaged service origin", () => {
     expect(resolvePackagedSmokeEnvironment(JSON.stringify({
       serviceBaseUrl: "https://api.jotmo.cc"

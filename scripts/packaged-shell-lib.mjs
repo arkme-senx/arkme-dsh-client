@@ -4,11 +4,13 @@ import { resolvePackagedSmokeEnvironment } from "./packaged-smoke-lib.mjs";
 
 const ENVIRONMENTS = {
   prod: {
-    applicationName: "arkme",
+    applicationName: "即我",
+    executableName: "arkme",
     outputDirectory: "release"
   },
   test: {
     applicationName: "arkme Test",
+    executableName: "arkme Test",
     outputDirectory: "release-test-dynamic"
   }
 };
@@ -29,7 +31,7 @@ export function resolvePackagedShell(projectRoot, environment, platform = proces
       config.outputDirectory,
       platform === "win32" ? "win-unpacked" : "linux-unpacked"
     );
-  const layout = packagedAppLayoutFromRoot(appRoot, platform, config.applicationName);
+  const layout = packagedAppLayoutFromRoot(appRoot, platform, config.executableName);
   return {
     environment,
     applicationName: config.applicationName,

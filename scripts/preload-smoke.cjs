@@ -45,6 +45,9 @@ app.whenReady().then(async () => {
     ipcMain.on("arkme-app-update:app-version", event => {
       event.returnValue = "1.2.3-smoke";
     });
+    ipcMain.on("arkme-app-update:app-version-code", event => {
+      event.returnValue = 277;
+    });
     ipcMain.on("arkme-desktop:attention-capabilities", event => {
       event.returnValue = {
         schemaVersion: 1,

@@ -21,10 +21,10 @@ describe("packaged application layout", () => {
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({
       mac: {
-        appRoot: path.join("/project", "release", "mac-arm64", "arkme.app"),
-        appAsar: path.join("/project", "release", "mac-arm64", "arkme.app", "Contents", "Resources", "app.asar"),
-        electron: path.join("/project", "release", "mac-arm64", "arkme.app", "Contents", "MacOS", "arkme"),
-        resources: path.join("/project", "release", "mac-arm64", "arkme.app", "Contents", "Resources", "app.asar.unpacked")
+        appRoot: path.join("/project", "release", "mac-arm64", "即我.app"),
+        appAsar: path.join("/project", "release", "mac-arm64", "即我.app", "Contents", "Resources", "app.asar"),
+        electron: path.join("/project", "release", "mac-arm64", "即我.app", "Contents", "MacOS", "arkme"),
+        resources: path.join("/project", "release", "mac-arm64", "即我.app", "Contents", "Resources", "app.asar.unpacked")
       },
       windows: {
         appRoot: path.win32.join("C:/project", "release", "win-unpacked"),
@@ -46,7 +46,7 @@ describe("packaged application layout", () => {
     const program = `
       import { packagedAppLayoutFromRoot } from ${JSON.stringify(moduleUrl)};
       process.stdout.write(JSON.stringify(packagedAppLayoutFromRoot(
-        "release/mac-universal/arkme.app",
+        "release/mac-universal/即我.app",
         "darwin"
       )));
     `;
@@ -56,10 +56,10 @@ describe("packaged application layout", () => {
 
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({
-      appRoot: path.resolve("release", "mac-universal", "arkme.app"),
-      appAsar: path.resolve("release", "mac-universal", "arkme.app", "Contents", "Resources", "app.asar"),
-      electron: path.resolve("release", "mac-universal", "arkme.app", "Contents", "MacOS", "arkme"),
-      resources: path.resolve("release", "mac-universal", "arkme.app", "Contents", "Resources", "app.asar.unpacked")
+      appRoot: path.resolve("release", "mac-universal", "即我.app"),
+      appAsar: path.resolve("release", "mac-universal", "即我.app", "Contents", "Resources", "app.asar"),
+      electron: path.resolve("release", "mac-universal", "即我.app", "Contents", "MacOS", "arkme"),
+      resources: path.resolve("release", "mac-universal", "即我.app", "Contents", "Resources", "app.asar.unpacked")
     });
   });
 
@@ -71,17 +71,17 @@ describe("packaged application layout", () => {
         mac: packagedAppLayoutFromRoot(
           "release-test-dynamic/mac-universal/arkme Test.app",
           "darwin",
-          "arkme Test"
+          "arkme"
         ).electron,
         windows: packagedAppLayoutFromRoot(
           "C:/project/release-test-dynamic/win-unpacked",
           "win32",
-          "arkme Test"
+          "arkme"
         ).electron,
         linux: packagedAppLayoutFromRoot(
           "/project/release-test-dynamic/linux-unpacked",
           "linux",
-          "arkme Test"
+          "arkme"
         ).electron
       }));
     `;
@@ -91,9 +91,9 @@ describe("packaged application layout", () => {
 
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({
-      mac: path.resolve("release-test-dynamic", "mac-universal", "arkme Test.app", "Contents", "MacOS", "arkme Test"),
-      windows: path.win32.resolve("C:/project/release-test-dynamic/win-unpacked", "arkme Test.exe"),
-      linux: path.resolve("/project/release-test-dynamic/linux-unpacked", "arkme Test")
+      mac: path.resolve("release-test-dynamic", "mac-universal", "arkme Test.app", "Contents", "MacOS", "arkme"),
+      windows: path.win32.resolve("C:/project/release-test-dynamic/win-unpacked", "arkme.exe"),
+      linux: path.resolve("/project/release-test-dynamic/linux-unpacked", "arkme")
     });
   });
 

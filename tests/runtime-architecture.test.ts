@@ -44,11 +44,11 @@ describe("macOS runtime architecture", () => {
   });
 
   test("allows packaged smoke verification to target the Universal app", () => {
-    expect(resolvePackagedAppRoot("release/mac-universal/arkme.app", "/project")).toBe(
-      path.join("/project", "release", "mac-universal", "arkme.app")
+    expect(resolvePackagedAppRoot("release/mac-universal/即我.app", "/project")).toBe(
+      path.join("/project", "release", "mac-universal", "即我.app")
     );
     expect(resolvePackagedAppRoot(undefined, "/project")).toBe(
-      path.join("/project", "release", "mac-arm64", "arkme.app")
+      path.join("/project", "release", "mac-arm64", "即我.app")
     );
   });
 

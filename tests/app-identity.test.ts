@@ -4,8 +4,8 @@ import { resolveArkmeAppIdentity } from "../src/app-identity.js";
 describe("Arkme application identity", () => {
   test("uses the public production application identity", () => {
     expect(resolveArkmeAppIdentity("prod")).toEqual({
-      appId: "com.senx.arkme.harness",
-      appName: "arkme",
+      appId: "cc.jiwo.arkme",
+      appName: "即我",
       protocol: "arkme"
     });
   });

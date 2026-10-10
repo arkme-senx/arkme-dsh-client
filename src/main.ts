@@ -188,7 +188,7 @@ const startupEnvironment = withStartupUpdateCheckEnvironment(
 );
 process.env[UPDATE_CHECK_ENABLED_ENV] = startupEnvironment[UPDATE_CHECK_ENABLED_ENV] ?? "1";
 const automaticUpdateChecksEnabled = isAutomaticUpdateCheckEnabled(process.env);
-const appIdentity = resolveArkmeAppIdentity(runtimeEnvironment, packagedLocalTest);
+const appIdentity = resolveArkmeAppIdentity(runtimeEnvironment, packagedLocalTest, runtimeServiceConfig.migrationTest);
 const statusHtmlPath = path.join(moduleDirectory, "ui", "status.html");
 const statusPageUrl = pathToFileURL(statusHtmlPath).href;
 const appName = appIdentity.appName;
@@ -375,6 +375,10 @@ const appUpdateNotices = new AppUpdateNoticeCoordinator({
 registerAppUpdateNoticeIpc({
   handle(channel, handler) { ipcMain.handle(channel, event => handler(appUpdateSender(event))); }
 }, appUpdateNotices);
+let installedAppVersionCode: number | undefined;
+ipcMain.on("arkme-app-update:app-version-code", event => {
+  event.returnValue = appUpdateNotices.snapshot(appUpdateSender(event)) === null ? null : installedAppVersionCode ?? null;
+});
 ipcMain.on("arkme-app-update:app-version", event => {
   event.returnValue = appUpdateNotices.snapshot(appUpdateSender(event)) === null ? "" : app.getVersion();
 });
@@ -662,6 +666,7 @@ async function bootstrap(manualRetry = false): Promise<void> {
   });
   if (mainWindow === null) createMainWindow();
   const currentVersionCode = await readAppVersionCode(path.join(app.getAppPath(), "package.json"));
+  installedAppVersionCode = currentVersionCode;
   if (appUpdateController === null) await installAppUpdateController(currentVersionCode);
   checkAppUpdateIfStale("startup");
   if (!nativeBadgeInitialized) {
@@ -1359,6 +1364,7 @@ async function installAppUpdateController(currentVersionCode: number): Promise<v
   const inAppInstallSupported = app.isPackaged
     && (target.platform === "darwin" || target.platform === "win32");
   appUpdateController = new ArkmeAppUpdateController({
+    appId: appIdentity.appId,
     currentVersion: app.getVersion(),
     currentVersionCode,
     serviceBaseUrl: runtimeServiceConfig.serviceBaseUrl,
