@@ -1,7 +1,8 @@
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { parse } from "yaml";
 import {
   arkmePluginSupportsDesktopAccountScope,
   DshAccountScopeStore
@@ -84,6 +85,85 @@ describe("DSH account scope store", () => {
     expect(logout.launch.owner).toEqual({ kind: "guest" });
     expect(logout.launch.dshHome).not.toBe(account.dshHome);
     expect(await readFile(join(account.dshHome, "account-a.marker"), "utf8")).toBe("A");
+  });
+
+  test.each(["en", "zh", "zh-Hant", "ja"])("logout carries only the %s language preference into the login screen", async locale => {
+    const userDataPath = await makeTempDirectory("arkme logout locale ");
+    const refs = ["scope_account", "scope_guest"];
+    const store = new DshAccountScopeStore(userDataPath, () => refs.shift()!);
+    await store.launch();
+    const account = (await store.reconcile({ kind: "account", userId: 42 })).launch;
+    const source = `locale:\n  preference: ${locale}\nprivate-plugin:\n  accountNote: private\n`;
+    await writeFile(join(account.dshHome, "settings.yaml"), source);
+    await writeFile(join(account.dshHome, ".credentials.yaml"), "private\n");
+
+    const logout = await store.reconcile({ kind: "guest" });
+
+    expect(parse(await readFile(join(logout.launch.dshHome, "settings.yaml"), "utf8")))
+      .toEqual({ locale: { preference: locale } });
+    await expect(readFile(join(logout.launch.dshHome, ".credentials.yaml"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(account.dshHome, "settings.yaml"), "utf8")).toBe(source);
+    const restarted = await new DshAccountScopeStore(userDataPath).launch();
+    expect(restarted.containerRef).toBe(logout.launch.containerRef);
+    expect(parse(await readFile(join(restarted.dshHome, "settings.yaml"), "utf8")))
+      .toEqual({ locale: { preference: locale } });
+  });
+
+  test("repeated logout replaces a stale guest language and preserves unrelated guest settings and comments", async () => {
+    const userDataPath = await makeTempDirectory("arkme logout locale ");
+    const refs = ["scope_account", "scope_guest"];
+    const store = new DshAccountScopeStore(userDataPath, () => refs.shift()!);
+    await store.launch();
+    const account = (await store.reconcile({ kind: "account", userId: 42 })).launch;
+    await writeFile(join(account.dshHome, "settings.yaml"), "locale:\n  preference: en\n");
+    const guest = (await store.reconcile({ kind: "guest" })).launch;
+    await writeFile(join(guest.dshHome, "settings.yaml"), "# guest settings\nlocale:\n  preference: en\ntheme:\n  preference: dark # keep\n");
+    await store.reconcile({ kind: "account", userId: 42, claimCurrentGuest: false });
+    await writeFile(join(account.dshHome, "settings.yaml"), "locale:\n  preference: zh\n");
+
+    await store.reconcile({ kind: "guest" });
+
+    const text = await readFile(join(guest.dshHome, "settings.yaml"), "utf8");
+    expect(parse(text)).toEqual({ locale: { preference: "zh" }, theme: { preference: "dark" } });
+    expect(text).toContain("# guest settings");
+    expect(text).toContain("# keep");
+  });
+
+  test("a source without an explicit language clears the stale guest preference", async () => {
+    const userDataPath = await makeTempDirectory("arkme logout locale ");
+    const refs = ["scope_account", "scope_guest"];
+    const store = new DshAccountScopeStore(userDataPath, () => refs.shift()!);
+    await store.launch();
+    const account = (await store.reconcile({ kind: "account", userId: 42 })).launch;
+    const guest = (await store.reconcile({ kind: "guest" })).launch;
+    await writeFile(join(guest.dshHome, "settings.yaml"), "locale:\n  preference: en\ntheme:\n  preference: dark\n");
+    await store.reconcile({ kind: "account", userId: 42, claimCurrentGuest: false });
+
+    await store.reconcile({ kind: "guest" });
+
+    expect(parse(await readFile(join(guest.dshHome, "settings.yaml"), "utf8")))
+      .toEqual({ locale: {}, theme: { preference: "dark" } });
+    await expect(readFile(join(account.dshHome, "settings.yaml"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("a malformed guest settings document is preserved and cannot block logout", async () => {
+    const userDataPath = await makeTempDirectory("arkme logout locale ");
+    const refs = ["scope_account", "scope_guest"];
+    const store = new DshAccountScopeStore(userDataPath, () => refs.shift()!);
+    await store.launch();
+    const account = (await store.reconcile({ kind: "account", userId: 42 })).launch;
+    const guest = (await store.reconcile({ kind: "guest" })).launch;
+    await store.reconcile({ kind: "account", userId: 42, claimCurrentGuest: false });
+    await writeFile(join(account.dshHome, "settings.yaml"), "locale:\n  preference: en\n");
+    const malformed = "locale: [unfinished\n";
+    await writeFile(join(guest.dshHome, "settings.yaml"), malformed);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect((await store.reconcile({ kind: "guest" })).launch.owner.kind).toBe("guest");
+      expect(await readFile(join(guest.dshHome, "settings.yaml"), "utf8")).toBe(malformed);
+      expect(warning).toHaveBeenCalledOnce();
+      expect(warning.mock.calls.flat().join(" ")).not.toContain(malformed);
+    } finally { warning.mockRestore(); }
   });
 
   test("account switches return to the account's prior preferred container", async () => {
