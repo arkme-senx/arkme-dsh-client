@@ -102,6 +102,8 @@
       "entitlements": "build/entitlements.mac.plist",
       "extendInfo": {
         "CFBundleExecutable": "arkme",
+        "CFBundleDevelopmentRegion": "en",
+        "CFBundleLocalizations": ["en", "zh-Hans", "zh-Hant"],
         "NSLocationUsageDescription": "即我仅在你开启位置记录后，将当前位置写入你发送的快记快照。",
         "NSLocationWhenInUseUsageDescription": "即我仅在你开启位置记录后，将当前位置写入你发送的快记快照。"
       },

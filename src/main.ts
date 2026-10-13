@@ -143,6 +143,7 @@ import {
 import { createStatusPageUrl } from "./status-url.js";
 import { DesktopAccountScopeTransitions } from "./desktop-account-scope-transition.js";
 import { lockWindowTitle } from "./window-title-policy.js";
+import { DesktopBranding, registerDesktopBrandingIpc, resolveBrandLocale } from "./desktop-branding.js";
 import { createWindowsBadgeDotImage } from "./windows-badge-icon.js";
 import {
   ElectronRuntimeManifestError,
@@ -191,7 +192,7 @@ const automaticUpdateChecksEnabled = isAutomaticUpdateCheckEnabled(process.env);
 const appIdentity = resolveArkmeAppIdentity(runtimeEnvironment, packagedLocalTest, runtimeServiceConfig.migrationTest);
 const statusHtmlPath = path.join(moduleDirectory, "ui", "status.html");
 const statusPageUrl = pathToFileURL(statusHtmlPath).href;
-const appName = appIdentity.appName;
+let appName: string = appIdentity.appName;
 const deepLinks = new ArkmeDeepLinkQueue();
 app.setName(appName);
 app.setAppUserModelId(appIdentity.appId);
@@ -386,7 +387,7 @@ ipcMain.on("arkme-app-update:app-version", event => {
 const runtimeUpdateNotices = new RuntimeUpdateNoticeCoordinator({
   getHarnessOrigin: () => activeHarnessOrigin,
   getWindow: runtimeUpdateNoticeWindow,
-  applicationName: appName,
+  get applicationName() { return appName; },
   diagnostic: (event, details) => { logDiagnostic(`runtime-update-notice-${event}`, details); },
   createNotification: ({ title, body }) => {
     if (!Notification.isSupported()) return undefined;
@@ -646,6 +647,7 @@ async function deliverPendingDeepLink(): Promise<void> {
 
 async function bootstrap(manualRetry = false): Promise<void> {
   logDiagnostic("bootstrap-start");
+  if (desktopBranding.snapshot() === null) desktopBranding.setLocale(resolveBrandLocale(app.getLocale()));
   if (!lifecycleHooksInstalled) {
     lifecycleHooksInstalled = true;
     powerMonitor.on("suspend", () => {
@@ -1496,6 +1498,23 @@ function isCurrentAppUpdateSender(event: Electron.IpcMainInvokeEvent): boolean {
     && senderFrame === event.sender.mainFrame
     && isCurrentHarnessSender(event.sender.id, senderFrame.url);
 }
+
+const desktopBranding = new DesktopBranding(appIdentity, brand => {
+  const icon = nativeImage.createFromPath(path.join(moduleDirectory, "ui", "branding", brand.icon));
+  if (icon.isEmpty()) throw new Error(`Missing bundled brand icon: ${brand.icon}`);
+  // Validate the bundled image before changing any native presentation.
+  if (process.platform === "darwin") app.dock?.setIcon(icon);
+  appName = brand.name;
+  app.setName(appName);
+  app.setAboutPanelOptions({ applicationName: appName, iconPath: path.join(moduleDirectory, "ui", "branding", brand.icon) });
+  if (mainWindow !== null && !mainWindow.isDestroyed()) mainWindow.setTitle(appName);
+  installApplicationMenu();
+});
+registerDesktopBrandingIpc<Electron.IpcMainInvokeEvent | Electron.IpcMainEvent>(ipcMain, desktopBranding, (event, write) => {
+  const sender = appUpdateSender(event);
+  if (!sender.isMainFrame || sender.webContentsId !== mainWindow?.webContents.id) return false;
+  return isCurrentHarnessSender(sender.webContentsId, sender.url) || (!write && sender.url.split("?")[0] === statusPageUrl);
+}, error => { logDiagnostic("desktop-branding-failed", error); });
 
 const conversationWindows = installConversationWindowIpc({
   main: () => mainWindow,

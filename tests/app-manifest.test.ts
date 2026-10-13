@@ -162,6 +162,8 @@ describe("application manifest", () => {
     const expected = "即我仅在你开启位置记录后，将当前位置写入你发送的快记快照。";
     expect(manifest.build.mac.extendInfo).toEqual({
       CFBundleExecutable: "arkme",
+      CFBundleDevelopmentRegion: "en",
+      CFBundleLocalizations: ["en", "zh-Hans", "zh-Hant"],
       NSLocationUsageDescription: expected,
       NSLocationWhenInUseUsageDescription: expected
     });
@@ -170,6 +172,8 @@ describe("application manifest", () => {
     );
     expect(testConfigModule.default.mac.extendInfo).toEqual({
       CFBundleExecutable: "arkme Test",
+      CFBundleDevelopmentRegion: "en",
+      CFBundleLocalizations: ["en", "zh-Hans", "zh-Hant"],
       NSLocationUsageDescription: "Arkme 仅在你开启位置记录后，将当前位置写入你发送的快记快照。",
       NSLocationWhenInUseUsageDescription: "Arkme 仅在你开启位置记录后，将当前位置写入你发送的快记快照。"
     });

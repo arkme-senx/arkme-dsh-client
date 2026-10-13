@@ -12,6 +12,8 @@ interface FakeElement {
   hidden: boolean;
   textContent: string;
   value: number;
+  src?: string;
+  setAttribute(name: string, value: string): void;
 }
 
 interface RenderedStatus {
@@ -34,14 +36,15 @@ function parseInitialElements(html: string): Map<string, FakeElement> {
         dataset: {},
         hidden: /\shidden(?:\s|>|=)/.test(tag),
         textContent: "",
-        value: 0
+        value: 0,
+        setAttribute() {}
       });
     }
   }
   return elements;
 }
 
-async function renderStatus(search: string): Promise<RenderedStatus> {
+async function renderStatus(search: string, brand?: { name: string; icon: string }): Promise<RenderedStatus> {
   const [html, script] = await Promise.all([
     readFile(path.join(projectRoot, "src", "ui", "status.html"), "utf8"),
     readFile(path.join(projectRoot, "src", "ui", "status.js"), "utf8")
@@ -65,6 +68,7 @@ async function renderStatus(search: string): Promise<RenderedStatus> {
     },
     window: {
       location: { search },
+      arkmeDesktop: { branding: { current: brand } },
       arkmeRuntimeStatus: {
         onProgress(listener: typeof runtimeProgressListener) {
           runtimeProgressListener = listener;
@@ -93,17 +97,17 @@ describe("status UI", () => {
     }));
     expect(result.searchParams.get("presentation")).toBe("runtime-network-waiting");
   });
-  test("uses 即我 for the window title while preserving the internal Arkme brand", async () => {
+  test("uses a consistent default brand before the native snapshot arrives", async () => {
     const html = await readFile(path.join(projectRoot, "src", "ui", "status.html"), "utf8");
 
     expect(html).toContain("<title>即我</title>");
-    expect(html).toContain('aria-label="arkme"');
+    expect(html).toContain('aria-label="即我"');
     expect(html).toContain('id="brand-name"');
   });
 
   test("shows the approved test identity without changing production startup copy", async () => {
     const production = await renderStatus("?kind=starting&environment=prod");
-    expect(production.elements.get("brand-name")?.textContent).toBe("arkme");
+    expect(production.elements.get("brand-name")?.textContent).toBe("即我");
     expect(production.elements.get("environment-badge")?.hidden).toBe(true);
     expect(production.elements.get("message")?.textContent).toBe("正在启动本地 Harness 服务");
 
@@ -114,13 +118,21 @@ describe("status UI", () => {
     expect(testing.elements.get("message")?.textContent).toBe("正在准备测试环境运行服务");
   });
 
-  test("loads the Arkme logo before the startup brand title", async () => {
+  test("loads a bundled logo before the startup brand title", async () => {
     const html = await readFile(path.join(projectRoot, "src", "ui", "status.html"), "utf8");
-    const logo = await readFile(path.join(projectRoot, "src", "ui", "arkme-logo.svg"), "utf8");
+    const logo = await readFile(path.join(projectRoot, "src", "ui", "branding", "jiwo.png"));
 
     expect(html).toContain("img-src 'self'");
-    expect(html).toContain('<img class="brand-logo" src="./arkme-logo.svg" alt="" />');
-    expect(logo).toContain('<svg');
+    expect(html).toContain('src="./branding/jiwo.png"');
+    expect(logo.subarray(1, 4).toString()).toBe("PNG");
+  });
+
+  test("uses the current native language and ignores unrecognized image paths", async () => {
+    const english = await renderStatus("?kind=starting", { name: "Arkme", icon: "arkme.png" });
+    expect(english.elements.get("brand-name")?.textContent).toBe("Arkme");
+    expect(english.elements.get("brand-logo")?.src).toBe("./branding/arkme.png");
+    const invalid = await renderStatus("?kind=starting", { name: "Arkme", icon: "../../private" });
+    expect(invalid.elements.get("brand-logo")?.src).toBeUndefined();
   });
 
   test("declares a restrictive content security policy and controlled actions", async () => {

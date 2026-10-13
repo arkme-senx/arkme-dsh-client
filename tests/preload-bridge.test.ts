@@ -242,6 +242,7 @@ describe("desktop notification preload", () => {
       "arkme:desktop-notification:permission-state",
       "arkme-desktop:attention-capabilities",
       "arkme-runtime:page-ready-nonce",
+      "arkme-desktop:branding-snapshot",
       "arkme-app-update:app-version",
       "arkme-app-update:app-version-code"
     ]);
@@ -787,6 +788,18 @@ it("readiness bridge uses the main-owned document nonce and exposes no nonce arg
   expect(unauthorized.sendCalls.some(call => call.channel === "arkme-runtime:page-ready")).toBe(false);
 });
 describe("desktop device preload", () => {
+  it("exposes only a versioned language command for branding", async () => {
+    const { exposed, invokeCalls, syncCalls } = await executePreload("test");
+    const desktop = exposed.arkmeDesktop as { branding: { schemaVersion: number; setLocale(locale: unknown): Promise<boolean> } };
+    expect(desktop.branding.schemaVersion).toBe(1);
+    expect(Object.isFrozen(desktop.branding)).toBe(true);
+    await desktop.branding.setLocale("en");
+    expect(invokeCalls).toContainEqual({ channel: "arkme-desktop:branding-locale", args: ["en"] });
+    const count = invokeCalls.length;
+    expect(await desktop.branding.setLocale({ locale: "zh", icon: "/arbitrary/file" })).toBe(false);
+    expect(invokeCalls).toHaveLength(count);
+    expect(syncCalls).toContainEqual({ channel: "arkme-desktop:branding-snapshot", args: [] });
+  });
   it("exposes the device snapshot through the bounded main-process reader", async () => {
     const { exposed, invokeCalls } = await executePreload("test");
     const desktop = exposed.arkmeDesktop as { device: { snapshot(): Promise<unknown> } };
