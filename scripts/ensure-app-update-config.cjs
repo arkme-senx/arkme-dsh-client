@@ -2,6 +2,7 @@ const { writeFile } = require("node:fs/promises");
 const { createRequire } = require("node:module");
 const path = require("node:path");
 const { stringify } = require("yaml");
+const localizeMacosBundle = require("./localize-macos-bundle.cjs");
 
 function assertAppUpdateConfig(config) {
   if (config?.provider !== "generic" || typeof config.url !== "string") {
@@ -18,6 +19,7 @@ function assertAppUpdateConfig(config) {
 }
 
 async function ensureAppUpdateConfig(context) {
+  await localizeMacosBundle(context);
   if (context.electronPlatformName !== "darwin" && context.electronPlatformName !== "win32") return;
   // electron-builder skips its own update-config hook for --dir builds. Write
   // the same builder-generated config for every desktop target, BEFORE signing.

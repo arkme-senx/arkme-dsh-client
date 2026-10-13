@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { inheritGuestLocale } from "./dsh-guest-locale.js";
 
 export type DshAccountIdentity =
   | { kind: "guest" }
@@ -187,6 +188,9 @@ export class DshAccountScopeStore {
     if (registry.containers[containerRef] === undefined) {
       const now = Date.now();
       registry.containers[containerRef] = { owner: targetOwner, createdAtMillis: now, updatedAtMillis: now };
+    }
+    if (current.owner.kind === "account" && targetOwner.kind === "guest") {
+      await inheritGuestLocale(current.dshHome, this.paths(containerRef, targetOwner).dshHome);
     }
     registry.activeContainerRef = containerRef;
     if (targetOwner.kind === "account") registry.accounts[targetOwner.accountRef] = containerRef;

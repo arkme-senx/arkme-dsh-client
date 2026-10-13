@@ -498,6 +498,14 @@ let harnessReadyNotified = false;
 contextBridge.exposeInMainWorld(
   "arkmeDesktop",
   Object.freeze({
+    branding: Object.freeze({
+      schemaVersion: 1 as const,
+      current: ipcRenderer.sendSync("arkme-desktop:branding-snapshot") as unknown,
+      setLocale: async (locale: "zh" | "en"): Promise<boolean> => {
+        if (locale !== "zh" && locale !== "en") return false;
+        return await ipcRenderer.invoke("arkme-desktop:branding-locale", locale) === true;
+      }
+    }),
     ...(sessionSelectionRestore === undefined ? {} : { sessionSelection: Object.freeze({
       // Read-only trial/guest frames need the same race-free boot handoff.
       restore: (): string | null => sessionSelectionRestore ?? null,
