@@ -5,7 +5,7 @@
 ## 运行
 
 - macOS：`node scripts/device-auth-probe.mjs --check`；交互验证使用 `--authenticate`。
-- Windows：在 Visual Studio x64 Native Tools 命令行运行相同命令，需要 Node.js 与 C++ Windows SDK。
+- Windows：运行相同命令，需要 Node.js 与 Visual Studio C++ Build Tools/Windows SDK；普通终端会通过 vswhere 定位工具链。
 - `--build` 只编译，不验证身份。生成物在忽略目录 `.runtime/device-auth-probe/<platform>`。
 - 不通过命令参数、环境变量、标准输入或聊天提供密码。只在系统原生凭据窗口输入。
 
@@ -40,7 +40,11 @@ Windows 11 专业工作站版 10.0.26200 x64 上使用现有 C++ Build Tools、W
 
 本程序成功不等于生产验收完成。Electron owner 已接入 helper；Mac universal helper 编译和本地 ad-hoc 签名通过，主进程的认证取消、迟到结果、会话撤销/重锁、重启回执与实际多窗口隐藏/恢复已有测试。锁定使用独立可信原生窗口，业务窗口隐藏，Mac 辅助功能树已现场检查不暴露业务内容。
 
-正式签名安装包、Windows 完整窗口集成、错误密码/另一账户/断网的人工矩阵仍待验收。Windows 新增常规终端构建时自动定位 Visual Studio C++ Build Tools；2026-10-15 后续复测时 192.168.3.114:22 返回 No route to host，因此该构建入口尚未在 Windows 重跑。这不推翻此前当前用户密码成功的实测记录。
+2026-10-15 合并前复核：192.168.3.114 恢复连接后，在新的临时目录使用普通 SSH 终端调用构建脚本，自动发现 MSVC 并以 /W4 /WX 编译成功；已登录桌面的独立任务再次返回 available。此轮没有再次索取或输入密码。
+
+同轮 Mac 与 Windows 均执行 `tests/fixtures/device-lock-electron.cjs`：业务窗口隐藏、锁定后新建窗口隐藏、敏感标题保护、可信 preload 调用、解锁恢复，以及原有 content protection 保留全部通过。Windows 使用独立用户数据目录和官方 Electron 43.2.0，下载制品与 npm 包内 checksum 一致；一次性任务结果 0，完成后已注销。此项为源码构建的隔离原生窗口验收，仍不等于正式签名安装包验收。
+
+正式签名安装包、错误密码/另一账户/断网的人工矩阵仍待验收。之前密码成功与 Mac 取消的实测记录保留；未将本轮 available 或窗口测试替代密码验证。
 
 ## 接口依据
 

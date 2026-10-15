@@ -3,8 +3,8 @@ import Foundation
 import LocalAuthentication
 import SystemConfiguration
 
-// This executable is an isolated acceptance probe, not an application unlock
-// endpoint. Passwords are entered exclusively into Apple's authentication UI.
+// This helper is invoked exclusively by the desktop main-process owner.
+// Passwords are entered exclusively into Apple's authentication UI.
 // A successful owner-policy result does not identify the authentication method;
 // password-path acceptance additionally requires the tester to select Password.
 func finish(_ outcome: String, _ code: Int = 0) -> Never {
@@ -44,7 +44,7 @@ application.setActivationPolicy(.accessory)
 DispatchQueue.main.async {
     application.activate(ignoringOtherApps: true)
     context.evaluatePolicy(.deviceOwnerAuthentication,
-                          localizedReason: "验证电脑登录身份，以测试即我解锁。请使用电脑密码完成本次验证。") { success, error in
+                          localizedReason: "验证电脑登录身份，以解锁即我。") { success, error in
         DispatchQueue.main.async {
             if success { finish("authenticated") }
             let code = (error as NSError?)?.code ?? 0

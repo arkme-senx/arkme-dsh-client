@@ -15,6 +15,9 @@ app.setName('即我锁定验收');
   app.setPath('userData', path.join(temporary, 'user-data'));
   await app.whenReady();
   const { DeviceLockSurfaces } = await import(pathToFileURL(path.join(root, 'dist/device-lock-surfaces.js')).href);
+  // Preserve content protection owned by an existing window feature.
+  const alreadyProtected = new BrowserWindow({ show: false });
+  alreadyProtected.setContentProtection(true);
   let locked = true;
   let surfaces;
   const owner = {
@@ -53,6 +56,8 @@ app.setName('即我锁定验收');
   void first.overlay.webContents.executeJavaScript('document.querySelector("#unlock").click(); undefined').catch(() => {});
   await until(() => first.window.contentView.children.every(view => view.webContents === first.window.webContents));
   assert.equal(first.window.isVisible(), true); assert.equal(second.window.isVisible(), true);
+  assert.equal(alreadyProtected.isContentProtected(), true);
+  assert.equal(first.window.isContentProtected(), false);
   assert.equal(first.window.getTitle(), '私聊对象'); assert.equal(second.window.getTitle(), '新的敏感标题');
   console.log(JSON.stringify({ status: 'passed', checks: ['private native windows hidden including accessibility', 'new window protection', 'private title redaction', 'trusted preload IPC', 'restore after authorized unlock'], artifacts }));
 })().then(() => app.exit(0), error => { console.error(error); app.exit(1); });

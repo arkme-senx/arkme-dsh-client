@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, WebContentsView } from "electron";
 import type { DesktopDeviceLockOwner, DeviceLockSnapshot } from "./device-lock-owner.js";
 
 type ProtectedWindow = {
-  visible: boolean; title: string;
+  visible: boolean; title: string; contentProtected?: boolean;
   show: () => void; showInactive: () => void; hide: () => void; focus: () => void;
   setTitle: (title: string) => void;
 };
@@ -73,6 +73,7 @@ export class DeviceLockSurfaces {
     // An opaque native child also protects any synchronous show during window
     // construction; hide removes the underlying view from native accessibility.
     if (!this.covers.has(window)) {
+      state.contentProtected = window.isContentProtected();
       const cover = new WebContentsView({ webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
       cover.setBackgroundColor("#eeeeee"); this.covers.set(window, cover);
       window.contentView.addChildView(cover); this.resizeCover(window);
@@ -129,7 +130,11 @@ export class DeviceLockSurfaces {
     }
     for (const [window, state] of this.windows) {
       if (window.isDestroyed()) continue;
-      this.removeCover(window); window.setContentProtection(false); state.setTitle(state.title);
+      if (this.covers.has(window)) {
+        this.removeCover(window); window.setContentProtection(state.contentProtected ?? false);
+        delete state.contentProtected;
+      }
+      state.setTitle(state.title);
       if (state.visible) state.showInactive();
     }
     if (this.source !== undefined && !this.source.isDestroyed() && this.windows.get(this.source)?.visible) this.windows.get(this.source)!.focus();

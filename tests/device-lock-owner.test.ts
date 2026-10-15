@@ -39,6 +39,14 @@ function fixture(authorization: "mobile" | "native" = "mobile") {
 }
 
 describe("desktop lock authority", () => {
+  it("invalidates an earlier approval when explicitly locking an already locked app", async () => {
+    const f = fixture(); await f.owner.initialize(); await f.owner.bind(token);
+    await f.owner.lock();
+    expect(f.state().cycle).not.toBe(cycle);
+    await f.owner.synchronize();
+    expect(f.owner.protected).toBe(true);
+    expect(f.receipts.some(receipt => receipt.actual_lock === "unlocked")).toBe(false);
+  });
   it("rejects a logout from another login generation without revoking the current one", async () => {
     const f = fixture(); await f.owner.initialize(); await f.owner.bind(token);
     await expect(f.owner.logout("different_login_session_0001")).rejects.toThrow();
@@ -85,6 +93,7 @@ describe("desktop lock authority", () => {
     const f = fixture(); await f.owner.initialize(); await f.owner.bind(token); f.revoke(); await f.owner.synchronize();
     expect(f.owner.protected).toBe(true); expect(f.state().binding).toBeDefined();
     await f.owner.completeLocalLogout(); expect(f.owner.protected).toBe(false); expect(f.state().binding).toBeUndefined();
+    expect(f.state().pendingCleanup).toBeUndefined();
   });
 
   it("never newly applies a reconciling operation, even when the local wall clock is behind", async () => {

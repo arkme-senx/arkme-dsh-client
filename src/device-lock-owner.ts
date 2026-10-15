@@ -145,9 +145,10 @@ export class DesktopDeviceLockOwner {
     this.authentication?.abort(); this.fence++;
     return this.serial(async () => {
       if (!this.available || this.state.binding === undefined || this.state.ended) throw new Error("当前设备暂不能锁定，请稍后重试");
-      if (!this.state.locked) {
-        this.apply(true, randomBytes(24).toString("hex"));
-      }
+      // An explicit lock starts a new authorization cycle even if already
+      // protected. An earlier phone approval must never release this lock.
+      this.apply(true, randomBytes(24).toString("hex"));
+      this.operationState = undefined;
       this.message = "你可以在手机即我首页的设备状态栏解锁。"; this.emit();
       try { await this.flushReport(); } catch { this.message = "已在此电脑锁定，恢复连接后同步状态"; this.emit(); }
       return this.snapshot();
@@ -175,8 +176,9 @@ export class DesktopDeviceLockOwner {
 
   synchronize(): Promise<DeviceLockSnapshot> {
     if (this.syncTask !== undefined) return this.syncTask;
-    if (this.authentication !== undefined) return this.post("dispatch", {}).then(() => this.snapshot(), () => this.snapshot());
-    const task = this.serial(async () => {
+    const task = this.authentication !== undefined
+      ? this.post("dispatch", {}).then(() => this.snapshot(), () => this.snapshot())
+      : this.serial(async () => {
       if (this.state.binding === undefined || this.state.ended) { await this.retryCleanup(); return this.snapshot(); }
       if (this.token === "") {
         const b = this.state.binding;
@@ -255,7 +257,8 @@ export class DesktopDeviceLockOwner {
       const pendingCleanup = this.state.binding;
       this.token = "";
       this.save({ schemaVersion: 1, locked: false, ended: false, cycle: randomBytes(24).toString("hex"), sequence: 0, pendingCleanup });
-      this.message = ""; this.operationState = undefined; this.emit(); return this.snapshot();
+      this.message = ""; this.operationState = undefined; this.emit();
+      await this.retryCleanup(); return this.snapshot();
     });
   }
   private async retryCleanup(): Promise<void> {
