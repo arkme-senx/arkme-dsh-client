@@ -385,6 +385,11 @@ export class DesktopNotificationCoordinator {
     if (index >= 0) this.acceptedAtMillis.splice(index, 1);
   }
 
+  closeVisibleNotifications(): void {
+    for (const notification of this.active.values()) notification.close();
+    this.active.clear();
+  }
+
   private makeRoomForNotification(): void {
     while (this.active.size >= this.maxActiveNotifications) {
       const oldest = this.active.entries().next().value as [string, NativeNotification] | undefined;

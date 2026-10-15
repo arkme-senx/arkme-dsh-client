@@ -1,3 +1,8 @@
+import { DesktopDeviceLockOwner } from "./device-lock-owner.js";
+import { FileDeviceLockStore } from "./device-lock-store.js";
+import { DeviceLockSurfaces } from "./device-lock-surfaces.js";
+import { deviceAuthExecutable, runDeviceAuthentication } from "./device-lock-native-auth.js";
+import { hostname } from "node:os";
 import {installScreenshotShortcut} from './screenshot-shortcut-ipc.js';
 import { installScreenshotIpc } from './desktop-screenshot-ipc.js';
 import { installConversationWindowIpc } from './conversation-window-ipc.js';
@@ -327,10 +332,26 @@ const desktopNotifications = new DesktopNotificationCoordinator({
   )
 });
 
+let deviceLockSurfaces: DeviceLockSurfaces | undefined;
+let deviceLockProtected = false;
+const desktopDeviceLock = process.platform === "darwin" || process.platform === "win32" ? new DesktopDeviceLockOwner({
+  store: new FileDeviceLockStore(path.join(app.getPath("userData"), "device-lock.json")),
+  baseURL: runtimeServiceConfig.serviceBaseUrl,
+  platform: process.platform === "darwin" ? "macos" : "windows",
+  name: hostname().slice(0, 80),
+  available: () => runDeviceAuthentication(deviceAuthExecutable(app.isPackaged ? process.resourcesPath : moduleDirectory), "--check"),
+  authenticate: signal => runDeviceAuthentication(deviceAuthExecutable(app.isPackaged ? process.resourcesPath : moduleDirectory), "--authenticate", signal),
+  changed: snapshot => {
+    if (snapshot.locked && !deviceLockProtected) desktopNotifications.closeVisibleNotifications();
+    deviceLockProtected = snapshot.locked;
+    deviceLockSurfaces?.update(snapshot);
+  }
+}) : undefined;
+
 function createDesktopNativeNotification(
   { title, body }: { title: string; body: string }
 ): NativeNotification {
-  const notification = new Notification({ title, body });
+  const notification = new Notification(desktopDeviceLock?.protected ? { title: "即我已锁定", body: "解锁后查看新消息" } : { title, body });
   return {
     show: () => { notification.show(); },
     close: () => { notification.close(); },
@@ -577,6 +598,7 @@ function registerApplicationLifecycle(): void {
     appQuitGuard?.handleBeforeQuit(event);
   });
   app.on("will-quit", () => {
+    desktopDeviceLock?.close();
     desktopLocationPermission?.dispose();
     desktopLocationPermission = null;
   });
@@ -646,6 +668,10 @@ async function deliverPendingDeepLink(): Promise<void> {
 }
 
 async function bootstrap(manualRetry = false): Promise<void> {
+  if (desktopDeviceLock !== undefined && deviceLockSurfaces === undefined) {
+    deviceLockSurfaces = new DeviceLockSurfaces(desktopDeviceLock, path.join(moduleDirectory, "device-lock-preload.cjs"), path.join(moduleDirectory, "ui", "device-lock.html"));
+    void desktopDeviceLock.initialize();
+  }
   logDiagnostic("bootstrap-start");
   if (desktopBranding.snapshot() === null) desktopBranding.setLocale(resolveBrandLocale(app.getLocale()));
   if (!lifecycleHooksInstalled) {
@@ -686,7 +712,8 @@ async function bootstrap(manualRetry = false): Promise<void> {
       notificationSupported: desktopNotificationCapability,
       badges: nativeBadges,
       lifecycle: () => ({ resumeGeneration: desktopResumeGeneration, suspended: desktopSuspended }),
-      accountScopes: desktopAccountScopes
+      accountScopes: desktopAccountScopes,
+      ...(desktopDeviceLock === undefined ? {} : { deviceLock: desktopDeviceLock })
     });
     logDiagnostic("desktop-capability-bridge-started", { badgeMode: nativeBadges.mode });
   }
@@ -776,6 +803,7 @@ async function commitDesktopAccountScope(
   }
   const result = await store.reconcile(transition.identity, {deferLegacyMigration: true});
   accountScopeTransitions.complete(transitionRef);
+  if (transition.identity.kind === "guest" && desktopDeviceLock?.snapshot().sessionEnded) await desktopDeviceLock.completeLocalLogout();
   activeAccountScope = result.launch;
   accountScopeReady = result.status === "ready";
   if (accountScopeReady) {
@@ -1555,13 +1583,13 @@ let screenshotIpcInstalled = false;
 function createMainWindow(): void {
   if (!screenshotIpcInstalled) {
     screenshotIpcInstalled = true;
-    const screenshotShortcut = installScreenshotShortcut({capture:owner=>screenshotIpc.captureClipboard(owner),main:()=>mainWindow,origin:()=>activeHarnessOrigin,allowed:id=>accountScopeReady && (id===mainWindow?.webContents.id || conversationWindows.isActive(id))});
+    const screenshotShortcut = installScreenshotShortcut({capture:owner=>screenshotIpc.captureClipboard(owner),main:()=>mainWindow,origin:()=>activeHarnessOrigin,allowed:id=>desktopDeviceLock?.protected !== true && accountScopeReady && (id===mainWindow?.webContents.id || conversationWindows.isActive(id))});
     const screenshotIpc = installScreenshotIpc({
-      blocked: screenshotShortcut.isRecording,
+      blocked: () => desktopDeviceLock?.protected === true || screenshotShortcut.isRecording(),
       main: () => mainWindow, origin: () => activeHarnessOrigin,
       scope: () => JSON.stringify([activeHarnessOrigin, activeAccountScope?.dshHome, accountScopeReady]),
       preload: () => resolveArkmePreloadPath(moduleDirectory, app.isPackaged, process.resourcesPath),
-      allowed: id => accountScopeReady && (id === mainWindow?.webContents.id || conversationWindows.isActive(id)),
+      allowed: id => desktopDeviceLock?.protected !== true && accountScopeReady && (id === mainWindow?.webContents.id || conversationWindows.isActive(id)),
     });
   }
 
@@ -1596,6 +1624,7 @@ function createMainWindow(): void {
     mainWindow.webContents.on("did-start-navigation", () => drag.cancel());
   }
   installHarnessPermissionPolicy(mainWindow.webContents.session, {
+    isDeviceLocked: () => desktopDeviceLock?.protected === true,
     getActiveHarnessOrigin: () => activeHarnessOrigin,
     getMainWebContentsId: () => {
       const window = mainWindow;
@@ -1801,6 +1830,7 @@ async function chooseWorkspace(): Promise<string | null> {
 }
 
 async function showDirectoryDialog(title: string): Promise<string | null> {
+  if (desktopDeviceLock?.protected) return null;
   const options: Electron.OpenDialogOptions = {
     title,
     buttonLabel: "使用此项目",

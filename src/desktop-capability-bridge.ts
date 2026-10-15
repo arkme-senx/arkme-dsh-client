@@ -1,3 +1,4 @@
+import type { DesktopDeviceLockOwner } from "./device-lock-owner.js";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import {
   createServer,
@@ -24,6 +25,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_MAX_CONNECTIONS = 16;
 
 export type DesktopCapabilityAction =
+  | "device.lock.status" | "device.lock.bind" | "device.lock.lock" | "device.lock.unlock" | "device.lock.sync" | "device.lock.logout" | "device.lock.cleanup"
   | "capabilities.get"
   | "lifecycle.get"
   | "notification.show"
@@ -58,6 +60,7 @@ export interface DesktopCapabilityBridge {
 }
 
 interface DesktopCapabilityBridgeOptions {
+  deviceLock?: DesktopDeviceLockOwner;
   notifications: Pick<DesktopNotificationCoordinator, "submit">;
   notificationSupported(): boolean;
   badges: Pick<NativeBadgeCoordinator, "mode" | "beginSession" | "endSession" | "applySnapshot">;
@@ -176,6 +179,7 @@ async function handleRequest(
           sessionId: activeSessionId,
           capabilities: {
             notificationShow: context.notificationSupported(),
+            ...(context.deviceLock === undefined ? {} : { deviceLock: { version: 1, supported: context.deviceLock.snapshot().supported, locked: context.deviceLock.protected } }),
             ...(context.lifecycle === undefined ? {} : { lifecycle: { version: 1 } }),
             badgeApplySnapshot: { mode: context.badges.mode },
             ...(context.accountScopes === undefined ? {} : { accountScope: { version: 1 } })
@@ -190,6 +194,34 @@ async function handleRequest(
       if (context.lifecycle === undefined) throw new BridgeHttpError(501, "unsupported");
       writeJson(response, 200, { ok: true, value: context.lifecycle() });
       return;
+    }
+
+    if (action.action.startsWith("device.lock.")) {
+      const owner = context.deviceLock;
+      if (owner === undefined) throw new BridgeHttpError(501, "unsupported");
+      if (action.action === "device.lock.bind") {
+        assertExactKeys(action.payload, ["accessToken"]);
+        if (typeof action.payload.accessToken !== "string" || action.payload.accessToken.length > 8192) throw new BridgeHttpError(400, "invalid_request");
+        writeJson(response, 200, { ok: true, value: await owner.bind(action.payload.accessToken) });
+        return;
+      }
+      if (action.action === "device.lock.logout") {
+        assertExactKeys(action.payload, ["sessionId"]);
+        if (typeof action.payload.sessionId !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(action.payload.sessionId)) throw new BridgeHttpError(400, "invalid_request");
+        writeJson(response, 200, { ok: true, value: await owner.logout(action.payload.sessionId) });
+        return;
+      }
+      assertExactKeys(action.payload, []);
+      if (action.action === "device.lock.unlock") {
+        void owner.requestUnlock().catch(() => undefined);
+        writeJson(response, 200, { ok: true, value: owner.snapshot() });
+        return;
+      }
+      const value = action.action === "device.lock.lock" ? await owner.lock()
+        : action.action === "device.lock.sync" ? await owner.synchronize()
+        : action.action === "device.lock.cleanup" ? await owner.completeLocalLogout()
+        : owner.snapshot();
+      writeJson(response, 200, { ok: true, value }); return;
     }
 
     if (action.action === "notification.show") {
@@ -378,7 +410,8 @@ function isLoopbackAddress(address: string | undefined): boolean {
 }
 
 function isDesktopCapabilityAction(value: unknown): value is DesktopCapabilityAction {
-  return value === "capabilities.get"
+  return value === "device.lock.status" || value === "device.lock.bind" || value === "device.lock.lock" || value === "device.lock.unlock" || value === "device.lock.sync" || value === "device.lock.logout" || value === "device.lock.cleanup"
+    || value === "capabilities.get"
     || value === "lifecycle.get"
     || value === "notification.show"
     || value === "badge.applySnapshot"

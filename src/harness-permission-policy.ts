@@ -24,6 +24,7 @@ export interface HarnessPermissionDiagnostic {
 export interface HarnessPermissionPolicyContext {
   getActiveHarnessOrigin: () => string | null;
   getMainWebContentsId: () => number | null;
+  isDeviceLocked?: () => boolean;
   diagnostic?: (details: HarnessPermissionDiagnostic) => void;
 }
 
@@ -112,6 +113,7 @@ export function installHarnessPermissionPolicy(
   context: HarnessPermissionPolicyContext
 ): void {
   permissionSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+    if (permission === "notifications" && context.isDeviceLocked?.()) return false;
     if (permission !== "geolocation") return permission !== "deprecated-sync-clipboard-read";
 
     const mainWebContentsId = context.getMainWebContentsId();
@@ -142,6 +144,7 @@ export function installHarnessPermissionPolicy(
   });
 
   permissionSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    if (permission === "notifications" && context.isDeviceLocked?.()) { callback(false); return; }
     if (permission !== "geolocation") {
       callback(true);
       return;

@@ -12,7 +12,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "build": "node scripts/validate-app-version-code.mjs && tsc -p tsconfig.build.json && node scripts/copy-static.mjs",
+    "build": "node scripts/validate-app-version-code.mjs && node scripts/build-device-auth.mjs && tsc -p tsconfig.build.json && node scripts/copy-static.mjs",
     "build:test": "ARKME_RUNTIME_SERVICE_BASE_URL=https://jotmo.senguo.me pnpm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
@@ -87,11 +87,13 @@
     "asarUnpack": [
       "dist/preload.cjs",
       "dist/harness-process-lifetime.js",
-      "node_modules/@arkme/macos-notification-permission/build/Release/*.node"
+      "node_modules/@arkme/macos-notification-permission/build/Release/*.node",
+      "dist/device-lock-preload.cjs"
     ],
     "files": [
       "dist/**/*",
-      "package.json"
+      "package.json",
+      "!dist/device-auth/**/*"
     ],
     "npmRebuild": true,
     "mac": {
@@ -154,6 +156,12 @@
     "electronLanguages": [
       "en-US",
       "zh-CN"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/device-auth",
+        "to": "device-auth"
+      }
     ]
   },
   "dependencies": {
