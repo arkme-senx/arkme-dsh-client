@@ -531,6 +531,9 @@ ipcMain.on("arkme-desktop:attention-capabilities", event => {
     badgeMode: nativeBadges.mode
   };
 });
+ipcMain.on("arkme-device-lock:available", event => {
+  event.returnValue = desktopDeviceLock?.snapshot().supported === true;
+});
 ipcMain.on("arkme-runtime:page-ready-nonce", event => {
   event.returnValue = harnessPageReadiness.nonce(appUpdateSender(event));
 });

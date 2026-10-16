@@ -39,6 +39,26 @@ function fixture(authorization: "mobile" | "native" = "mobile") {
 }
 
 describe("desktop lock authority", () => {
+  it.each([
+    [409, {reason: "mobile_capability_unknown"}, "尚无法确认手机即我版本，请在手机登录即我后重试"],
+    [409, {}, "设备状态已变化，请重试解锁"],
+    [503, {}, "暂时无法获取设备状态，请重试"],
+  ])("keeps protection and distinguishes command failure %s / %j", async (status, body, message) => {
+    const f = fixture("native");
+    const owner = new DesktopDeviceLockOwner({ ...f.options, fetch: async (input, init) => {
+      const route = new URL(String(input)).pathname.split("/").at(-1);
+      if (route === "command") return new Response(JSON.stringify(body), {status});
+      const response = await f.options.fetch(input, init);
+      if (route !== "dispatch") return response;
+      const value = await response.json(); delete value.data.operation;
+      return new Response(JSON.stringify(value), {status: 200, headers: response.headers});
+    }});
+    await owner.initialize(); await owner.bind(token);
+    await expect(owner.requestUnlock()).rejects.toThrow(message);
+    expect(owner.snapshot()).toMatchObject({locked: true, message});
+    expect(f.authentications()).toBe(0);
+    expect(f.receipts.some(receipt => receipt.actual_lock === "unlocked")).toBe(false);
+  });
   it("invalidates an earlier approval when explicitly locking an already locked app", async () => {
     const f = fixture(); await f.owner.initialize(); await f.owner.bind(token);
     await f.owner.lock();

@@ -30,7 +30,7 @@ await owner.lock();
 assert.equal((await desktop()).actual_lock, 'locked');
 assert.equal(owner.protected, true);
 if (env.DEVICE_LOCK_TEST_MODE === 'unknown') {
-  await assert.rejects(owner.requestUnlock());
+  await assert.rejects(owner.requestUnlock(), /尚无法确认手机即我版本/);
   assert.equal(authentications, 0);
   assert.equal(owner.protected, true);
 } else if (env.DEVICE_LOCK_TEST_MODE === 'unsupported') {

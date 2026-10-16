@@ -104,7 +104,18 @@ export class DesktopDeviceLockOwner {
       }
       this.needsCredentials = true; this.emit();
     }
-    if (!response.ok) throw new Error("暂时无法获取设备状态，请重试");
+    if (!response.ok) {
+      if (route === "command" && response.status === 409) {
+        const raw = await response.text();
+        let reason: unknown;
+        if (raw.length <= 65_536) {
+          try { reason = (JSON.parse(raw) as { reason?: unknown }).reason; } catch { /* Keep the generic failure for invalid responses. */ }
+        }
+        if (reason === "mobile_capability_unknown") throw new Error("尚无法确认手机即我版本，请在手机登录即我后重试");
+        throw new Error("设备状态已变化，请重试解锁");
+      }
+      throw new Error("暂时无法获取设备状态，请重试");
+    }
     const raw = await response.text(); if (raw.length > 65_536) throw new Error("设备响应无效");
     const result = JSON.parse(raw) as { code?: number; data?: T };
     if (result.code !== 200 || result.data === undefined) throw new Error("设备请求未完成，请重试");

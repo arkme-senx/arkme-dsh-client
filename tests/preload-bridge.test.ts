@@ -72,6 +72,7 @@ async function executePreload(
     storage?: Pick<Storage, "getItem" | "setItem" | "removeItem">;
     appSnapshot?: unknown | Promise<unknown>;
     attention?: unknown;
+    deviceLockAvailable?: unknown;
     harnessReadyNonce?: unknown;
     notificationPermission?: NotificationPermission;
     requestedNotificationPermission?: NotificationPermission;
@@ -147,6 +148,7 @@ async function executePreload(
           return true;
         }
         if (channel === "arkme-session-selection:bootstrap") return options.sessionSelection ?? null;
+        if (channel === "arkme-device-lock:available") return options.deviceLockAvailable ?? false;
         if (channel === "arkme-runtime:page-ready-nonce") return options.harnessReadyNonce ?? null;
         if (channel === "arkme-desktop:attention-capabilities") return options.attention ?? {
           schemaVersion: 1,
@@ -202,6 +204,14 @@ async function executePreload(
 }
 
 describe("desktop notification preload", () => {
+  it("publishes lock support before rendering without querying the server or exposing a lock command", async () => {
+    for (const available of [true, false, undefined, "true"]) {
+      const { exposed } = await executePreload("0.1.5-rc.2", { deviceLockAvailable: available });
+      const desktop = exposed.arkmeDesktop as { deviceLock?: { version: number } };
+      expect(desktop.deviceLock).toEqual(available === true ? { version: 1 } : undefined);
+      if (desktop.deviceLock) expect(Object.isFrozen(desktop.deviceLock)).toBe(true);
+    }
+  });
   it("forwards only the directory badge count through the dedicated bridge", async () => {
     const { exposed, invokeCalls } = await executePreload("0.1.0-rc.8");
     const bridge = exposed.arkmeDesktopNotifications as { applyDirectoryBadge(count: number): Promise<boolean> };
@@ -243,6 +253,7 @@ describe("desktop notification preload", () => {
       "arkme-desktop:attention-capabilities",
       "arkme-runtime:page-ready-nonce",
       "arkme-desktop:branding-snapshot",
+      "arkme-device-lock:available",
       "arkme-app-update:app-version",
       "arkme-app-update:app-version-code"
     ]);
