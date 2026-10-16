@@ -5,7 +5,7 @@ let fm = FileManager.default
 let suiteRoot = URL(fileURLWithPath: CommandLine.arguments[1])
 let oldID = "com.senqisi.Jotmo"
 let arkmeID = "com.senx.arkme.harness"
-let newID = "cc.jiwo.arkme"
+let newID = "com.senqisi.Jotmo"
 
 func check(_ value: @autoclosure () throws -> Bool, _ message: String) throws {
     if try !value() { throw MigrationError(message) }
@@ -13,6 +13,9 @@ func check(_ value: @autoclosure () throws -> Bool, _ message: String) throws {
 
 final class FixtureSystem: MigrationSystem {
     var running = false
+    var invalidPaths = Set<String>()
+    var runningPaths = Set<String>()
+    var exitRequests: [URL] = []
     var beforeMove: ((URL, URL) throws -> Void)?
     var afterMove: ((URL, URL) throws -> Void)?
     var beforeRemove: ((URL) throws -> Void)?
@@ -39,7 +42,14 @@ final class FixtureSystem: MigrationSystem {
     var capacity: UInt64 = 100_000_000
     var replaceStaging = false
     var afterInspection: ((URL, AppIdentity) throws -> Void)?
+    var deepInspections: [(URL, AppIdentity)] = []
     func inspect(_ url: URL) throws -> AppIdentity {
+        if invalidPaths.contains(url.path) { throw MigrationError("resource fork, Finder information, or similar detritus not allowed") }
+        let info = try inspectMetadata(url)
+        deepInspections.append((url, info))
+        return info
+    }
+    func inspectMetadata(_ url: URL) throws -> AppIdentity {
         if failInstalledValidation && url == target { throw MigrationError("installed signature invalid") }
         let identity = try JSONDecoder().decode(AppIdentity.self, from: Data(contentsOf: url.appendingPathComponent("identity.json")))
         try afterInspection?(url, identity)
@@ -57,7 +67,11 @@ final class FixtureSystem: MigrationSystem {
             try fm.copyItem(at: file, to: target.appendingPathComponent(file.lastPathComponent))
         }
     }
+    func assertStopped(_ applications: [URL]) throws {
+        if applications.contains(where: { runningPaths.contains($0.path) }) { throw MigrationError("application still running") }
+    }
     func requireStopped(_ applications: [URL]) throws {
+        exitRequests += applications
         if running { throw MigrationError("application still running") }
     }
     func freeBytes(at url: URL) throws -> UInt64 { capacity }
@@ -84,7 +98,7 @@ struct Fixture {
     }
     func app(_ url: URL, id: String, version: String, build: Int, team: String = "TEAM", store: Bool = false) throws {
         try fm.createDirectory(at: url, withIntermediateDirectories: true)
-        let identity = AppIdentity(bundleID: id, teamID: team, version: version, build: build, executable: "arkme", appStore: store)
+        let identity = AppIdentity(bundleID: id, teamID: team, version: version, build: build, executable: (version.hasPrefix("2.") && [oldID, "com.senqisi.jotmo"].contains(id)) ? "即我" : "arkme", appStore: store)
         try JSONEncoder().encode(identity).write(to: url.appendingPathComponent("identity.json"))
         try Data("binary".utf8).write(to: url.appendingPathComponent("program"))
     }
@@ -138,6 +152,7 @@ do {
     try engine.prepare(payload: f.payload, candidates: [f.target, f.legacy])
     f.system.failInstalledValidation = true
     try fails { try engine.commit() }
+    try check(engine.recoveryStatus.contains("已完成恢复"), "successful rollback must be reported")
     f.system.failInstalledValidation = false
     try check(f.system.inspect(f.target).bundleID == oldID, "Flutter not restored")
     try check(f.system.inspect(f.legacy).build == 10, "Arkme not restored")
@@ -218,7 +233,7 @@ do {
     try f.app(f.target, id: oldID, version: "2.61.40", build: 276)
     var unrelated: URL?
     f.system.afterInspection = { url, identity in
-        if url == f.target && identity.bundleID == newID {
+        if url == f.target && identity.bundleID == newID && identity.executable == "arkme" {
             f.system.afterInspection = nil
             let transaction = try JSONDecoder().decode(MigrationJournal.self, from: Data(contentsOf: f.journal))
             let backup = URL(fileURLWithPath: transaction.entries[0].backup)
@@ -309,7 +324,9 @@ scenario("recovery interrupted during restore can run again") {
     f.system.afterMove = { _, _ in
         if !injected { injected = true; throw MigrationError("recovery interrupted") }
     }
-    try fails { try f.engine().recover() }
+    let interruptedEngine = f.engine()
+    try fails { try interruptedEngine.recover() }
+    try check(interruptedEngine.recoveryStatus.contains("未完成"), "interrupted recovery must not report success")
     try check(fm.fileExists(atPath: f.journal.path), "recovery evidence lost")
     f.system.afterMove = nil
     try f.engine().recover()
@@ -571,4 +588,63 @@ do {
     try f.app(f.target, id: "org.unrelated", version: "2.0.0", build: 270)
     try fails { try engine.commit() }
     try check(f.system.inspect(f.target).bundleID == "org.unrelated", "commit must reject changed content even with the same directory inode")
+}
+
+// New payload gets exactly one deep verification during a successful install.
+do {
+    let f = try Fixture("single-new-signature")
+    try f.app(f.target, id: oldID, version: "2.0.0", build: 270)
+    try f.engine().install(payload: f.payload, candidates: [f.target])
+    let calls = f.system.deepInspections.filter { $0.1.bundleID == newID && $0.1.executable == "arkme" }
+    try check(calls.count == 1 && calls[0].0.lastPathComponent.hasSuffix("-new.app"), "new app must be deeply verified once after staging")
+}
+// A separate helper invocation cannot reuse the previous process's trust.
+do {
+    let f = try Fixture("restart-rechecks-new-signature")
+    try f.engine().prepare(payload: f.payload, candidates: [])
+    f.system.deepInspections.removeAll()
+    try f.engine().commit()
+    try check(f.system.deepInspections.contains { $0.1.bundleID == newID && $0.1.executable == "arkme" }, "restarted commit must verify signature")
+}
+
+// Identity transition: unsupported cc identity stays untouched.
+do {
+    let f = try Fixture("unsupported-cc-identity")
+    try f.app(f.target, id: "cc.jiwo.arkme", version: "3.0.0", build: 277)
+    let original = try Data(contentsOf: f.target.appendingPathComponent("identity.json"))
+    try fails { try f.engine().install(payload: f.payload, candidates: [f.target]) }
+    try check(Data(contentsOf: f.target.appendingPathComponent("identity.json")) == original, "unsupported app changed")
+    try check(!fm.fileExists(atPath: f.journal.path), "unsupported identity started a transaction")
+}
+do {
+    let f = try Fixture("lowercase-flutter")
+    try f.app(f.target, id: "com.senqisi.jotmo", version: "2.61.34", build: 270)
+    try f.engine().install(payload: f.payload, candidates: [f.target])
+    try check(f.system.inspect(f.target).executable == "arkme", "lowercase Flutter migration failed")
+}
+
+// Unverified optional copies remain untouched and never receive exit requests.
+for scenario in ["skip-extra", "running-extra", "started-during-copy", "invalid-target"] {
+    let f = try Fixture(scenario)
+    try f.app(f.target, id: oldID, version: "2.61.34", build: 270)
+    try f.app(f.legacy, id: arkmeID, version: "0.3.0", build: 10)
+    let bad = scenario == "invalid-target" ? f.target : f.legacy
+    f.system.invalidPaths.insert(bad.path)
+    let original = try Data(contentsOf: bad.appendingPathComponent("identity.json"))
+    if scenario == "running-extra" { f.system.runningPaths.insert(bad.path) }
+    if scenario == "started-during-copy" {
+        let engine = f.engine()
+        try engine.prepare(payload: f.payload, candidates: [f.target, bad])
+        f.system.runningPaths.insert(bad.path)
+        try fails { try engine.commit() }
+        try engine.recover()
+    } else if scenario == "skip-extra" {
+        let engine = f.engine()
+        try engine.install(payload: f.payload, candidates: [f.target, bad])
+        try check(engine.migratedCandidates.map { $0.path } == [f.target.path], "skipped copy must not be unregistered")
+    } else {
+        try fails { try f.engine().install(payload: f.payload, candidates: [f.target, bad]) }
+    }
+    try check(Data(contentsOf: bad.appendingPathComponent("identity.json")) == original, "unverified copy modified")
+    try check(!f.system.exitRequests.contains(bad), "unverified copy received an exit request")
 }

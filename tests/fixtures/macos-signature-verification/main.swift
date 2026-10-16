@@ -89,7 +89,7 @@ let lock = NSLock()
 var active = 0
 var peak = 0
 let batchURLs = (0..<6).map { URL(fileURLWithPath: "/Applications/fixture-\($0).app") }
-let batchIdentity = AppIdentity(bundleID: "cc.jiwo.arkme", teamID: "TEAM", version: "3.0.0", build: 277, executable: "arkme", appStore: false)
+let batchIdentity = AppIdentity(bundleID: "com.senqisi.Jotmo", teamID: "TEAM", version: "3.0.0", build: 277, executable: "arkme", appStore: false)
 let batch = try ParallelInspection.inspect(batchURLs) { url in
     lock.lock(); active += 1; peak = max(peak, active); lock.unlock()
     defer { lock.lock(); active -= 1; lock.unlock() }
@@ -114,3 +114,35 @@ _ = try ExitVerification.verify(paths: exitPaths, anchor: custom, identity: batc
     return urls.map { _ in batchIdentity }
 }
 try check(exitInspected == [development.path], "exit verification must reuse the anchor and deduplicate paths")
+
+let testCopy = try bundle("Applications/即我测试服.app")
+let testInfo: [String: Any] = ["CFBundleIdentifier": "com.senqisi.Jotmo", "CFBundleDisplayName": "即我测试服"]
+try PropertyListSerialization.data(fromPropertyList: testInfo, format: .xml, options: 0)
+    .write(to: testCopy.appendingPathComponent("Contents/Info.plist"))
+try check(!MigrationDiscovery.isCandidate(testCopy, target: target), "explicit test copy must remain untouched")
+try check(MigrationDiscovery.isCandidate(testCopy, target: testCopy), "occupied target must never be excluded")
+let namedOnly = try bundle("Other/即我测试服.app")
+try check(MigrationDiscovery.isCandidate(namedOnly, target: target), "name alone must not bypass validation")
+let unknown = try bundle("Unknown/即我测试服.app")
+try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": "unknown", "CFBundleDisplayName": "即我测试服"], format: .xml, options: 0)
+    .write(to: unknown.appendingPathComponent("Contents/Info.plist"))
+try check(MigrationDiscovery.isCandidate(unknown, target: target), "unknown identity must not be silently excluded")
+let report = MigrationFailurePresentation.summary(stage: "检查旧应用", outcome: "恢复检查未完成", error: "Application signature verification failed", version: "3.0.1 / 278")
+try check(report.contains("SIGNATURE_CHECK_FAILED") && report.contains("恢复检查未完成") && report.contains("3.0.1 / 278"), "failure report must preserve actual outcome and release")
+try check(!report.contains("已恢复"), "unknown recovery state must not promise recovery")
+
+// Reproduce the historical package: production plist name/ID, test filename,
+// and ad-hoc signature. A normally named ad-hoc app must still be validated.
+let adhocCopy = try bundle("Adhoc/即我测试服.app")
+try FileManager.default.createDirectory(at: adhocCopy.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)
+try FileManager.default.copyItem(atPath: "/bin/echo", toPath: adhocCopy.appendingPathComponent("Contents/MacOS/fixture").path)
+try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": "com.senqisi.Jotmo", "CFBundleName": "即我", "CFBundleExecutable": "fixture", "CFBundlePackageType": "APPL"], format: .xml, options: 0)
+    .write(to: adhocCopy.appendingPathComponent("Contents/Info.plist"))
+try command("/usr/bin/codesign", ["--force", "--sign", "-", adhocCopy.path])
+try check(!MigrationDiscovery.isCandidate(adhocCopy, target: target), "known historical ad-hoc test copy must be excluded")
+let adhocProduction = adhocCopy.deletingLastPathComponent().appendingPathComponent("即我.app")
+try FileManager.default.moveItem(at: adhocCopy, to: adhocProduction)
+try check(MigrationDiscovery.isCandidate(adhocProduction, target: target), "ad-hoc signature alone must not skip a production candidate")
+let script = identityRoot.appendingPathComponent("failure.applescript")
+try MigrationFailurePresentation.dialogScript.write(to: script, atomically: true, encoding: .utf8)
+try command("/usr/bin/osacompile", ["-o", identityRoot.appendingPathComponent("failure.scpt").path, script.path])

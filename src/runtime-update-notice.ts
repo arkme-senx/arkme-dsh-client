@@ -132,7 +132,8 @@ export class RuntimeUpdateNoticeCoordinator {
   restart(senderUrl: string, messageId: unknown): boolean {
     if (!this.isCurrentHarnessPage(senderUrl) || typeof messageId !== "string") return false;
     if (
-      this.current?.kind !== "installed"
+      this.suppressedByAppUpdate
+      || this.current?.kind !== "installed"
       || this.current.messageId !== messageId
       || this.restartRequested
     ) return false;

@@ -3,7 +3,7 @@ import { resolveArkmeAppIdentity } from "../src/app-identity.js";
 
 describe("Arkme application identity", () => {
   test("uses the public production application identity", () => {
-    expect(resolveArkmeAppIdentity("prod")).toEqual({
+    expect(resolveArkmeAppIdentity("prod", false, false, "win32")).toEqual({
       appId: "cc.jiwo.arkme",
       appName: "即我",
       protocol: "arkme"
@@ -25,4 +25,8 @@ describe("Arkme application identity", () => {
       protocol: "arkme-local-test"
     });
   });
+});
+
+test("macOS production uses the iOS identity", () => {
+  expect(resolveArkmeAppIdentity("prod", false, false, "darwin").appId).toBe("com.senqisi.Jotmo");
 });

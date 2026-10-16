@@ -29,6 +29,7 @@ RequestExecutionLevel user
 !define JIWO_MIGRATION_MANIFEST "${escaped(path.join(root, 'manifest.json'))}"
 !define JIWO_VERSION_CODE 275
 !define APP_ID "cc.jiwo.arkme"
+!define isUpdated '"0" == "1"'
 !addplugindir /x86-unicode "${escaped(process.env.ARKME_TEST_NSIS_PLUGINS || '')}"
 !define UNINSTALL_FILENAME "Uninstall arkme.exe"
 !define UNINSTALL_REGISTRY_KEY "Software\\JiwoCompileFixtureNeverRun"
@@ -39,10 +40,14 @@ RequestExecutionLevel user
 !macro setInstallModePerUser
   StrCpy $installMode CurrentUser
 !macroend
+!macro setInstallModePerAllUsers
+  StrCpy $installMode all
+!macroend
 Var installMode
 Var newStartMenuLink
 Var newDesktopLink
 Var oldStartMenuLink
+Var oldShortcutName
 Var oldDesktopLink
 Var appExe
 Var keepShortcuts
@@ -58,6 +63,7 @@ ${shortcutMacros}
   File "/oname=Uninstall arkme.exe" "${escaped(path.join(root, 'payload.bin'))}"
 !macroend
 !macro setLinkVars
+  StrCpy $oldShortcutName "arkme"
   StrCpy $newStartMenuLink "$INSTDIR\\fixture-menu.lnk"
   StrCpy $newDesktopLink "$INSTDIR\\fixture-desktop.lnk"
 !macroend

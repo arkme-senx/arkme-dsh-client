@@ -44,6 +44,14 @@ try {
   Assert-True (!(Test-ArkmeNode 'C:\Program Files\nodejs\node.exe' 'node unrelated-project.js')) 'unrelated node processes must remain outside migration'
   Assert-True (!(Test-ArkmeNode 'C:\Users\me\AppData\Roaming\Arkme Harness Test\runtime-manager\node.exe' '')) 'test runtime must stay isolated'
   $programRoots=@('C:\Program Files','C:\Program Files (x86)')
+  $historical=Join-Path $env:SystemRoot 'SysWOW64\jotmo'
+  Assert-True (Test-InstallScopeCompatibility 'all' 'current' $historical 'C:\Users\me\Apps\arkme' 'C:\Users\me' $true $true $programRoots 0) 'exact historical Flutter directory must support single-user migration'
+  Assert-True (!(Test-InstallScopeCompatibility 'all' 'current' $historical 'C:\Users\me\Apps\arkme' 'C:\Users\me' $true $true $programRoots 1)) 'historical shared Flutter must remain with other user profiles'
+  Assert-True (!(Test-InstallScopeCompatibility 'all' 'current' $historical 'C:\Users\me\Apps\arkme' 'C:\Users\me' $false $true $programRoots 0)) 'historical migration requires elevation'
+  Assert-True (!(Test-InstallScopeCompatibility 'all' 'current' $historical 'C:\Users\me\Apps\arkme' 'C:\Users\me' $true $false $programRoots 0)) 'historical migration requires existing Arkme'
+  foreach ($unsupported in @($env:SystemRoot,(Join-Path $env:SystemRoot 'SysWOW64'),(Join-Path $historical 'child'),(Join-Path $env:SystemRoot 'System32\jotmo'),(Join-Path $env:SystemRoot 'SysWOW64\other'))) {
+    Assert-True (!(Test-InstallScopeCompatibility 'all' 'current' $unsupported 'C:\Users\me\Apps\arkme' 'C:\Users\me' $true $true $programRoots 0)) 'other system paths must remain blocked'
+  }
   Assert-True (Test-InstallScopeCompatibility 'all' 'current' 'C:\Program Files\jotmo' 'C:\Users\me\Apps\arkme' 'C:\Users\me' $true $true $programRoots 0) 'single-user shared Flutter must migrate to registered user Arkme'
   Assert-True (!(Test-InstallScopeCompatibility 'all' 'current' 'C:\Program Files\jotmo' 'C:\Users\me\Apps\arkme' 'C:\Users\me' $true $true $programRoots 1)) 'other user profiles must preserve shared Flutter'
   Assert-True (Test-InstallScopeCompatibility 'current' 'all' 'C:\Users\me\Apps\jotmo' 'C:\Program Files\arkme' 'C:\Users\me' $true $true $programRoots 1) 'user Flutter must migrate into existing all-user Arkme'
@@ -82,6 +90,36 @@ try {
     Assert-True $failed "unsafe path accepted: $bad"
   }
   }
+  $unchanged=[pscustomobject]@{Path='same.dll';Existed=$true;Hash=('a'*64);NewHash=('a'*64)}
+  $changed=[pscustomobject]@{Path='changed.dll';Existed=$true;Hash=('a'*64);NewHash=('b'*64)}
+  Assert-True (@(Select-OverlayEntries @($unchanged,$changed) $true).Count -eq 1) 'regular updates must skip identical assets'
+  Assert-True (@(Select-OverlayEntries @($unchanged,$changed) $false).Count -eq 2) 'migration keeps full inventory'
+  $locked=Join-Path $root 'locked.dll'
+  [IO.File]::WriteAllText($locked,'old')
+  $Destination=$root
+  $entry=[pscustomobject]@{Path='locked.dll';Existed=$true;Hash=('a'*64);NewHash=('b'*64)}
+  $handle=[IO.File]::Open($locked,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+  try {
+    $failed=$false
+    try { Assert-FilesReleased @($entry) 0 } catch { $failed=$_.Exception.Message.Contains('locked.dll') }
+    Assert-True $failed 'locked payload must fail before mutation with exact path'
+    Assert-True ([IO.File]::ReadAllText($locked) -eq 'old') 'lock preflight must preserve bytes'
+  } finally { $handle.Dispose() }
+  Assert-FilesReleased @($entry)
+  # Final destination verification still rejects changed bytes before commit.
+  function Assert-Publisher([string]$File) { if (!(Test-Path -LiteralPath $File)) { throw 'Missing signed executable fixture' } }
+  $payload=Join-Path $root 'payload-verification'
+  $null=New-Item -ItemType Directory $payload
+  [IO.File]::WriteAllText((Join-Path $payload 'arkme.exe'),'signed executable fixture')
+  [IO.File]::WriteAllText((Join-Path $payload 'app.asar'),'good')
+  $manifestPath=Join-Path $root 'payload.json'
+  $inventory=@('arkme.exe','app.asar') | ForEach-Object { [pscustomobject]@{path=$_;sha256=(Get-FileHash (Join-Path $payload $_) -Algorithm SHA256).Hash.ToLowerInvariant()} }
+  @{files=@($inventory)} | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 $manifestPath
+  Assert-Payload $payload $manifestPath
+  [IO.File]::WriteAllText((Join-Path $payload 'app.asar'),'evil')
+  $rejected=$false
+  try { Assert-Payload $payload $manifestPath } catch { $rejected=$_.Exception.Message.Contains('app.asar') }
+  Assert-True $rejected 'final verification must reject same-length payload tampering'
   Write-Output 'Windows migration filesystem transaction tests passed.'
 } finally {
   # This is a test-owned randomized temp fixture, never an installed program directory.

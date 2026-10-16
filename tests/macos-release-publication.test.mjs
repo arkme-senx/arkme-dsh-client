@@ -8,7 +8,7 @@ import { expect, test } from 'vitest';
 import { createMacReleasePublication, prepareMacReleasePublication } from '../scripts/prepare-macos-release.mjs';
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-const report = { status: 'verified', appId: 'cc.jiwo.arkme', version: '3.0.0', versionCode: 277,
+const report = { status: 'verified', appId: 'com.senqisi.Jotmo', version: '3.0.0', versionCode: 277,
   artifacts: ['pkg', 'zip'].map(kind => ({ kind, filename: `即我-3.0.0-vc277-universal.${kind}`, size: 123, sha512: 'ab'.repeat(64) })) };
 const metadata = { version: '3.0.0', path: report.artifacts[1].filename, files: [{ url: report.artifacts[1].filename, size: 123, sha512: Buffer.from('ab'.repeat(64), 'hex').toString('base64') }] };
 const input = { report, metadata, cdnBase: 'https://cdn.example/releases/', releaseNotes: '升级说明', buildCommit: 'a'.repeat(40), privateKey };
