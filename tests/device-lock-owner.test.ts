@@ -77,6 +77,15 @@ describe("desktop lock authority", () => {
     await owner.initialize(); await owner.bind(token); await owner.requestUnlock();
     expect(owner.protected).toBe(false); expect(f.state().pendingReport?.unlock_source).toBe("native");
   });
+  it("does not invent session revocation from an incomplete server response", async () => {
+    const f = fixture("native");
+    const owner = new DesktopDeviceLockOwner({...f.options, fetch: async (input, init) => {
+      if (new URL(String(input)).pathname.endsWith("/dispatch")) return new Response(JSON.stringify({code: 200, data: {}}));
+      return f.options.fetch(input, init);
+    }});
+    await owner.initialize(); await owner.bind(token); await owner.requestUnlock();
+    expect(owner.snapshot()).toMatchObject({locked: false, sessionEnded: false}); expect(f.authentications()).toBe(1);
+  });
   it("requires actual OS success offline and supports retry after cancellation", async () => {
     const f = fixture("native"); await f.owner.initialize(); await f.owner.bind(token); f.disconnect();
     f.native(Promise.resolve(false)); await f.owner.requestUnlock();

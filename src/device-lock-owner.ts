@@ -249,7 +249,8 @@ export class DesktopDeviceLockOwner {
           if (status.ended) this.endSession();
         } else {
           const current = await this.post<Device>("dispatch", {}, false, 2_000);
-          if (current.session_id !== sessionId) { this.endSession(); return; }
+          if (typeof current.session_id === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(current.session_id)
+            && current.session_id !== sessionId) { this.endSession(); return; }
           if (current.operation?.kind === "lock") await this.execute(current.operation);
         }
       } catch { /* Keep the durable local result and retry only its report later. */ }
