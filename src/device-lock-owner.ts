@@ -112,7 +112,7 @@ export class DesktopDeviceLockOwner {
           try { reason = (JSON.parse(raw) as { reason?: unknown }).reason; } catch { /* Keep the generic failure for invalid responses. */ }
         }
         if (reason === "mobile_capability_unknown") throw new Error("尚无法确认手机即我版本，请在手机登录即我后重试");
-        throw new Error("设备状态已变化，请重试解锁");
+        throw new Error("设备状态已变化，请重试");
       }
       throw new Error("暂时无法获取设备状态，请重试");
     }

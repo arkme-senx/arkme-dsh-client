@@ -41,7 +41,7 @@ function fixture(authorization: "mobile" | "native" = "mobile") {
 describe("desktop lock authority", () => {
   it.each([
     [409, {reason: "mobile_capability_unknown"}, "尚无法确认手机即我版本，请在手机登录即我后重试"],
-    [409, {}, "设备状态已变化，请重试解锁"],
+    [409, {}, "设备状态已变化，请重试"],
     [503, {}, "暂时无法获取设备状态，请重试"],
   ])("keeps protection and distinguishes command failure %s / %j", async (status, body, message) => {
     const f = fixture("native");
