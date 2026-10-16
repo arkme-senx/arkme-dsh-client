@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DesktopDeviceLockOwner } from "../src/device-lock-owner.js";
 import type { PersistedDeviceLock } from "../src/device-lock-store.js";
 
@@ -9,6 +9,7 @@ function fixture(authorization: "mobile" | "native" = "mobile") {
   let state: PersistedDeviceLock = { schemaVersion: 1, locked: true, ended: false, sequence: 1, cycle,
     binding: { userId: 1, clientId: 2, sessionId, cleanupToken: "ab".repeat(32) } };
   let serverLocked = true;
+  let disconnected = false;
   let lostReceipt = false;
   let revoked = false;
   let accessExpired = false;
@@ -18,6 +19,7 @@ function fixture(authorization: "mobile" | "native" = "mobile") {
   const operation = { id: "operation_request_0001", kind: "unlock", state: "awaiting_execution", session_id: sessionId,
     lock_cycle: cycle, authorization, expires_at: Date.now() + 100_000, dispatched_at: Date.now() };
   const network = (async (input, init) => {
+    if (disconnected) throw new TypeError("Network unavailable");
     const route = new URL(String(input)).pathname.split("/").at(-1);
     if (route === "session-status") return new Response(JSON.stringify({ code: 200, data: { ended: revoked } }), {status: 200});
     if (accessExpired && route !== "cleanup") return new Response("", {status: 401});
@@ -34,30 +36,77 @@ function fixture(authorization: "mobile" | "native" = "mobile") {
     baseURL: "https://jotmo.senguo.me", platform: "macos" as const, name: "Test Mac", available: async () => true,
     authenticate: async () => { authentications++; return await nativeResult; }, changed: () => undefined, fetch: network };
   return { owner: new DesktopDeviceLockOwner(options), options, state: () => state, operation, receipts,
+    disconnect: () => { disconnected = true; }, reconnect: () => { disconnected = false; },
     loseReceipt: () => { lostReceipt = true; }, recover: () => { lostReceipt = false; }, revoke: () => { revoked = true; }, expireAccess: () => { accessExpired = true; },
     native: (result: Promise<boolean>) => { nativeResult = result; }, authentications: () => authentications };
 }
 
+afterEach(() => vi.useRealTimers());
 describe("desktop lock authority", () => {
   it.each([
-    [409, {reason: "mobile_capability_unknown"}, "尚无法确认手机即我版本，请在手机登录即我后重试"],
-    [409, {}, "设备状态已变化，请重试"],
-    [503, {}, "暂时无法获取设备状态，请重试"],
-  ])("keeps protection and distinguishes command failure %s / %j", async (status, body, message) => {
+    [409, {reason: "mobile_capability_unknown"}], [409, {}], [503, {}],
+  ])("falls back to OS authentication on command failure %s / %j", async (status, body) => {
     const f = fixture("native");
     const owner = new DesktopDeviceLockOwner({ ...f.options, fetch: async (input, init) => {
       const route = new URL(String(input)).pathname.split("/").at(-1);
-      if (route === "command") return new Response(JSON.stringify(body), {status});
+      if (route === "command") return new Response(JSON.stringify(body), {status: Number(status)});
       const response = await f.options.fetch(input, init);
       if (route !== "dispatch") return response;
       const value = await response.json(); delete value.data.operation;
       return new Response(JSON.stringify(value), {status: 200, headers: response.headers});
     }});
-    await owner.initialize(); await owner.bind(token);
-    await expect(owner.requestUnlock()).rejects.toThrow(message);
-    expect(owner.snapshot()).toMatchObject({locked: true, message});
-    expect(f.authentications()).toBe(0);
-    expect(f.receipts.some(receipt => receipt.actual_lock === "unlocked")).toBe(false);
+    await owner.initialize(); await owner.bind(token); await owner.requestUnlock();
+    expect(owner.protected).toBe(false); expect(f.authentications()).toBe(1);
+    expect(f.receipts.at(-1)).toMatchObject({actual_lock: "unlocked", unlock_source: "native"});
+    expect(f.receipts.at(-1)).not.toHaveProperty("operation_id");
+  });
+  it("unlocks offline and preserves the native receipt through restart and reconnect", async () => {
+    const f = fixture("native"); await f.owner.initialize(); await f.owner.bind(token);
+    f.disconnect(); await f.owner.lock(); const offlineCycle = f.state().cycle;
+    await f.owner.requestUnlock();
+    expect(f.owner.protected).toBe(false); expect(f.authentications()).toBe(1);
+    expect(f.state().pendingReport).toMatchObject({actual_lock: "unlocked", unlock_source: "native", lock_cycle: offlineCycle});
+    const restored = new DesktopDeviceLockOwner(f.options); await restored.initialize();
+    expect(restored.protected).toBe(false);
+    f.reconnect(); await restored.bind(token);
+    expect(restored.protected).toBe(false); expect(f.state().pendingReport).toBeUndefined();
+  });
+  it("does not discard OS success when connectivity fails during the dialog", async () => {
+    const f = fixture("native");
+    const owner = new DesktopDeviceLockOwner({...f.options, authenticate: async () => { f.disconnect(); return true; }});
+    await owner.initialize(); await owner.bind(token); await owner.requestUnlock();
+    expect(owner.protected).toBe(false); expect(f.state().pendingReport?.unlock_source).toBe("native");
+  });
+  it("requires actual OS success offline and supports retry after cancellation", async () => {
+    const f = fixture("native"); await f.owner.initialize(); await f.owner.bind(token); f.disconnect();
+    f.native(Promise.resolve(false)); await f.owner.requestUnlock();
+    expect(f.owner.protected).toBe(true);
+    expect(f.state().pendingReport?.actual_lock).not.toBe("unlocked");
+    f.native(Promise.resolve(true)); await f.owner.requestUnlock(); expect(f.owner.protected).toBe(false);
+  });
+  it.each(["click", "timeout"])("offers native recovery when phone confirmation is stuck: %s", async mode => {
+    vi.useFakeTimers();
+    const f = fixture(); f.operation.state = "awaiting_confirmation";
+    let commanded = false;
+    const owner = new DesktopDeviceLockOwner({...f.options, fetch: async (input, init) => {
+      const route = new URL(String(input)).pathname.split("/").at(-1);
+      if (route === "command") commanded = true;
+      const response = await f.options.fetch(input, init);
+      const value = await response.json();
+      if (route === "dispatch" && !commanded) delete value.data.operation;
+      return new Response(JSON.stringify(value), {status: response.status, headers: response.headers});
+    }});
+    await owner.initialize(); await owner.bind(token); await owner.requestUnlock();
+    expect(owner.snapshot().operationState).toBe("awaiting_confirmation"); expect(f.authentications()).toBe(0);
+    if (mode === "click") await owner.requestUnlock();
+    else await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.authentications()).toBe(1); expect(owner.protected).toBe(false); owner.close();
+  });
+  it("recovers a corrupt local store only with successful OS authentication", async () => {
+    const f = fixture("native");
+    const owner = new DesktopDeviceLockOwner({...f.options, store: {read: () => {throw new Error("corrupt");}, write: f.options.store.write}});
+    await owner.initialize(); await owner.requestUnlock();
+    expect(owner.protected).toBe(false); expect(f.authentications()).toBe(1);
   });
   it("invalidates an earlier approval when explicitly locking an already locked app", async () => {
     const f = fixture(); await f.owner.initialize(); await f.owner.bind(token);
@@ -93,7 +142,7 @@ describe("desktop lock authority", () => {
     f.native(new Promise(resolve => { finish = resolve; })); await f.owner.initialize(); await f.owner.bind(token);
     const unlocking = f.owner.requestUnlock();
     while (f.authentications() === 0) await new Promise(resolve => setTimeout(resolve, 1));
-    f.revoke(); finish(true); await expect(unlocking).rejects.toThrow("session-ended");
+    f.revoke(); finish(true); await unlocking;
     expect(f.owner.snapshot()).toMatchObject({ locked: true, sessionEnded: true });
     expect(f.receipts.some(receipt => receipt.actual_lock === "unlocked")).toBe(false);
   });
@@ -104,6 +153,30 @@ describe("desktop lock authority", () => {
     while (f.authentications() === 0) await new Promise(resolve => setTimeout(resolve, 1));
     const locking = f.owner.lock(); finish(true); await unlocking; await locking;
     expect(f.owner.protected).toBe(true); expect(f.receipts.some(receipt => receipt.actual_lock === "unlocked")).toBe(false);
+  });
+  it("invalidates an open native proof before a replacement login can wait on the serial queue", async () => {
+    const f = fixture("native"); let finish!: (value: boolean) => void;
+    f.native(new Promise(resolve => { finish = resolve; })); await f.owner.initialize(); await f.owner.bind(token);
+    const unlocking = f.owner.requestUnlock();
+    while (f.authentications() === 0) await new Promise(resolve => setTimeout(resolve, 1));
+    const replacement = `e30.${Buffer.from(JSON.stringify({user_id: 1, client_id: 3, session_id: "replacement_session_0001"})).toString("base64url")}.signature`;
+    const binding = f.owner.bind(replacement); const rejected = expect(binding).rejects.toThrow("设备会话校验失败");
+    finish(true); await unlocking; await rejected;
+    expect(f.owner.protected).toBe(true); expect(f.receipts.some(r => r.actual_lock === "unlocked")).toBe(false);
+  });
+  it("does not prompt after a waiting phone request has been relocked", async () => {
+    vi.useFakeTimers();
+    const f = fixture(); f.operation.state = "awaiting_confirmation"; let commanded = false;
+    const owner = new DesktopDeviceLockOwner({...f.options, fetch: async (input, init) => {
+      const route = new URL(String(input)).pathname.split("/").at(-1);
+      if (route === "command") commanded = true;
+      const response = await f.options.fetch(input, init); const value = await response.json();
+      if (route === "dispatch" && !commanded) delete value.data.operation;
+      return new Response(JSON.stringify(value), {status: response.status, headers: response.headers});
+    }});
+    await owner.initialize(); await owner.bind(token); await owner.requestUnlock(); await owner.lock();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(owner.protected).toBe(true); expect(f.authentications()).toBe(0); owner.close();
   });
   it("never starts an unsolicited password prompt from background synchronization", async () => {
     const f = fixture("native"); await f.owner.initialize(); await f.owner.bind(token); await f.owner.synchronize();

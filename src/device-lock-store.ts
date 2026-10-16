@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync, fsyncSync } from "node:fs";
 import path from "node:path";
 
-export interface LockReport { sequence: number; actual_lock: "locked" | "unlocked"; lock_cycle: string; operation_id?: string; not_applied?: boolean }
+export interface LockReport { sequence: number; actual_lock: "locked" | "unlocked"; lock_cycle: string; operation_id?: string; not_applied?: boolean; unlock_source?: "native" }
 export interface LockBinding { userId: number; clientId: number; sessionId: string; cleanupToken: string }
 export interface PersistedDeviceLock {
   schemaVersion: 1;
@@ -35,6 +35,8 @@ export class FileDeviceLockStore implements DeviceLockStore {
     }
     if (state.pendingReport !== undefined && (state.pendingReport.sequence !== state.sequence
       || state.pendingReport.lock_cycle !== state.cycle || state.pendingReport.actual_lock !== (state.locked ? "locked" : "unlocked"))) throw new Error("锁定回执文件无效");
+    if (state.pendingReport?.unlock_source !== undefined && (state.pendingReport.unlock_source !== "native"
+      || state.pendingReport.actual_lock !== "unlocked" || state.pendingReport.operation_id !== undefined || state.pendingReport.not_applied)) throw new Error("锁定回执文件无效");
     return state;
   }
   write(state: PersistedDeviceLock): void {

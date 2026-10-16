@@ -8,11 +8,15 @@ assert.equal(target.hostname, '127.0.0.1');
 let state;
 let authentications = 0;
 let nativeSuccess = false;
+let disconnected = false;
 const owner = new DesktopDeviceLockOwner({
   store: { read: () => state, write: next => { state = structuredClone(next); } },
   baseURL: 'https://jotmo.senguo.me', platform: 'macos', name: 'Contract Mac',
   available: async () => true, authenticate: async () => { authentications++; return nativeSuccess; },
-  changed: () => {}, fetch: (url, options) => fetch(new URL(new URL(url).pathname, target), options),
+  changed: () => {}, fetch: (url, options) => {
+    if (disconnected) return Promise.reject(new TypeError("offline"));
+    return fetch(new URL(new URL(url).pathname, target), options);
+  },
 });
 const phone = async (route, body = {}) => {
   const response = await fetch(new URL(`/api/v1/device-control/${route}`, target), {
@@ -29,20 +33,24 @@ await phone('register', { platform: 'ios', name: 'Contract iPhone', capability: 
 await owner.lock();
 assert.equal((await desktop()).actual_lock, 'locked');
 assert.equal(owner.protected, true);
-if (env.DEVICE_LOCK_TEST_MODE === 'unknown') {
-  await assert.rejects(owner.requestUnlock(), /尚无法确认手机即我版本/);
-  assert.equal(authentications, 0);
-  assert.equal(owner.protected, true);
-} else if (env.DEVICE_LOCK_TEST_MODE === 'unsupported') {
+if (env.DEVICE_LOCK_TEST_MODE !== 'supported') {
   await owner.requestUnlock();
   assert.equal(authentications, 1);
   assert.equal(owner.protected, true);
   assert.equal((await desktop()).actual_lock, 'locked');
   nativeSuccess = true;
+  if (env.DEVICE_LOCK_TEST_MODE === 'network-loss') { disconnected = true; await owner.lock(); }
   await owner.requestUnlock();
   assert.equal(authentications, 2);
   assert.equal(owner.protected, false);
+  if (disconnected) {
+    assert.equal((await desktop()).actual_lock, 'locked');
+    assert.equal(state.pendingReport.unlock_source, 'native');
+    disconnected = false; await owner.synchronize();
+    assert.equal(state.pendingReport, undefined);
+  }
   assert.equal((await desktop()).actual_lock, 'unlocked');
+  if (env.DEVICE_LOCK_TEST_MODE !== 'network-loss') assert.equal((await desktop()).operation.state, 'completed');
 } else {
   await owner.requestUnlock();
   let d = await desktop();

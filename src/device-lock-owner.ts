@@ -30,6 +30,7 @@ export class DesktopDeviceLockOwner {
   private tail: Promise<unknown> = Promise.resolve();
   private syncTask: Promise<DeviceLockSnapshot> | undefined;
   private authentication: AbortController | undefined;
+  private mobileFallback: ReturnType<typeof setTimeout> | undefined;
   private fence = 0;
   private readonly now: () => number;
   private clock: { server: number; monotonic: number } | undefined;
@@ -67,21 +68,22 @@ export class DesktopDeviceLockOwner {
       actual_lock: this.state.locked ? "locked" : "unlocked", ...(operationId === undefined ? {} : { operation_id: operationId }), ...(notApplied ? { not_applied: true } : {}) };
     this.save({ ...this.state, sequence: report.sequence, pendingReport: report });
   }
-  private apply(locked: boolean, cycle: string, operationId?: string): void {
+  private apply(locked: boolean, cycle: string, operationId?: string, native = false): void {
     const sequence = this.state.sequence + 1;
     const pendingReport: LockReport = { sequence, actual_lock: locked ? "locked" : "unlocked", lock_cycle: cycle,
-      ...(operationId === undefined ? {} : { operation_id: operationId }) };
+      ...(operationId === undefined ? {} : { operation_id: operationId }), ...(native ? { unlock_source: "native" as const } : {}) };
     this.save({ ...this.state, locked, cycle, sequence, pendingReport });
   }
   private serverNow(): number { return this.clock === undefined ? this.now() : this.clock.server + performance.now() - this.clock.monotonic; }
   private endSession(): void {
+    this.clearMobileFallback();
     this.authentication?.abort(); this.fence++;
     this.save({ ...this.state, ended: true }); this.message = "此电脑已退出登录，正在清理登录信息"; this.emit();
   }
-  private async post<T>(route: string, body: object, publicRequest = false): Promise<T> {
+  private async post<T>(route: string, body: object, publicRequest = false, timeoutMs = 8_000): Promise<T> {
     const started = performance.now();
     const response = await this.fetch(new URL(`/api/${publicRequest ? "public/" : ""}v1/device-control/${route}`, this.options.baseURL), {
-      method: "POST", redirect: "error", signal: AbortSignal.timeout(8_000),
+      method: "POST", redirect: "error", signal: AbortSignal.timeout(timeoutMs),
       headers: { "Content-Type": "application/json", ...(publicRequest ? {} : { Authorization: `Bearer ${this.token}` }) }, body: JSON.stringify(body)
     });
     const serverTime = Number(response.headers.get("X-Jotmo-Server-Time"));
@@ -99,19 +101,13 @@ export class DesktopDeviceLockOwner {
       const binding = this.state.binding;
       if (binding !== undefined) {
         const result = await this.post<{ ended: boolean }>("session-status", { user_id: binding.userId, client_id: binding.clientId,
-          session_id: binding.sessionId, receipt_token: binding.cleanupToken }, true).catch(() => undefined);
+          session_id: binding.sessionId, receipt_token: binding.cleanupToken }, true, timeoutMs).catch(() => undefined);
         if (result?.ended === true) { this.endSession(); throw new Error("session-ended"); }
       }
       this.needsCredentials = true; this.emit();
     }
     if (!response.ok) {
       if (route === "command" && response.status === 409) {
-        const raw = await response.text();
-        let reason: unknown;
-        if (raw.length <= 65_536) {
-          try { reason = (JSON.parse(raw) as { reason?: unknown }).reason; } catch { /* Keep the generic failure for invalid responses. */ }
-        }
-        if (reason === "mobile_capability_unknown") throw new Error("尚无法确认手机即我版本，请在手机登录即我后重试");
         throw new Error("设备状态已变化，请重试");
       }
       throw new Error("暂时无法获取设备状态，请重试");
@@ -124,9 +120,18 @@ export class DesktopDeviceLockOwner {
 
   bind(accessToken: string): Promise<DeviceLockSnapshot> {
     if (accessToken.length > 8192 || accessToken.split(".").length !== 3) return Promise.reject(new Error("无效登录凭据"));
+    let claims: { user_id?: number; client_id?: number; session_id?: string };
+    try { claims = JSON.parse(Buffer.from(accessToken.split(".")[1]!, "base64url").toString("utf8")); }
+    catch { return Promise.reject(new Error("无效登录凭据")); }
+    if (claims === null || !Number.isSafeInteger(claims.user_id) || !Number.isSafeInteger(claims.client_id) || (claims.user_id ?? 0) <= 0 || (claims.client_id ?? 0) <= 0) return Promise.reject(new Error("无效设备身份"));
+    const bound = this.state.binding;
+    // Claims can only cancel an in-flight proof, never authorize a new login.
+    // Fence before serial queuing so an open OS dialog cannot delay account change.
+    if (bound !== undefined && (claims.user_id !== bound.userId || claims.client_id !== bound.clientId
+      || (claims.session_id !== undefined && claims.session_id !== "" && claims.session_id !== bound.sessionId))) {
+      this.clearMobileFallback(); this.authentication?.abort(); this.fence++;
+    }
     return this.serial(async () => {
-      const claims = JSON.parse(Buffer.from(accessToken.split(".")[1]!, "base64url").toString("utf8")) as { user_id?: number; client_id?: number };
-      if (!Number.isSafeInteger(claims.user_id) || !Number.isSafeInteger(claims.client_id) || (claims.user_id ?? 0) <= 0 || (claims.client_id ?? 0) <= 0) throw new Error("无效设备身份");
       this.token = accessToken;
       // The response proves the token's identity; decoded JWT fields alone never
       // authorize a new binding, release a lock or supply authentication proof.
@@ -136,6 +141,7 @@ export class DesktopDeviceLockOwner {
       const same = previous !== undefined && previous.userId === claims.user_id && previous.sessionId === device.session_id;
       this.needsCredentials = false;
       if (!same) {
+        this.clearMobileFallback();
         this.authentication?.abort(); this.fence++;
         this.save({ schemaVersion: 1, locked: this.state.locked, ended: false, cycle: randomBytes(24).toString("hex"), sequence: 0,
           binding: { userId: claims.user_id!, clientId: claims.client_id!, sessionId: device.session_id, cleanupToken: randomBytes(32).toString("hex") },
@@ -153,6 +159,7 @@ export class DesktopDeviceLockOwner {
   }
 
   lock(): Promise<DeviceLockSnapshot> {
+    this.clearMobileFallback();
     this.authentication?.abort(); this.fence++;
     return this.serial(async () => {
       if (!this.available || this.state.binding === undefined || this.state.ended) throw new Error("当前设备暂不能锁定，请稍后重试");
@@ -168,21 +175,91 @@ export class DesktopDeviceLockOwner {
 
   requestUnlock(): Promise<DeviceLockSnapshot> {
     return this.serial(async () => {
-      if (!this.state.locked || this.state.ended || this.state.binding === undefined) return this.snapshot();
-      await this.flushReport();
-      const device = await this.post<Device>("dispatch", {});
-      if (device.operation !== undefined && ["awaiting_confirmation", "awaiting_execution", "reconciling"].includes(device.operation.state)) {
-        await this.execute(device.operation, true); return this.snapshot();
+      if (!this.state.locked || this.state.ended) return this.snapshot();
+      const fence = this.fence;
+      let operation: Operation | undefined;
+      let existing = false;
+      try {
+        if (this.state.binding !== undefined && this.token !== "") {
+          await this.flushReport();
+          const device = await this.post<Device>("dispatch", {});
+          if (device.operation !== undefined && ["awaiting_confirmation", "awaiting_execution", "reconciling"].includes(device.operation.state)) {
+            operation = device.operation; existing = true;
+          } else {
+            const binding = this.state.binding;
+            await this.post<Device>("command", { client_id: binding.clientId, session_id: binding.sessionId, lock_cycle: this.state.cycle,
+              request_id: randomUUID(), kind: "unlock", expires_at: Math.floor(this.serverNow()) + 110_000 });
+            operation = (await this.post<Device>("dispatch", {})).operation;
+          }
+        }
+      } catch { /* Unavailable phone/server evidence selects local OS authentication. */ }
+      if (this.state.ended || fence !== this.fence) return this.snapshot();
+      if (operation?.authorization === "mobile" && operation.state === "awaiting_confirmation" && !existing
+        && operation.session_id === this.state.binding?.sessionId && operation.lock_cycle === this.state.cycle) {
+        await this.execute(operation); this.waitForPhone();
+      } else if (operation?.authorization === "native" || operation === undefined || operation.state === "awaiting_confirmation") {
+        await this.authenticateLocally(operation);
+      } else {
+        try { await this.execute(operation); } catch { /* Local authentication remains available if reconciliation fails. */ }
+        if (this.state.locked && !this.state.ended && fence === this.fence) await this.authenticateLocally();
       }
-      const binding = this.state.binding;
-      const result = await this.post<Device>("command", { client_id: binding.clientId, session_id: binding.sessionId, lock_cycle: this.state.cycle,
-        request_id: randomUUID(), kind: "unlock", expires_at: Math.floor(this.serverNow()) + 110_000 });
-      this.operationState = result.operation?.state;
-      this.message = result.operation?.authorization === "native" ? "请使用电脑密码验证身份" : "请在手机即我上确认解锁"; this.emit();
-      const dispatched = await this.post<Device>("dispatch", {});
-      if (dispatched.operation !== undefined) await this.execute(dispatched.operation, true);
       return this.snapshot();
     });
+  }
+
+  private clearMobileFallback(): void { clearTimeout(this.mobileFallback); this.mobileFallback = undefined; }
+  private waitForPhone(): void {
+    this.clearMobileFallback();
+    const fence = this.fence;
+    this.mobileFallback = setTimeout(() => {
+      this.mobileFallback = undefined;
+      void this.serial(async () => {
+        if (fence === this.fence && this.state.locked && !this.state.ended) await this.authenticateLocally();
+      }).catch(() => undefined);
+    }, 30_000);
+    this.mobileFallback.unref();
+  }
+
+  private async authenticateLocally(operation?: Operation): Promise<void> {
+    this.clearMobileFallback();
+    if (!this.state.locked || this.state.ended) return;
+    const fence = this.fence, cycle = this.state.cycle, sessionId = this.state.binding?.sessionId;
+    const authentication = new AbortController();
+    this.authentication = authentication;
+    this.operationState = undefined; this.message = "请使用电脑密码验证身份"; this.emit();
+    const timeout = setTimeout(() => authentication.abort(), 120_000);
+    let success = false;
+    try { success = await this.options.authenticate(authentication.signal); }
+    finally { clearTimeout(timeout); this.authentication = undefined; }
+    if (fence !== this.fence || this.state.ended || this.state.cycle !== cycle || this.state.binding?.sessionId !== sessionId) return;
+    if (!success || authentication.signal.aborted) {
+      if (operation?.authorization === "native" && operation.state === "awaiting_execution" && operation.dispatched_at > 0
+        && operation.session_id === sessionId && operation.lock_cycle === cycle) {
+        this.report(operation.id, true); await this.flushReport().catch(() => undefined);
+      }
+      this.message = "验证未完成，电脑仍保持锁定"; this.emit(); return;
+    }
+    // Observe reachable revocation/new lock intent, but network availability is
+    // not an authority over this computer's successful OS authentication.
+    if (sessionId !== undefined) {
+      try {
+        if (this.token === "") {
+          const b = this.state.binding!;
+          const status = await this.post<{ ended: boolean }>("session-status", { user_id: b.userId, client_id: b.clientId, session_id: b.sessionId, receipt_token: b.cleanupToken }, true, 2_000);
+          if (status.ended) this.endSession();
+        } else {
+          const current = await this.post<Device>("dispatch", {}, false, 2_000);
+          if (current.session_id !== sessionId) { this.endSession(); return; }
+          if (current.operation?.kind === "lock") await this.execute(current.operation);
+        }
+      } catch { /* Keep the durable local result and retry only its report later. */ }
+    }
+    if (fence !== this.fence || this.state.ended || this.state.cycle !== cycle || this.state.binding?.sessionId !== sessionId) return;
+    this.fence++;
+    this.apply(false, cycle, undefined, true); this.message = ""; this.emit();
+    // Persistence above releases the UI immediately; failure retains the exact
+    // receipt across restart instead of undoing a completed OS verification.
+    if (sessionId !== undefined) await this.flushReport().catch(() => undefined);
   }
 
   synchronize(): Promise<DeviceLockSnapshot> {
@@ -200,7 +277,7 @@ export class DesktopDeviceLockOwner {
       }
       try {
         await this.flushReport(); const d = await this.post<Device>("dispatch", {});
-        if (d.operation !== undefined) await this.execute(d.operation, false);
+        if (d.operation !== undefined) await this.execute(d.operation);
         await this.retryCleanup();
       } catch (error) { if (!this.state.ended) { this.message = error instanceof Error ? error.message : "设备状态同步失败，请重试"; this.emit(); } }
       return this.snapshot();
@@ -209,38 +286,25 @@ export class DesktopDeviceLockOwner {
     return this.syncTask;
   }
 
-  private async execute(op: Operation, allowNative: boolean): Promise<void> {
+  private async execute(op: Operation): Promise<void> {
     const binding = this.state.binding;
     this.operationState = op.state;
     if (binding === undefined || op.session_id !== binding.sessionId || op.lock_cycle !== this.state.cycle) return;
-    if (op.state === "awaiting_confirmation") { this.message = "请在手机即我上确认解锁"; this.emit(); return; }
+    if (op.state === "awaiting_confirmation") { this.message = "请在手机即我上确认解锁，也可使用电脑密码"; this.emit(); return; }
     if (op.state !== "awaiting_execution" && op.state !== "reconciling") return;
     if (op.dispatched_at <= 0 || this.clock === undefined) return;
     if (op.state === "reconciling" || op.expires_at <= this.serverNow()) { this.report(op.id, true); await this.flushReport(); this.message = "本次请求已过期，请重新解锁"; this.emit(); return; }
     if (op.kind === "lock" && op.next_lock_cycle !== undefined && /^[A-Za-z0-9_-]{16,128}$/.test(op.next_lock_cycle)) {
+      this.clearMobileFallback();
       this.authentication?.abort(); this.fence++;
       this.apply(true, op.next_lock_cycle, op.id); await this.flushReport(); return;
     }
     if (op.kind !== "unlock" || !this.state.locked) return;
     const fence = this.fence;
-    if (op.authorization === "native") {
-      if (!allowNative) return;
-      this.authentication = new AbortController();
-      const timeout = setTimeout(() => this.authentication?.abort(), Math.max(1, op.expires_at - this.serverNow()));
-      let success = false;
-      try { success = await this.options.authenticate(this.authentication.signal); }
-      finally { clearTimeout(timeout); this.authentication = undefined; }
-      if (!success || fence !== this.fence || op.expires_at <= this.serverNow()) {
-        if (fence === this.fence) { this.report(op.id, true); await this.flushReport(); }
-        this.message = "验证未完成，电脑仍保持锁定"; this.emit(); return;
-      }
-      // Recheck durable authority after the native dialog, before consuming its
-      // one-use result. Revocation/new-cycle races must leave content protected.
-      const current = await this.post<Device>("dispatch", {});
-      if (current.operation?.id !== op.id || current.operation.state !== "awaiting_execution" || current.lock_cycle !== op.lock_cycle) return;
-    } else if (op.authorization !== "mobile") return;
+    if (op.authorization !== "mobile") return;
     if (fence !== this.fence || this.state.binding?.sessionId !== op.session_id || this.state.cycle !== op.lock_cycle || op.expires_at <= this.serverNow()) return;
     this.fence++;
+    this.clearMobileFallback();
     this.apply(false, this.state.cycle, op.id); this.message = ""; this.emit(); await this.flushReport();
   }
 
@@ -251,6 +315,7 @@ export class DesktopDeviceLockOwner {
   }
 
   logout(expectedSessionId?: string): Promise<DeviceLockSnapshot> {
+    this.clearMobileFallback();
     this.authentication?.abort(); this.fence++;
     return this.serial(async () => {
       const binding = this.state.binding;
@@ -279,5 +344,5 @@ export class DesktopDeviceLockOwner {
       const { pendingCleanup: _, ...next } = this.state; this.save(next);
     } catch { /* Keep the narrowly scoped receipt until recovery, without delaying login UI. */ }
   }
-  close(): void { this.authentication?.abort(); this.fence++; this.token = ""; }
+  close(): void { this.clearMobileFallback(); this.authentication?.abort(); this.fence++; this.token = ""; }
 }
