@@ -43,6 +43,77 @@ function fixture(authorization: "mobile" | "native" = "mobile") {
 
 afterEach(() => vi.useRealTimers());
 describe("desktop lock authority", () => {
+  it("can protect and use OS recovery before the first remote binding is available", async () => {
+    const f = fixture();
+    const network = vi.fn(f.options.fetch);
+    const owner = new DesktopDeviceLockOwner({...f.options, fetch: network, store: {...f.options.store, read: () => undefined}});
+    await owner.initialize(); await owner.lock();
+    expect(owner.protected).toBe(true); expect(f.state().locked).toBe(true);
+    expect(f.state().binding).toBeUndefined(); expect(network).not.toHaveBeenCalled();
+    await owner.requestUnlock();
+    expect(f.authentications()).toBe(1); expect(owner.protected).toBe(false);
+    expect(network).not.toHaveBeenCalled(); owner.close();
+  });
+  it("locks and persists immediately while an old dispatch is blocked, then rejects its approval", async () => {
+    const f = fixture();
+    let release!: () => void;
+    let blocked = false;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const owner = new DesktopDeviceLockOwner({...f.options, fetch: async (input, init) => {
+      if (new URL(String(input)).pathname.endsWith("/dispatch") && !blocked) { blocked = true; await gate; }
+      return f.options.fetch(input, init);
+    }});
+    await owner.initialize(); await owner.bind(token);
+    const syncing = owner.synchronize();
+    await vi.waitFor(() => expect(blocked).toBe(true));
+    const locking = owner.lock();
+    expect(f.state().cycle).not.toBe(cycle);
+    expect(f.state().pendingReport?.actual_lock).toBe("locked");
+    expect(await locking).toMatchObject({locked: true});
+    expect(owner.snapshot().operationState).toBeUndefined();
+    release(); await syncing; await owner.synchronize();
+    expect(owner.protected).toBe(true);
+    expect(owner.snapshot().operationState).toBeUndefined();
+    expect(f.receipts.some(r => r.actual_lock === "unlocked")).toBe(false);
+    expect(f.receipts.at(-1)?.lock_cycle).toBe(f.state().cycle);
+    owner.close();
+  });
+  it("does not wait for a report and preserves a newer local lock through its old acknowledgement", async () => {
+    const f = fixture();
+    let release!: () => void;
+    let block = false, reporting = false;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const owner = new DesktopDeviceLockOwner({...f.options, fetch: async (input, init) => {
+      const response = await f.options.fetch(input, init);
+      if (block && new URL(String(input)).pathname.endsWith("/report")) { block = false; reporting = true; await gate; }
+      return response;
+    }});
+    await owner.initialize(); await owner.bind(token);
+    block = true; await owner.lock();
+    await vi.waitFor(() => expect(reporting).toBe(true));
+    for (let i = 0; i < 20; i++) await owner.lock();
+    const latest = f.state().pendingReport;
+    const before = f.receipts.length;
+    release(); await owner.synchronize(); await owner.synchronize();
+    expect(f.receipts.length - before).toBe(1);
+    expect(f.receipts.at(-1)).toEqual(latest);
+    expect(owner.protected).toBe(true);
+    owner.close();
+  });
+  it("invalidates an unlock queued before the new local lock without opening an OS dialog", async () => {
+    const f = fixture("native");
+    let release!: () => void, blocked = false;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const owner = new DesktopDeviceLockOwner({...f.options, fetch: async (input, init) => {
+      if (new URL(String(input)).pathname.endsWith("/dispatch") && !blocked) { blocked = true; await gate; }
+      return f.options.fetch(input, init);
+    }});
+    await owner.initialize(); await owner.bind(token);
+    const syncing = owner.synchronize(); await vi.waitFor(() => expect(blocked).toBe(true));
+    const oldUnlock = owner.requestUnlock();
+    await owner.lock(); release(); await syncing; await oldUnlock; await owner.synchronize();
+    expect(f.authentications()).toBe(0); expect(owner.protected).toBe(true); owner.close();
+  });
   it.each([
     [409, {reason: "mobile_capability_unknown"}], [409, {}], [503, {}],
   ])("falls back to OS authentication on command failure %s / %j", async (status, body) => {

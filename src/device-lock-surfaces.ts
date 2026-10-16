@@ -18,6 +18,7 @@ export class DeviceLockSurfaces {
   private guard: BrowserWindow | undefined;
   private creatingGuard = false;
   private source: BrowserWindow | undefined;
+  private protected = false;
   constructor(private readonly owner: DesktopDeviceLockOwner, private readonly preload: string, private readonly html: string) {
     app.on("web-contents-created", (_event, contents) => {
       const setWindowOpenHandler = contents.setWindowOpenHandler.bind(contents);
@@ -38,6 +39,13 @@ export class DeviceLockSurfaces {
     this.update(owner.snapshot());
   }
   private allowed(id: number): boolean { return this.guard?.webContents.id === id; }
+  revealOnActivate(window: BrowserWindow | null): void {
+    if (window === null || window.isDestroyed() || !this.windows.has(window)
+      || BrowserWindow.getAllWindows().some(item => item.isVisible())) return;
+    // Only an explicit application activation may reopen windows that were
+    // hidden while the guard was closed or unlocked in the background.
+    window.show(); window.focus();
+  }
   private attach(window: BrowserWindow): void {
     if (this.windows.has(window)) return;
     const state: ProtectedWindow = { visible: window.isVisible(), title: window.getTitle(),
@@ -70,6 +78,7 @@ export class DeviceLockSurfaces {
   }
   private protect(window: BrowserWindow): void {
     const state = this.windows.get(window); if (state === undefined || window.isDestroyed()) return;
+    if (this.covers.has(window) && !window.isVisible()) return;
     // An opaque native child also protects any synchronous show during window
     // construction; hide removes the underlying view from native accessibility.
     if (!this.covers.has(window)) {
@@ -105,25 +114,40 @@ export class DeviceLockSurfaces {
         // A failed lock renderer never restores hidden business windows.
         if (this.owner.protected && this.guard === guard) void guard.loadFile(this.html).catch(() => undefined);
       });
-      guard.once("closed", () => { if (this.guard === guard) this.guard = undefined; });
+      guard.once("closed", () => {
+        if (this.guard !== guard) return;
+        this.guard = undefined;
+        // Closing the lock window is a visibility choice, never an unlock.
+        // Background snapshots must not reopen it or resurrect private windows.
+        for (const state of this.windows.values()) state.visible = false;
+      });
       void guard.loadFile(this.html).catch(() => undefined);
     }
     if (activate) { this.guard.show(); this.guard.focus(); } else this.guard.showInactive();
   }
   update(snapshot: DeviceLockSnapshot): void {
+    const changed = this.protected !== snapshot.locked;
+    this.protected = snapshot.locked;
     if (snapshot.locked) {
       let visible: BrowserWindow | undefined;
+      let focused: BrowserWindow | undefined;
       for (const [window, state] of this.windows) {
         if (window.isDestroyed()) continue;
-        state.visible = state.visible || window.isVisible();
+        if (changed) state.visible = state.visible || window.isVisible();
         if (state.visible) visible = window;
+        if (window.isFocused()) focused = window;
         this.protect(window);
       }
-      if (visible !== undefined && this.guard === undefined) this.showGuard(visible);
+      if (changed && visible !== undefined && this.guard === undefined) this.showGuard(focused ?? visible, focused !== undefined);
       this.guard?.webContents.send("arkme-device-lock:changed", snapshot);
       return;
     }
+    // A report acknowledgement is not a visibility transition. In particular,
+    // never show/minimize/activate windows on routine unlocked refreshes.
+    if (!changed) return;
     const guard = this.guard; this.guard = undefined;
+    const restore = guard !== undefined && !guard.isDestroyed() && guard.isVisible() && !guard.isMinimized();
+    const activate = restore && guard.isFocused();
     if (guard !== undefined && !guard.isDestroyed()) {
       if (this.source !== undefined && !this.source.isDestroyed()) this.source.setBounds(guard.getBounds());
       guard.destroy();
@@ -135,9 +159,10 @@ export class DeviceLockSurfaces {
         delete state.contentProtected;
       }
       state.setTitle(state.title);
-      if (state.visible) state.showInactive();
+      if (state.visible && restore) state.showInactive();
+      else state.visible = false;
     }
-    if (this.source !== undefined && !this.source.isDestroyed() && this.windows.get(this.source)?.visible) this.windows.get(this.source)!.focus();
+    if (activate && this.source !== undefined && !this.source.isDestroyed() && this.windows.get(this.source)?.visible) this.windows.get(this.source)!.focus();
     this.source = undefined;
   }
   private removeCover(window: BrowserWindow): void {

@@ -22,7 +22,7 @@ app.setName('即我锁定验收');
   let surfaces;
   const owner = {
     get protected() { return locked; },
-    snapshot: () => ({ supported: true, locked, sessionEnded: false, needsCredentials: false, platform: 'macos', message: '你可以在手机即我首页的设备状态栏解锁。' }),
+    snapshot: () => ({ supported: true, locked, sessionEnded: false, needsCredentials: false, platform: process.platform === 'win32' ? 'windows' : 'macos', message: '你可以在手机即我首页的设备状态栏解锁。' }),
     requestUnlock: async () => { locked = false; surfaces.update(owner.snapshot()); return owner.snapshot(); }
   };
   surfaces = new DeviceLockSurfaces(owner, path.join(root, 'dist/device-lock-preload.cjs'), path.join(root, 'dist/ui/device-lock.html'));
@@ -59,5 +59,21 @@ app.setName('即我锁定验收');
   assert.equal(alreadyProtected.isContentProtected(), true);
   assert.equal(first.window.isContentProtected(), false);
   assert.equal(first.window.getTitle(), '私聊对象'); assert.equal(second.window.getTitle(), '新的敏感标题');
-  console.log(JSON.stringify({ status: 'passed', checks: ['private native windows hidden including accessibility', 'new window protection', 'private title redaction', 'trusted preload IPC', 'restore after authorized unlock'], artifacts }));
+  first.window.minimize(); await until(() => first.window.isMinimized());
+  for (let i = 0; i < 1000; i++) surfaces.update(owner.snapshot());
+  assert.equal(first.window.isMinimized(), true, 'ordinary reports must not restore minimized windows');
+  first.window.hide(); second.window.hide();
+  for (let i = 0; i < 20; i++) surfaces.update(owner.snapshot());
+  assert.equal(first.window.isVisible(), false, 'ordinary reports must not reopen hidden windows');
+  locked = true; surfaces.update(owner.snapshot());
+  first.window.show();
+  const guard = BrowserWindow.getAllWindows().find(item => ![first.window, second.window, alreadyProtected].includes(item));
+  assert.ok(guard); guard.close(); await until(() => guard.isDestroyed());
+  for (let i = 0; i < 20; i++) surfaces.update(owner.snapshot());
+  assert.equal(BrowserWindow.getAllWindows().length, 3, 'background reports must not reopen a closed guard');
+  assert.equal(first.window.isVisible(), false);
+  locked = false; surfaces.update(owner.snapshot());
+  assert.equal(first.window.isVisible(), false, 'remote unlock must respect a closed guard');
+  surfaces.revealOnActivate(first.window); assert.equal(first.window.isVisible(), true);
+  console.log(JSON.stringify({ status: 'passed', checks: ['private native windows hidden including accessibility', 'new window protection', 'private title redaction', 'trusted preload IPC', 'restore after authorized unlock', '1000 idle snapshots preserve minimized window', 'hidden and closed windows stay hidden', 'explicit reopening after unlock'], artifacts }));
 })().then(() => app.exit(0), error => { console.error(error); app.exit(1); });

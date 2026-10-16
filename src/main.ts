@@ -590,6 +590,7 @@ function registerApplicationLifecycle(): void {
 
   app.on("activate", () => {
     void refreshDesktopNotificationPermission("app-activate");
+    deviceLockSurfaces?.revealOnActivate(mainWindow);
   });
 
   app.on("window-all-closed", () => {

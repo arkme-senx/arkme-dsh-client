@@ -29,6 +29,8 @@ export class DesktopDeviceLockOwner {
   private operationState: string | undefined;
   private tail: Promise<unknown> = Promise.resolve();
   private syncTask: Promise<DeviceLockSnapshot> | undefined;
+  private syncAgain = false;
+  private closed = false;
   private authentication: AbortController | undefined;
   private mobileFallback: ReturnType<typeof setTimeout> | undefined;
   private fence = 0;
@@ -158,24 +160,26 @@ export class DesktopDeviceLockOwner {
     });
   }
 
-  lock(): Promise<DeviceLockSnapshot> {
+  async lock(): Promise<DeviceLockSnapshot> {
+    if (this.closed || !this.available || this.state.ended) throw new Error("当前设备暂不能锁定，请稍后重试");
     this.clearMobileFallback();
     this.authentication?.abort(); this.fence++;
-    return this.serial(async () => {
-      if (!this.available || this.state.binding === undefined || this.state.ended) throw new Error("当前设备暂不能锁定，请稍后重试");
-      // An explicit lock starts a new authorization cycle even if already
-      // protected. An earlier phone approval must never release this lock.
-      this.apply(true, randomBytes(24).toString("hex"));
-      this.operationState = undefined;
-      this.message = "你可以在手机即我首页的设备状态栏解锁。"; this.emit();
-      try { await this.flushReport(); } catch { this.message = "已在此电脑锁定，恢复连接后同步状态"; this.emit(); }
-      return this.snapshot();
-    });
+    // Local privacy cannot wait behind remote I/O or an open password dialog.
+    // Persist a new cycle synchronously; every older proof is fenced by it.
+    this.operationState = undefined;
+    this.message = "你可以在手机即我首页的设备状态栏解锁。";
+    this.apply(true, randomBytes(24).toString("hex"));
+    // Reuse the single reconciliation owner. At most one follow-up is needed
+    // if an in-flight report/dispatch captured the previous cycle.
+    if (this.syncTask !== undefined) this.syncAgain = true;
+    void this.synchronize().catch(() => undefined);
+    return this.snapshot();
   }
 
   requestUnlock(): Promise<DeviceLockSnapshot> {
+    const requestedFence = this.fence;
     return this.serial(async () => {
-      if (!this.state.locked || this.state.ended) return this.snapshot();
+      if (requestedFence !== this.fence || !this.state.locked || this.state.ended) return this.snapshot();
       const fence = this.fence;
       let operation: Operation | undefined;
       let existing = false;
@@ -264,8 +268,9 @@ export class DesktopDeviceLockOwner {
   }
 
   synchronize(): Promise<DeviceLockSnapshot> {
+    if (this.closed) return Promise.resolve(this.snapshot());
     if (this.syncTask !== undefined) return this.syncTask;
-    const task = this.authentication !== undefined
+    const task = this.authentication !== undefined && !this.authentication.signal.aborted
       ? this.post("dispatch", {}).then(() => this.snapshot(), () => this.snapshot())
       : this.serial(async () => {
       if (this.state.binding === undefined || this.state.ended) { await this.retryCleanup(); return this.snapshot(); }
@@ -283,14 +288,21 @@ export class DesktopDeviceLockOwner {
       } catch (error) { if (!this.state.ended) { this.message = error instanceof Error ? error.message : "设备状态同步失败，请重试"; this.emit(); } }
       return this.snapshot();
     });
-    this.syncTask = task.finally(() => { this.syncTask = undefined; });
+    this.syncTask = task.finally(() => {
+      this.syncTask = undefined;
+      if (this.syncAgain) {
+        this.syncAgain = false;
+        if (!this.closed) void this.synchronize().catch(() => undefined);
+      }
+    });
     return this.syncTask;
   }
 
   private async execute(op: Operation): Promise<void> {
+    if (this.closed) return;
     const binding = this.state.binding;
-    this.operationState = op.state;
     if (binding === undefined || op.session_id !== binding.sessionId || op.lock_cycle !== this.state.cycle) return;
+    this.operationState = op.state;
     if (op.state === "awaiting_confirmation") { this.message = "请在手机即我上确认解锁，也可使用电脑密码"; this.emit(); return; }
     if (op.state !== "awaiting_execution" && op.state !== "reconciling") return;
     if (op.dispatched_at <= 0 || this.clock === undefined) return;
@@ -345,5 +357,5 @@ export class DesktopDeviceLockOwner {
       const { pendingCleanup: _, ...next } = this.state; this.save(next);
     } catch { /* Keep the narrowly scoped receipt until recovery, without delaying login UI. */ }
   }
-  close(): void { this.clearMobileFallback(); this.authentication?.abort(); this.fence++; this.token = ""; }
+  close(): void { this.closed = true; this.syncAgain = false; this.clearMobileFallback(); this.authentication?.abort(); this.fence++; this.token = ""; }
 }
