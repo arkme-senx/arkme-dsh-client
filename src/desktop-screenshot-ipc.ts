@@ -1,4 +1,4 @@
-import { BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, nativeImage, screen, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, nativeImage, screen, shell, systemPreferences, type IpcMainInvokeEvent } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { ScreenshotSession, decodeScreenshotPng } from './desktop-screenshot-session.js';
@@ -55,8 +55,25 @@ export function installScreenshotIpc(options: {
    };
    active=s;
    sender.once('destroyed',abort); sender.once('did-start-navigation',abort);
-   s.timer=setTimeout(()=>s.finish(undefined,new Error('截图加载超时，请更新 Arkme 插件后重试')),20_000);
    void (async()=> {
+    const screenAccess = () => process.platform === 'darwin' ? systemPreferences.getMediaAccessStatus('screen') : 'granted';
+    const needsPermission = () => ['not-determined', 'denied', 'restricted'].includes(screenAccess());
+    const permissionGuidance = async () => {
+     const {response}=await dialog.showMessageBox({
+      type:'info',title:'需要开启录屏权限',message:'需要开启录屏权限',
+      detail:`截图需要“录屏与系统录音”权限。请在系统设置 → 隐私与安全性 → 录屏与系统录音中允许“${app.getName()}”录制屏幕。\n\n列表中没有当前应用时，可点击“+”添加。开启后，若系统提示退出并重新打开，请按提示操作，然后再次使用截图快捷键。`,
+      buttons:['暂不开启','打开系统设置'],defaultId:1,cancelId:0,noLink:true,
+     });
+     if(!valid(s))return;
+     if(response===1) {
+      try { await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'); }
+      catch { throw new Error('无法打开系统设置。请手动前往系统设置 → 隐私与安全性 → 录屏与系统录音，允许当前应用录制屏幕后重试'); }
+     }
+    };
+    if(needsPermission()) { await permissionGuidance(); s.finish(); return; }
+    // Permission guidance is user-paced; only time the actual capture/editor load.
+    s.timer=setTimeout(()=>s.finish(undefined,new Error('截图加载超时，请更新 Arkme 插件后重试')),20_000);
+    try {
     // Capture the visible desktop as-is, including the opener; do not hide or transform the app.
     if(!valid(s)) { s.finish(); return; }
     const displays=screen.getAllDisplays();
@@ -77,7 +94,7 @@ export function installScreenshotIpc(options: {
      const sources=await capture;
      if(!valid(s)) { s.finish(); return; }
      const source=sources.find(source=>source.display_id===String(d.id)) ?? (displays.length===1 && sources.length===1 ? sources[0] : undefined);
-     if(!source || source.thumbnail.isEmpty()) throw new Error('无法读取屏幕，请检查系统屏幕录制权限后重试');
+     if(!source || source.thumbnail.isEmpty()) throw new Error('无法读取屏幕，请重试');
      const size=source.thumbnail.getSize();
      // Win32 uses physical desktop pixels; Quartz uses logical desktop points.
      const nativeBounds=process.platform==='win32'?screen.dipToScreenRect(null,d.bounds):d.bounds;
@@ -107,6 +124,13 @@ export function installScreenshotIpc(options: {
      await window.loadURL(url.href);
     }));
     if(!valid(s)) { s.finish(); return; }
+    } catch(error) {
+     if(valid(s) && needsPermission()) {
+      clearTimeout(s.timer);s.timer=undefined;
+      await permissionGuidance();s.finish();return;
+     }
+     throw error;
+    }
    })().catch(error=>s.finish(undefined,error instanceof Error ? error : new Error('截图失败')));
   });
  };
