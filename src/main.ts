@@ -1,3 +1,6 @@
+import { pluginHostPolicy } from "./plugin-host-policy.js";
+import { revealAfterAccountAcknowledgement } from "./account-scope-navigation.js";
+import { isMasChannel, resolveMasRuntime, MasBookmarks } from "./mas/runtime.js";
 import {installScreenshotShortcut} from './screenshot-shortcut-ipc.js';
 import { installScreenshotIpc } from './desktop-screenshot-ipc.js';
 import { installConversationWindowIpc } from './conversation-window-ipc.js';
@@ -180,6 +183,7 @@ import {
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const runtimeServiceConfig = readPackagedRuntimeServiceConfig(moduleDirectory);
 const runtimeEnvironment = runtimeServiceConfig.environment;
+const masChannel = isMasChannel(process.resourcesPath, app.isPackaged, process.mas === true);
 const packagedLocalTest = app.isPackaged
   && existsSync(path.join(process.resourcesPath, "ARKME_TEST_PLUGIN.json"));
 const startupEnvironment = withStartupUpdateCheckEnvironment(
@@ -196,9 +200,12 @@ let appName: string = appIdentity.appName;
 const deepLinks = new ArkmeDeepLinkQueue();
 app.setName(appName);
 app.setAppUserModelId(appIdentity.appId);
-const appDataPath = resolveArkmeAppDataPath(app.getPath("appData"), process.env.ARKME_APP_DATA_PATH);
+const appDataPath = masChannel ? app.getPath("appData") : resolveArkmeAppDataPath(app.getPath("appData"), process.env.ARKME_APP_DATA_PATH);
 app.setPath("appData", appDataPath);
+// Share directory naming/layout; MAS keeps the OS-provided sandbox appData root.
 app.setPath("userData", resolveUserDataPath(appDataPath, runtimeEnvironment));
+const masBookmarks = masChannel ? new MasBookmarks(path.join(app.getPath("userData"), "directory-bookmarks.json"), bookmark => { const stop = app.startAccessingSecurityScopedResource(bookmark); return () => stop(); }) : null;
+app.once("will-quit", () => masBookmarks?.close());
 const diagnosticLogPath = path.join(
   app.getPath("userData"),
   "logs",
@@ -713,7 +720,7 @@ async function configureAccountScopeForRuntime(
   });
   if (await arkmePluginSupportsDesktopAccountScope(runtime.arkmePluginPath)) {
     accountScopeStore = store;
-    activeAccountScope = await store.launch({deferLegacyMigration: runtime.runtimeManaged});
+    activeAccountScope = await store.launch({deferLegacyMigration: runtime.runtimeManaged || masChannel});
     accountScopeReady = false;
     return;
   }
@@ -794,7 +801,9 @@ async function abortDesktopAccountScope(transitionRef: string): Promise<{ status
 }
 
 async function revealAttestedHarness(): Promise<void> {
-  if (lastHarnessReadyState !== null) await renderState(lastHarnessReadyState);
+  const state = lastHarnessReadyState;
+  if (state !== null) await revealAfterAccountAcknowledgement(
+    () => renderState(state), error => logDiagnostic("account-scope-render-failed", error));
 }
 
 async function renderAccountScopeWaiting(): Promise<void> {
@@ -1057,6 +1066,10 @@ function finishRuntimeBootstrap(harnessLogPath: string): void {
 }
 
 async function resolveLaunchRuntime(userDataPath: string, shellVersionCode: number, manualRetry = false): Promise<LaunchRuntime> {
+  if (masChannel) {
+    await masBookmarks?.restore();
+    return resolveMasRuntime(process.resourcesPath, process.arch, app.getVersion());
+  }
   if (!app.isPackaged) {
     const dshBinPath = resolveDshBinPath(false, process.resourcesPath, import.meta.url);
     const packageManagerBinPath = resolvePnpmBinDirectory(false, process.resourcesPath, import.meta.url);
@@ -1191,8 +1204,9 @@ async function initializeHarnessRuntime(
     appVersion: app.getVersion(),
     ...(dshVersion === undefined ? {} : { dshVersion }),
     runtimeManaged: runtime.runtimeManaged,
+    ...(masChannel ? { forceEmbedded: true } : {}),
     ...(runtime.release === undefined ? {} : { runtimeReleaseId: runtime.release.releaseId }),
-    ...(runtime.runtimeManaged ? {} : { packageManager: {
+    ...(runtime.runtimeManaged || masChannel ? {} : { packageManager: {
       executable: process.execPath,
       prefixArgs: [runtime.packageManagerCliPath],
       installArgs: ["--frozen-lockfile=false"],
@@ -1226,14 +1240,15 @@ async function initializeHarnessRuntime(
     inheritedEnv: {
       ...packageManagerEnvironment,
       ARKME_APP_VERSION: app.getVersion(),
+      ARKME_HOST_POLICY: pluginHostPolicy(masChannel),
       ...(paths.accountScopeRequired ? {
         ARKME_ACCOUNT_SCOPE_REQUIRED: "1",
         ARKME_DSH_RUNTIME_SCOPE_REF: paths.runtimeScopeRef
       } : {}),
-      ...(runtime.runtimeManaged ? { ARKME_RUNTIME_MANAGED: "1" } : {}),
+      ...(runtime.runtimeManaged || masChannel ? { ARKME_RUNTIME_MANAGED: "1" } : {}),
       ...(runtime.release === undefined ? {} : { ARKME_RUNTIME_RELEASE_ID: runtime.release.releaseId })
     },
-    managedRestart: resolveManagedExtensionRestartPaths(
+    ...(masChannel ? {} : { managedRestart: resolveManagedExtensionRestartPaths(
       runtime.arkmePluginPath,
       paths.dshHome,
       runtime.release?.releaseId
@@ -1243,6 +1258,7 @@ async function initializeHarnessRuntime(
       environment: runtimeEnvironment,
       ...(runtime.release === undefined ? {} : { runtimeReleaseId: runtime.release.releaseId })
     },
+    }),
     ...(directoryPickerBridge === null ? {} : { directoryPickerBridge }),
     ...(desktopCapabilityBridge === null ? {} : { desktopCapabilityBridge })
   });
@@ -1355,7 +1371,7 @@ async function readDshPackageVersion(dshBinPath: string): Promise<string | undef
 }
 
 async function installAppUpdateController(currentVersionCode: number): Promise<void> {
-  if (packagedLocalTest) return;
+  if (packagedLocalTest || masChannel) return;
   const target = resolveSupportedAppUpdateTarget(process.platform, process.arch);
   if (target === null) return;
   const receiptPath = resolveAppUpdateInstallReceiptPath(app.getPath("userData"));
@@ -1804,11 +1820,15 @@ async function showDirectoryDialog(title: string): Promise<string | null> {
   const options: Electron.OpenDialogOptions = {
     title,
     buttonLabel: "使用此项目",
-    properties: ["openDirectory"]
+    properties: ["openDirectory"],
+    ...(masChannel ? { securityScopedBookmarks: true } : {})
   };
   const result = mainWindow === null || !mainWindow.isVisible()
     ? await dialog.showOpenDialog(options)
     : await dialog.showOpenDialog(mainWindow, options);
+  if (!result.canceled && result.filePaths[0] && result.bookmarks?.[0]) {
+    await masBookmarks?.remember(result.filePaths[0], result.bookmarks[0]);
+  }
   return result.canceled ? null : (result.filePaths[0] ?? null);
 }
 
@@ -1986,7 +2006,7 @@ async function renderFailure(error: unknown): Promise<void> {
       technicalDetails: error.technicalDetails,
       showWorkspaceAction: error.showWorkspaceAction,
       ...("showReloadRuntimeAction" in error
-        ? { showReloadRuntimeAction: error.showReloadRuntimeAction }
+        ? { showReloadRuntimeAction: !masChannel && error.showReloadRuntimeAction }
         : {})
     }
     : {};

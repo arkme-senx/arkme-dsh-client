@@ -386,3 +386,15 @@ describe("stageRuntimeUpdateInBackground", () => {
     });
   });
 });
+
+it('rejects stale runtime restart actions while a client installation owns restart', () => {
+  const { coordinator, relaunch, quit } = fixture();
+  coordinator.beginInstallation('runtime-upgrade');
+  const notice=coordinator.completeInstallation('runtime-upgrade');
+  coordinator.setAppUpdateState({status:'installing',canAutoInstall:true});
+  expect(coordinator.restart(`${harnessOrigin}/workspace`,notice.messageId)).toBe(false);
+  expect(relaunch).not.toHaveBeenCalled();
+  expect(quit).not.toHaveBeenCalled();
+  coordinator.setAppUpdateState({status:'current',canAutoInstall:false});
+  expect(coordinator.restart(`${harnessOrigin}/workspace`,notice.messageId)).toBe(true);
+});

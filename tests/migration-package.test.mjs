@@ -5,8 +5,8 @@ import path from 'node:path';
 import { expect, test } from 'vitest';
 import { assertMigrationRelease, migrationDistribution, stageMigrationPayload, publishVerifiedPackage } from '../scripts/build-macos-migration.mjs';
 
-const manifest = { version: '3.0.0', versionCode: 275, build: { appId: 'cc.jiwo.arkme', productName: '即我', mac: { minimumSystemVersion: '12.0' } } };
-const info = { CFBundleIdentifier: 'cc.jiwo.arkme', CFBundleName: '即我', CFBundleExecutable: 'arkme', CFBundleShortVersionString: '3.0.0', CFBundleVersion: '275', LSMinimumSystemVersion: '12.0' };
+const manifest = { version: '3.0.0', versionCode: 275, build: { appId: 'cc.jiwo.arkme', productName: '即我', mac: { appId: 'com.senqisi.Jotmo', minimumSystemVersion: '12.0' } } };
+const info = { CFBundleIdentifier: 'com.senqisi.Jotmo', CFBundleName: '即我', CFBundleExecutable: 'arkme', CFBundleShortVersionString: '3.0.0', CFBundleVersion: '275', LSMinimumSystemVersion: '12.0' };
 const signature = 'Authority=Developer ID Application: Publisher (T6NSNA8LDZ)\nTeamIdentifier=T6NSNA8LDZ\n';
 
 test('only the matching signed production application may enter a migration package', () => {
@@ -73,11 +73,11 @@ test.skipIf(process.platform !== 'darwin')('distribution is valid XML and reject
 });
 
 test('installer metadata follows the current release and validates the system version', () => {
-  const release = { ...manifest, version: '3.8.1', build: { ...manifest.build, mac: { minimumSystemVersion: '13.0' } } };
+  const release = { ...manifest, version: '3.8.1', build: { ...manifest.build, mac: { appId: 'com.senqisi.Jotmo', minimumSystemVersion: '13.0' } } };
   const xml = migrationDistribution('component.pkg', release);
   expect(xml).toContain('<title>即我</title>');
   expect(xml).toContain('cc.jiwo.arkme.installer');
   expect(xml).toContain('13.0');
   expect(xml).not.toContain('即我 3.0');
-  expect(() => migrationDistribution('component.pkg', { ...release, build: { mac: { minimumSystemVersion: "13');evil()" } } })).toThrow();
+  expect(() => migrationDistribution('component.pkg', { ...release, build: { mac: { appId: 'com.senqisi.Jotmo', minimumSystemVersion: "13');evil()" } } })).toThrow();
 });

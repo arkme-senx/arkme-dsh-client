@@ -16,6 +16,7 @@ describe("electron-builder macOS bundle and executable identity", () => {
   ])("separates the bundle filename from its executable (%s)", async (name, executable, config) => {
     const appInfo = new AppInfo({ metadata, config }, undefined, config.mac);
     expect(appInfo.productFilename).toBe(name);
+    expect(appInfo.id).toBe(name === "即我" ? "com.senqisi.Jotmo" : config.appId);
     const plist: Record<string, unknown> = {};
     await MacPackager.prototype.applyCommonInfo.call({
       appInfo, config, platformSpecificBuildOptions: config.mac,

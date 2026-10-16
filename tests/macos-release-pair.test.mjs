@@ -30,7 +30,7 @@ async function fixture() {
   await chmod(path.join(appRoot, 'Contents/MacOS/arkme'), 0o755);
   await symlink('MacOS/arkme', path.join(appRoot, 'Contents/program-link'));
   await writeFile(path.join(appRoot, 'Contents/Info.plist'), JSON.stringify({
-    CFBundleIdentifier: 'cc.jiwo.arkme', CFBundleExecutable: 'arkme',
+    CFBundleIdentifier: 'com.senqisi.Jotmo', CFBundleExecutable: 'arkme',
     CFBundleShortVersionString: version, CFBundleVersion: String(versionCode),
   }));
   execFileSync('/usr/bin/plutil', ['-convert', 'xml1', path.join(appRoot, 'Contents/Info.plist')]);
@@ -49,7 +49,7 @@ async function fixture() {
 test.skipIf(process.platform !== 'darwin')('real ZIP and PKG contain the same application, including executable modes and links', async () => {
   const input = await fixture();
   const report = await verifyMacReleasePair(input);
-  expect(report).toMatchObject({ appId: 'cc.jiwo.arkme', version, versionCode });
+  expect(report).toMatchObject({ appId: 'com.senqisi.Jotmo', version, versionCode });
   expect(report.artifacts.map(x => x.kind).sort()).toEqual(['pkg', 'zip']);
   for (const artifact of report.artifacts) {
     expect(artifact.size).toBe((await readFile(path.join(input.releaseDirectory, artifact.filename))).length);

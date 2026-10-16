@@ -8,7 +8,7 @@ import { verifyPairedMacUpdateMetadata } from './macos-release-pair.mjs';
 import { withMacReleaseLock } from './macos-release-lock.mjs';
 
 export function createMacReleasePublication({ report, metadata, cdnBase, releaseNotes, buildCommit, privateKey }) {
-  if (report.status !== 'verified' || report.appId !== 'cc.jiwo.arkme'
+  if (report.status !== 'verified' || report.appId !== 'com.senqisi.Jotmo'
     || !/^\d+\.\d+\.\d+$/.test(report.version) || !Number.isSafeInteger(report.versionCode)
     || report.versionCode <= 0 || report.versionCode > 2147483647
     || report.artifacts?.length !== 2 || new Set(report.artifacts.map(a => a.kind)).size !== 2
@@ -20,6 +20,7 @@ export function createMacReleasePublication({ report, metadata, cdnBase, release
   if (base.protocol !== 'https:' || base.username || base.password || base.search || base.hash) throw new Error('CDN base must be a fixed HTTPS URL');
   const key = privateKey?.type === 'private' ? privateKey : createPrivateKey(privateKey);
   if (key.asymmetricKeyType !== 'ed25519') throw new Error('App manifest signing requires an Ed25519 private key');
+  // Storage namespace is a stable backend contract, independent of the signed Bundle ID.
   const prefix = `arkme-releases/app/${report.version}/darwin/arm64/cc.jiwo.arkme`;
   const mapping = report.artifacts.map(a => ({ ...a, objectKey: `${prefix}/${a.kind === 'pkg' ? 'installers' : 'updates'}/jiwo-${report.version}-vc${report.versionCode}-universal.${a.kind}` }));
   const artifacts = mapping.map(a => ({ object_key: a.objectKey, platform: 'darwin', architecture: 'arm64', kind: a.kind, size: a.size, sha512: a.sha512, signing_status: 'signed-notarized' }));

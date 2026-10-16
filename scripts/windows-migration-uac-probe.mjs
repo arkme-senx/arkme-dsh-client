@@ -50,6 +50,7 @@ SilentInstall silent
 !define KF_FLAG_CREATE 0x00008000
 !define INSTALL_REGISTRY_KEY "Software\\14ace15a-7c69-5467-bedd-7df6c628d51a"
 !define APP_FILENAME arkme
+!define isUpdated '"0" == "1"'
 !define APP_64
 !define JIWO_MIGRATION_SCRIPT "${esc(path.resolve('build/windows-migration.ps1'))}"
 !define JIWO_MIGRATION_MANIFEST "${esc(manifest)}"

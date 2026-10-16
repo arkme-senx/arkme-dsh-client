@@ -44,7 +44,7 @@ async function applicationIn(root) {
 export async function verifyMacReleasePair({ appRoot, releaseDirectory, version, versionCode }) {
   if (process.platform !== 'darwin') throw new Error('Verify macOS release archives on macOS');
   const info = JSON.parse(run('/usr/bin/plutil', ['-convert', 'json', '-o', '-', path.join(appRoot, 'Contents/Info.plist')]));
-  if (info.CFBundleIdentifier !== 'cc.jiwo.arkme' || info.CFBundleExecutable !== 'arkme'
+  if (info.CFBundleIdentifier !== 'com.senqisi.Jotmo' || info.CFBundleExecutable !== 'arkme'
     || info.CFBundleShortVersionString !== version || info.CFBundleVersion !== String(versionCode)) {
     throw new Error('Release application identity/version mismatch');
   }

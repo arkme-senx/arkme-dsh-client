@@ -39,7 +39,10 @@ struct AppIdentity: Codable, Equatable {
 
 protocol MigrationSystem {
     func inspect(_ url: URL) throws -> AppIdentity
+    func inspectMetadata(_ url: URL) throws -> AppIdentity
     func inspectMany(_ urls: [URL]) throws -> [AppIdentity]
+    func inspectCandidates(_ urls: [URL]) throws -> [Result<AppIdentity, Error>]
+    func assertStopped(_ applications: [URL]) throws
     func copyBundle(_ source: URL, to target: URL) throws
     func requireStopped(_ applications: [URL]) throws
     func freeBytes(at url: URL) throws -> UInt64
@@ -56,6 +59,13 @@ private func persistDirectory(_ url: URL) throws {
 }
 
 extension MigrationSystem {
+    func inspectCandidates(_ urls: [URL]) throws -> [Result<AppIdentity, Error>] {
+        urls.map { url in Result { try inspect(url) } }
+    }
+    func assertStopped(_ applications: [URL]) throws {
+        guard applications.isEmpty else { throw MigrationError("Read-only process inspection unavailable") }
+    }
+    func inspectMetadata(_ url: URL) throws -> AppIdentity { try inspect(url) }
     func inspectMany(_ urls: [URL]) throws -> [AppIdentity] { try urls.map { try inspect($0) } }
     func moveBundle(_ source: URL, to target: URL) throws {
         let timer = MigrationTimer("move \(source.path) -> \(target.path)"); defer { timer.finish() }
@@ -89,7 +99,7 @@ struct MigrationConfiguration {
     let version: String
     let build: Int
     let appID: String
-    init(target: URL, journal: URL, teamID: String, version: String, build: Int, appID: String = "cc.jiwo.arkme") {
+    init(target: URL, journal: URL, teamID: String, version: String, build: Int, appID: String = "com.senqisi.Jotmo") {
         self.target = target
         self.journal = journal
         self.teamID = teamID
@@ -164,9 +174,16 @@ struct MigrationJournal: Codable {
 /// Owns application bundle transactions only. Never enumerates, imports or
 /// removes Application Support, Documents, preferences or credential stores.
 final class MacMigration {
+    private(set) var failureStage = "检查旧应用"
+    private(set) var recoveryStatus = "本次尚未修改原应用"
+
     private let configuration: MigrationConfiguration
     private let system: MigrationSystem
     private let files = FileManager.default
+    // Process-local only: a restarted installer must validate again.
+    private var verifiedNewBundle: FileIdentity?
+    private(set) var skippedCandidates: [URL] = []
+    private(set) var migratedCandidates: [URL] = []
     init(configuration: MigrationConfiguration, system: MigrationSystem) {
         self.configuration = configuration
         self.system = system
@@ -191,10 +208,10 @@ final class MacMigration {
         guard (2...4).contains(components.count), components.allSatisfy({ !$0.isEmpty && $0.allSatisfy({ $0.isASCII && $0.isNumber }) }) else {
             throw MigrationError("Unrecognized application version")
         }
-        if [configuration.appID, "com.senx.arkme.harness"].contains(info.bundleID) {
+        if info.bundleID == "com.senx.arkme.harness" || (info.bundleID == configuration.appID && info.executable == "arkme") {
             guard info.executable == "arkme" else { throw MigrationError("Unexpected application executable") }
         } else {
-            guard ["com.senqisi.Jotmo", "com.senqisi.jotmo"].contains(info.bundleID), components.first == "2" else {
+            guard ["com.senqisi.Jotmo", "com.senqisi.jotmo"].contains(info.bundleID), components.first == "2", info.executable != "arkme" else {
                 throw MigrationError("Unknown legacy application")
             }
         }
@@ -275,16 +292,44 @@ final class MacMigration {
         let paths = try Set((candidates + [configuration.target]).map { try canonicalApplicationPath($0).path })
         var identities: [String: AppIdentity] = [:]
         let existing = paths.sorted().map { URL(fileURLWithPath: $0) }.filter { exists($0) }
-        let inspected = try validateOriginals(existing)
-        for (url, info) in zip(existing, inspected) { identities[url.path] = info }
-        try system.requireStopped(paths.sorted().map { URL(fileURLWithPath: $0) })
+        skippedCandidates = []
+        for url in existing { try safePath(url); _ = try FileIdentity(url) }
+        let results = try system.inspectCandidates(existing)
+        guard results.count == existing.count else { throw MigrationError("Incomplete signature inspection batch") }
+        for (url, result) in zip(existing, results) {
+            let info: AppIdentity
+            do {
+                info = try result.get()
+                try validateIdentity(info)
+            } catch {
+                if url.path == configuration.target.path { throw error }
+                skippedCandidates.append(url)
+                // Untrusted metadata is diagnostic only, never a migration credential.
+                let plist = NSDictionary(contentsOf: url.appendingPathComponent("Contents/Info.plist"))
+                let id = plist?["CFBundleIdentifier"] as? String ?? "unknown"
+                FileHandle.standardError.write(Data("[jiwo-skip] preserved path=\(url.path) bundleID=\(id) error=\(error)\n".utf8))
+                continue
+            }
+            // Trusted higher versions still block downgrades.
+            _ = try validateVersion(info, payload: false)
+            identities[url.path] = info
+        }
+        try system.assertStopped(skippedCandidates)
+        try system.requireStopped(existing.filter { identities[$0.path] != nil })
         return identities
     }
 
     func prepare(payload: URL, candidates: [URL]) throws {
         let timer = MigrationTimer("prepare"); defer { timer.finish() }
+        verifiedNewBundle = nil
         try recover()
-        let payloadIdentity = try validate(payload, payload: true)
+        failureStage = "检查新应用及旧应用"
+        try safePath(payload)
+        _ = try FileIdentity(payload)
+        // Expected identity comes from signed installer release metadata. Verify
+        // the actual copied bundle once, before moving any installed application.
+        let payloadIdentity = AppIdentity(bundleID: configuration.appID, teamID: configuration.teamID,
+            version: configuration.version, build: configuration.build, executable: "arkme", appStore: false)
         let canonical = try (candidates + [configuration.target]).map { try canonicalApplicationPath($0).path }
         let unique = Array(Set(canonical)).sorted().map { URL(fileURLWithPath: $0) }
         let verified = try preflight(candidates: unique)
@@ -305,6 +350,7 @@ final class MacMigration {
                                        payload: payloadIdentity, stagedIdentity: nil, committed: false, entries: [])
         for candidate in unique where exists(candidate) {
             let backup = candidate.deletingLastPathComponent().appendingPathComponent(".jiwo-\(id)-\(journal.entries.count).backup")
+            if skippedCandidates.contains(candidate) { continue }
             guard let app = verified[candidate.path] else { throw MigrationError("Application appeared after preflight") }
             // Reuse metadata only within this preparation. Commit always performs
             // a fresh full inspection before moving any old application.
@@ -316,9 +362,11 @@ final class MacMigration {
         journal.stagedIdentity = try FileIdentity(stage)
         do {
             try save(journal)
+            failureStage = "暂存并校验新应用"
             try system.copyBundle(payload, to: stage)
-            _ = try validate(stage, payload: true)
+            guard try validate(stage, payload: true) == payloadIdentity else { throw MigrationError("Unexpected payload identity") }
             guard try FileIdentity(stage) == journal.stagedIdentity else { throw MigrationError("Staging directory replaced while copying") }
+            verifiedNewBundle = journal.stagedIdentity
             try save(journal)
         } catch {
             // No old bundle has moved during preparation. Keep unknown objects
@@ -339,10 +387,11 @@ final class MacMigration {
         guard var journal = try load(), let stagedIdentity = journal.stagedIdentity, !journal.committed else {
             throw MigrationError("No prepared migration")
         }
+        failureStage = "切换应用并验证安装"
         let stage = URL(fileURLWithPath: journal.stage)
         do {
             guard try FileIdentity(stage) == stagedIdentity else { throw MigrationError("Staged application replaced") }
-            _ = try validate(stage, payload: true)
+            _ = try validatePreparedBundle(stage)
             let applications = journal.entries.map { URL(fileURLWithPath: $0.original) }
             try system.requireStopped(applications + [configuration.target])
             // All recovery destinations are in the source's directory, so each
@@ -356,11 +405,14 @@ final class MacMigration {
                 guard info == entry.app else { throw MigrationError("Original application identity changed") }
                 guard !exists(URL(fileURLWithPath: entry.backup)) else { throw MigrationError("Recovery destination occupied") }
             }
+            try system.assertStopped(skippedCandidates)
+            migratedCandidates = originals
+            recoveryStatus = "应用切换已开始，恢复状态待确认"
             for entry in journal.entries {
                 try system.moveBundle(URL(fileURLWithPath: entry.original), to: URL(fileURLWithPath: entry.backup))
             }
             try system.moveBundle(stage, to: configuration.target)
-            _ = try validate(configuration.target, payload: true)
+            _ = try validatePreparedBundle(configuration.target)
             journal.committed = true
             try save(journal)
         } catch {
@@ -371,7 +423,7 @@ final class MacMigration {
                 return
             }
             do { try recover() } catch let recoveryError {
-                throw MigrationError("Installation failed; retry this installer to recover: \(recoveryError)")
+                throw MigrationError("Installation failed: \(error); retry this installer to recover: \(recoveryError)")
             }
             throw error
         }
@@ -388,6 +440,15 @@ final class MacMigration {
         try commit()
     }
 
+    private func validatePreparedBundle(_ url: URL) throws -> AppIdentity {
+        try safePath(url)
+        guard let verified = verifiedNewBundle else { return try validate(url, payload: true) }
+        guard try FileIdentity(url) == verified else { throw MigrationError("Verified application replaced") }
+        let info = try system.inspectMetadata(url)
+        try validateIdentity(info)
+        return try validateVersion(info, payload: true)
+    }
+
     private func verifyOriginal(_ url: URL, entry: MigrationEntry) throws {
         guard try FileIdentity(url) == entry.identity, try inspect(url) == entry.app else {
             throw MigrationError("Recorded application changed; recovery copies retained")
@@ -396,7 +457,12 @@ final class MacMigration {
 
     func recover() throws {
         let timer = MigrationTimer("recover"); defer { timer.finish() }
-        guard var journal = try load(), let stagedIdentity = journal.stagedIdentity else { return }
+        let previousStatus = recoveryStatus
+        recoveryStatus = "恢复检查未完成，请保留现场并联系支持"
+        guard var journal = try load(), let stagedIdentity = journal.stagedIdentity else {
+            recoveryStatus = previousStatus
+            return
+        }
         let stage = URL(fileURLWithPath: journal.stage)
         try safePath(configuration.target)
         try safePath(stage)
@@ -407,7 +473,8 @@ final class MacMigration {
         }
         let installedByThisAttempt = exists(configuration.target) && (try? FileIdentity(configuration.target)) == stagedIdentity
         if journal.committed {
-            let current = try inspect(configuration.target)
+            let current = try verifiedNewBundle != nil && FileIdentity(configuration.target) == verifiedNewBundle
+                ? validatePreparedBundle(configuration.target) : inspect(configuration.target)
             guard current.bundleID == journal.payload.bundleID,
                   current.version.compare(journal.payload.version, options: .numeric) != .orderedAscending,
                   current.build >= journal.payload.build else {
@@ -464,5 +531,6 @@ final class MacMigration {
         }
         if exists(stage) { try system.removeBundle(stage) }
         try system.removeBundle(configuration.journal)
+        recoveryStatus = journal.committed ? "已确认安装成功，残留已清理" : "已完成恢复，旧程序已保留或恢复"
     }
 }
