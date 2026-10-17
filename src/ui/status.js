@@ -34,6 +34,27 @@ const downloadStage = document.querySelector("#download-stage");
 const verifyStage = document.querySelector("#verify-stage");
 const installStage = document.querySelector("#install-stage");
 const networkWaitingFooter = document.querySelector("#network-waiting-footer");
+const copyLogsAction = document.querySelector("#copy-logs-action");
+let copyFeedbackTimer;
+
+copyLogsAction.addEventListener("click", async () => {
+  const text = [title, messageElement, failureSuggestion, technicalDetailsElement, workspaceRow, networkWaitingFooter]
+    .filter(element => !element.hidden)
+    .map(element => element.textContent)
+    .filter(Boolean)
+    .join("\n\n");
+  copyLogsAction.disabled = true;
+  clearTimeout(copyFeedbackTimer);
+  try {
+    await navigator.clipboard.writeText(text);
+    copyLogsAction.textContent = "已复制";
+  } catch {
+    copyLogsAction.textContent = "复制失败，请重试";
+  } finally {
+    copyLogsAction.disabled = false;
+    copyFeedbackTimer = setTimeout(() => { copyLogsAction.textContent = "复制日志"; }, 2000);
+  }
+});
 
 document.body.dataset.environment = environment;
 document.title = isTestEnvironment ? "arkme Test" : "即我";

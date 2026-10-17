@@ -22,9 +22,11 @@
       <div id="failure-icon" class="failure-icon" aria-hidden="true" hidden>!</div>
 
       <h1 id="title">正在启动…</h1>
+      <section id="error-details" class="error-details" aria-label="状态详情">
       <p id="message" class="message">正在启动本地 Harness 服务</p>
       <p id="failure-suggestion" class="failure-suggestion" hidden></p>
       <p id="technical-details" class="technical-details" hidden></p>
+      </section>
       <p id="workspace-row" class="workspace-row" hidden>
         <span>项目</span>
         <code id="workspace"></code>
@@ -60,6 +62,7 @@
         <a id="reload-runtime-action" class="button primary" href="app-action://reload-runtime" hidden>重新加载当前环境</a>
         <a id="choose-workspace-action" class="button" href="app-action://choose-workspace">选择其他项目</a>
         <a class="button subtle" href="app-action://open-logs">打开日志</a>
+        <button id="copy-logs-action" class="button subtle" type="button">复制日志</button>
       </nav>
       <p id="network-waiting-footer" class="network-waiting-footer" hidden></p>
     </main>

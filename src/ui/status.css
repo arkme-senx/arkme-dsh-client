@@ -28,6 +28,43 @@ body {
   text-align: center;
 }
 
+body[data-state="failed"] {
+  padding: 24px 5vw;
+}
+
+body[data-state="failed"] .status-card {
+  width: min(1400px, 100%);
+  padding: 0;
+  min-width: 0;
+}
+
+body[data-state="failed"] .brand {
+  margin-bottom: 20px;
+}
+
+body[data-state="failed"] .error-details {
+  height: 50vh;
+  margin-top: 20px;
+  padding: 16px 20px;
+  overflow: auto;
+  text-align: left;
+  border: 1px solid #929bad55;
+  border-radius: 9px;
+  user-select: text;
+}
+
+body[data-state="failed"] .error-details > p {
+  width: 100%;
+  max-height: none;
+  overflow: visible;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+body[data-state="failed"] .error-details > p:first-child {
+  margin-top: 0;
+}
+
 .brand {
   display: inline-flex;
   align-items: center;
@@ -219,6 +256,7 @@ h1 {
 }
 
 .actions {
+  flex-wrap: wrap;
   display: flex;
   justify-content: center;
   gap: 10px;
@@ -233,6 +271,8 @@ h1 {
 }
 
 .button {
+  font-family: inherit;
+  cursor: pointer;
   padding: 9px 15px;
   border: 1px solid #d8deea;
   border-radius: 9px;
