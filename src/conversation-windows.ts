@@ -3,6 +3,31 @@ export interface ConversationTarget {
   sourceKey: string;
   source: { kind: 'private_chat' | 'group_chat' | 'send_to_self'; sourceRef: string; displayName: string; sourceKey?: string; [key: string]: unknown };
 }
+export interface ConversationBootstrap {
+  version: 1; accountKey: string; sourceKey: string;
+  auth: {status: 'authenticated'; environment: 'prod' | 'test'; userId: number};
+  config?: Record<string, unknown>; content?: Record<string, unknown>;
+}
+export const CONVERSATION_BOOTSTRAP_MAX_BYTES = 2_000_000;
+/** Discard an optional bad/oversized seed without preventing the ordinary local-cache fallback. */
+export function validateConversationBootstrap(value: unknown, target: ConversationTarget): ConversationBootstrap | undefined {
+  if (value === undefined || value === null) return;
+  try {
+    const raw = value as ConversationBootstrap;
+    if (raw.version !== 1 || raw.accountKey !== target.accountKey || raw.sourceKey !== target.sourceKey
+      || raw.auth?.status !== 'authenticated' || !['prod', 'test'].includes(raw.auth.environment)
+      || !Number.isSafeInteger(raw.auth.userId) || raw.auth.userId <= 0
+      || `${raw.auth.environment}:${raw.auth.userId}` !== target.accountKey
+      || raw.config !== undefined && (!raw.config || raw.config.environment !== raw.auth.environment)
+      || raw.content !== undefined && (!raw.content || typeof raw.content !== 'object'
+        || !raw.content.timeline || !Array.isArray((raw.content.timeline as {items?: unknown}).items))) return;
+    if (Buffer.byteLength(JSON.stringify(raw), 'utf8') > CONVERSATION_BOOTSTRAP_MAX_BYTES) return;
+    // Auth is deliberately reconstructed, never copied as an extensible credential bag.
+    return structuredClone({ version: 1, accountKey: target.accountKey, sourceKey: target.sourceKey,
+      auth: {status: 'authenticated', environment: raw.auth.environment, userId: raw.auth.userId},
+      ...(raw.config ? {config: raw.config} : {}), ...(raw.content ? {content: raw.content} : {}) });
+  } catch { return; }
+}
 export type ConversationEvent = {kind: 'article'; key: string; value: unknown} | {kind: 'call'; source: ConversationTarget['source']; mediaType: 'audio' | 'video'} | { kind: 'draft'; key: string; value: unknown } | { kind: 'changed' } | { kind: 'activate'; source: ConversationTarget['source'] } | { kind: 'busy'; key: string; value: boolean };
 export interface ConversationWindow {
   id: number; show(): void; focus(): void; restore(): void; isMinimized(): boolean;
@@ -10,7 +35,7 @@ export interface ConversationWindow {
   on(event: 'closed', listener: () => void): void;
 }
 export class ConversationWindows {
-  private entries = new Map<number, { target: ConversationTarget; scope: string; window: ConversationWindow }>();
+  private entries = new Map<number, { target: ConversationTarget; scope: string; window: ConversationWindow; bootstrap?: ConversationBootstrap }>();
   private account: string | null = null;
   private accountScope = "";
   private closing = new Set<number>();
@@ -31,9 +56,9 @@ export class ConversationWindows {
       || JSON.stringify(raw).length > 100000 || !this.matchesAccount(raw.accountKey)) throw new Error('Invalid conversation target');
     const identity = raw.source.kind === 'send_to_self' ? raw.source.sourceRef : raw.source.sourceKey?.trim() || raw.source.sourceRef;
     if (identity !== raw.sourceKey) throw new Error('Conversation identity mismatch');
-    return structuredClone(raw);
+    return structuredClone({ accountKey: raw.accountKey, sourceKey: raw.sourceKey, source: raw.source });
   }
-  async open(value: unknown): Promise<void> {
+  async open(value: unknown, initialState?: unknown): Promise<void> {
     const raw = this.validateTarget(value);
     for (const entry of this.entries.values()) {
       if (this.isActive(entry.window.id) && entry.target.sourceKey === raw.sourceKey) {
@@ -41,8 +66,9 @@ export class ConversationWindows {
       }
     }
     const target = structuredClone(raw);
+    const bootstrap = validateConversationBootstrap(initialState, target);
     const window = this.ports.create(target);
-    this.entries.set(window.id, {target, scope: this.ports.scope(), window});
+    this.entries.set(window.id, {target, scope: this.ports.scope(), window, ...(bootstrap ? {bootstrap} : {})});
     window.on('closed', () => {
       this.entries.delete(window.id);
       for (const [token, item] of this.submissions) if (item.sender === window.id) this.release(item.sender, item.key, token);
@@ -50,7 +76,11 @@ export class ConversationWindows {
     try { await window.load(); if (this.isActive(window.id)) { window.show(); window.focus(); } }
     catch (error) { window.close(); throw error; }
   }
-  context(id: number): ConversationTarget | undefined { return this.isActive(id) ? this.entries.get(id)?.target : undefined; }
+  context(id: number): (ConversationTarget & {bootstrap?: ConversationBootstrap}) | undefined {
+    if (!this.isActive(id)) return;
+    const entry = this.entries.get(id)!;
+    return structuredClone({...entry.target, ...(entry.bootstrap ? {bootstrap: entry.bootstrap} : {})});
+  }
   isActive(id: number): boolean {
     const entry = this.entries.get(id);
     return !!entry && entry.target.accountKey === this.account && entry.scope === this.ports.scope();

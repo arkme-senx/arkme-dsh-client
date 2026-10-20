@@ -7,7 +7,10 @@ const {pathToFileURL} = require('node:url');
 const assert = require('node:assert/strict');
 const root = path.resolve(__dirname,'../..');
 const assets = process.env.ARKME_CONVERSATION_SMOKE_ASSETS || '/private/tmp/arkme-conversation-smoke-assets';
-let main,server,manager; const errors=[]; const sends=[]; const unknown=new Set();
+const verifyAvatars=process.env.ARKME_CONVERSATION_SMOKE_AVATARS==='1';
+const avatarBase64='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII=';
+let imageReads=0; let imageReadsBeforeOpen=0;
+let main,server,manager; let holdReads=false; const heldReads=[]; const errors=[]; const sends=[]; const unknown=new Set();
 const sources=[
  {kind:'private_chat',sourceRef:'private-A',sourceKey:'chat:A',displayName:'张三',activeAtMillis:Date.now(),unreadCount:0,latestSequence:1,latestPreview:"测试消息"},
  {kind:'group_chat',sourceRef:'group-B',sourceKey:'chat:B',displayName:'产品讨论群',activeAtMillis:Date.now(),unreadCount:0,latestSequence:1,latestPreview:"测试消息"},
@@ -26,15 +29,54 @@ async function checkPopovers(window, self = false) {
  await until(()=>window.webContents.executeJavaScript(`(()=>{const p=document.querySelector('[role="menu"]');const r=p.getBoundingClientRect();return r.width>0&&r.height>0&&p.contains(document.elementFromPoint(r.left+r.width/2,r.top+Math.min(15,r.height/2)))})()`),'menu must be hit-test visible');
  await window.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))`);
 }
+async function checkStyleParity(main, child) {
+ const snapshot = (window, expression) => window.webContents.executeJavaScript(`(()=>{
+  const element=${expression}; if(!element) throw new Error('Missing style target: '+${JSON.stringify(expression)});
+  const css=getComputedStyle(element); return Object.fromEntries(['fontFamily','fontSize','fontWeight','lineHeight','color','backgroundColor','borderTopWidth','borderTopStyle','borderRadius','paddingTop','paddingLeft','boxSizing'].map(key=>[key,css[key]]));
+ })()`);
+ const offline="Array.from(document.querySelectorAll('button')).find(x=>x.textContent.trim()==='线下交流')";
+ const calendar="Array.from(document.querySelectorAll('button')).find(x=>(x.getAttribute('aria-label')||'').startsWith('按日期查看聊天记录'))";
+ for(const dark of [false,true]) {
+  for(const window of [main,child]) await window.webContents.executeJavaScript(`(()=>{
+   document.body.toggleAttribute('data-ds-dark-theme',${dark});
+   const tokens={'--dsw-alias-bg-base':'#181a1f','--dsw-alias-label-primary':'#e8eaf0','--dsw-alias-label-secondary':'#b7bcc7','--dsw-alias-label-tertiary':'#9197a3','--dsw-alias-border-l1':'#32343a','--dsw-alias-border-l2':'#3c3e47','--dsw-alias-bg-layer-2':'#252830','--dsw-specific-input-major':'#292c34','--dsw-alias-interactive-bg-active':'#363a44'};
+   for(const [name,value] of Object.entries(tokens)) {if(${dark})document.body.style.setProperty(name,value);else document.body.style.removeProperty(name);}
+  })()`);
+  await until(()=>child.webContents.executeJavaScript(`!!(${offline})`),'offline context entry');
+  for(const expression of [offline,calendar,`document.querySelector('button[aria-label="搜索聊天记录"]')`,`document.querySelector('.arkme-conversation-composer')`]) {
+   assert.deepEqual(await snapshot(child,expression),await snapshot(main,expression),`style parity ${dark?'dark':'light'}: ${expression}`);
+  }
+  assert.equal((await snapshot(child,offline)).borderTopWidth,'0px','offline entry must not use the browser default border');
+  assert.equal(await child.webContents.executeJavaScript('getComputedStyle(document.body).getPropertyValue("--arkme-control-hover-surface")'),await main.webContents.executeJavaScript('getComputedStyle(document.body).getPropertyValue("--arkme-control-hover-surface")'),'shared hover token');
+  for(const window of [main,child]) {
+   await window.webContents.executeJavaScript(`document.querySelector('button[aria-label="搜索聊天记录"]').click()`);
+   await until(()=>window.webContents.executeJavaScript(`!!document.querySelector('input[aria-label="搜索聊天关键词"]')`),'search input');
+  }
+  for(const expression of [`document.querySelector('input[aria-label="搜索聊天关键词"]')`,`document.querySelector('input[aria-label="搜索聊天关键词"]').parentElement`]) assert.deepEqual(await snapshot(child,expression),await snapshot(main,expression),'search input parity');
+  for(const window of [main,child]) {
+   await window.webContents.executeJavaScript(`document.querySelector('button[aria-label="关闭聊天搜索"]').click(); (${offline}).click()`);
+   await until(()=>window.webContents.executeJavaScript('!!document.querySelector("[role=dialog] select")'),'offline dialog');
+  }
+  for(const expression of [`document.querySelector('[role=dialog] select')`,`document.querySelector('[role=dialog]')`]) assert.deepEqual(await snapshot(child,expression),await snapshot(main,expression),'portaled dialog control parity');
+  for(const window of [main,child]) await window.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))`);
+  await checkPopovers(main); await checkPopovers(child);
+  await fs.writeFile(path.join(assets,`style-parity-${dark?'dark':'light'}.png`),(await child.webContents.capturePage()).toPNG());
+ }
+ console.log('PASS light/dark style parity: offline entry, calendar/search controls, composer, search input, portaled dialog/select, hover tokens; calendar and menus visible');
+}
 function value(op,p={}) {
  const source=sources.find(s=>s.sourceRef===p.sourceRef)||sources[0];
  if(op==='auth.status')return {status:'authenticated',environment:'test',userId:42};
  if(op==='auth.config')return {callAssetBasePath:'/call',recordingWorkbenchEnabled:false,environment:'test'};
- if(op==='provider.capabilities')return {features:{},limits:{}};
+ if(op==='provider.capabilities')return {contractVersion:1,features:{offlineContextV1:true},limits:{}};
+ if(op==='offline-context' && p.operation==='capability')return {supported:true};
+ if(op==='offline-context' && p.operation==='list')return {entries:[],hasMore:false};
+ if(op==='offline-context' && p.operation==='coverage')return {observations:[]};
  if(op==='provider.instance')return {instanceId:'fixture'};
  if(op==='sources.list')return {directory:p.directory||'root',items:sources,hasMore:false,projection:{sendToSelf:sources[2],bots:[],visibility:sources.slice(0,2).map(source=>({entryKind:"source",entryRef:source.sourceRef,hidden:false}))}};
  if(op==='chat.member.private.open')return {source:sources[0]};
- if(op==='source.timeline')return {source,items:[{itemUid:source.sourceRef+'-m1',senderName:'张三',memberRef:'member-A',isMe:false,sendAtMillis:Date.now(),title:'',textContent:'这是独立窗口中的会话内容',status:1,templateKind:1,version:1}],hasMore:false};
+ if(op==='image.read')return {mediaType:'image/png',dataBase64:avatarBase64};
+ if(op==='source.timeline')return {source,items:[...(verifyAvatars?[{itemUid:source.sourceRef+'-self',senderName:'我',isMe:true,sendAtMillis:Date.now()-1,title:'',textContent:'自己的缓存消息',status:1}]:[]),{itemUid:source.sourceRef+'-m1',senderName:'张三',memberRef:'member-A',isMe:false,...(verifyAvatars?{avatarRef:'fixture-peer-avatar'}:{}),sendAtMillis:Date.now(),title:'',textContent:'这是独立窗口中的会话内容',status:1,templateKind:1,version:1}],hasMore:false};
  if(op==='files.send.tasks'||op==='source.ai-polish.notices')return [];
  if(op==='topic.dissolve.active'||op==='source.members.cached')return null;
  if(op==='source.members.page')return {kind:'membership',source,selfRole:'member',items:[{memberRef:'member-A',displayName:'张三',role:'member',status:'active',isSelf:false,isOwner:false,joinedAtMillis:1,recordCount:1,mentionCount:0}],joinEvents:[],removedMemberRefs:[],hasMore:false};
@@ -42,6 +84,7 @@ function value(op,p={}) {
  if(op==='source.ai-polish.settings')return {enabled:false};
  if(op==='arko.profile')return {displayName:'Arko',version:1};
  if(op==='arko.history')return {items:[],hasMore:false};
+ if(verifyAvatars && (op==='user.profile'||op==='user.profile.refresh'))return {profile:{userId:42,displayName:'测试用户',nickname:'测试用户',avatarRef:'fixture-self-avatar',arkmeId:'test42',accountType:0,createdAt:1,bindings:{apple:false,wechat:false,google:false},contact:{}}};
  if(op==='user.profile'||op==='user.profile.refresh')return {userId:42,displayName:'测试用户',nickname:'测试用户',avatarRef:'',arkmeId:'test42',accountType:0,createdAt:1,bindings:{apple:false,wechat:false,google:false},contact:{}};
  if(op==='bots.private-chat.directory')return {items:[]};
  if(op==='conversation.directory.visibility.query')return {items:sources.slice(0,2).map(source=>({entryKind:'source',entryRef:source.sourceRef,hidden:false}))};
@@ -57,13 +100,13 @@ function value(op,p={}) {
 (async()=>{
  const temp=await fs.mkdtemp('/private/tmp/arkme-conversation-electron-'); app.setPath('userData',path.join(temp,'browser')); await app.whenReady();
  ipcMain.on('arkme-session-selection:bootstrap', event => { event.returnValue = null; });
- for(const channel of ['arkme-desktop:attention-capabilities','arkme-runtime:page-ready-nonce','arkme-app-update:app-version','arkme:desktop-notification:permission-state']) ipcMain.on(channel,event=>{event.returnValue=null});
- for(const channel of ['arkme:runtime-update-notice:snapshot','arkme-app-update:notice','arkme:desktop-notification:refresh-permission']) ipcMain.handle(channel,()=>null);
+ for(const channel of ['arkme-app-update:app-version-code','arkme-desktop:branding-snapshot','arkme-desktop:attention-capabilities','arkme-runtime:page-ready-nonce','arkme-app-update:app-version','arkme:desktop-notification:permission-state']) ipcMain.on(channel,event=>{event.returnValue=null});
+ for(const channel of ['arkme-screenshot:shortcut-get','arkme:runtime-update-notice:snapshot','arkme-app-update:notice','arkme:desktop-notification:refresh-permission']) ipcMain.handle(channel,()=>null);
  ipcMain.on('arkme-runtime:harness-version', event => { event.returnValue = '0.1.5-rc.2'; });
  app.on('web-contents-created',(_e,w)=>{w.on('console-message',(_e,level,message)=>{if(level>=3&&!message.includes('WebSocket')&&!message.includes('404'))errors.push(message)});});
  server=createServer(async(req,res)=>{
   if(req.url==='/smoke-send'){let body='';for await(const c of req)body+=c;sends.push(JSON.parse(body));res.end('{}');return;}
-  if(req.method==='POST'){let body='';for await(const c of req)body+=c;const {operation,params}=JSON.parse(body);res.setHeader('Content-Type','application/json');const result=value(operation,params);res.end(JSON.stringify(result?.__unsupported ? {ok:false,error:{code:'fixture-unsupported',message:'fixture unsupported '+operation,retryable:false}} : {ok:true,value:result}));return;}
+  if(req.method==='POST'){let body='';for await(const c of req)body+=c;const {operation,params}=JSON.parse(body); if(operation==='image.read')imageReads++; if(holdReads && ['auth.status','auth.config','source.timeline',...(verifyAvatars?['image.read','user.profile','user.profile.refresh']:[])].includes(operation)) { heldReads.push({operation,respond:(failed=false)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify(failed ? {ok:false,error:{code:'fixture-offline',message:'offline',retryable:false}} : {ok:true,value:value(operation,params)}));}}); return; } res.setHeader('Content-Type','application/json');const result=value(operation,params);res.end(JSON.stringify(result?.__unsupported ? {ok:false,error:{code:'fixture-unsupported',message:'fixture unsupported '+operation,retryable:false}} : {ok:true,value:result}));return;}
   const name=req.url.split('?')[0];
   if(name==='/'||name===''){res.setHeader('Content-Type','text/html');res.end('<!doctype html><html><head><link rel="stylesheet" href="/style.css"></head><body style="margin:0"><div id="root"></div><script type="module" src="/conversation.js"></script></body></html>');return;}
   try{const file=await fs.readFile(path.join(assets,path.basename(name)));res.setHeader('Content-Type',name.endsWith('.css')?'text/css':'text/javascript');res.end(file);}catch{res.statusCode=404;res.end();}
@@ -74,10 +117,61 @@ function value(op,p={}) {
  manager=installConversationWindowIpc({main:()=>main,origin:()=>origin,scope:()=>origin,preload:()=>path.join(root,'dist/preload.cjs')});
  await main.loadURL(origin); await until(()=>main.webContents.executeJavaScript('typeof smokeOpen === "function"'),'main boot');
  await until(()=>main.webContents.executeJavaScript('!!Array.from(document.querySelectorAll("[data-arkme-directory-row=source]")).find(x=>x.innerText.includes("张三"))'),'actual directory');
+ await until(()=>main.webContents.executeJavaScript('document.body.innerText.includes("这是独立窗口中的会话内容")'),'main cached timeline');
+ if(verifyAvatars) {
+  await until(()=>main.webContents.executeJavaScript('Array.from(document.querySelectorAll("[data-arkme-message-avatar] img")).filter(x=>x.complete&&x.naturalWidth>0).length>=2'),'main resolved peer and self avatars');
+  imageReadsBeforeOpen=imageReads;
+ }
+ holdReads=true;
  await main.webContents.executeJavaScript('smokeDraft(0,"共享草稿"); Array.from(document.querySelectorAll("[data-arkme-directory-row=source]")).find(x=>x.innerText.includes("张三")).dispatchEvent(new MouseEvent("dblclick",{bubbles:true}))');
  await until(()=>manager.size===1,'child open'); const child=BrowserWindow.getAllWindows().find(w=>w!==main);
  await until(()=>child.webContents.executeJavaScript('typeof smokeRead === "function" && smokeRead(0)==="共享草稿"'),'draft boot');
  await until(()=>child.webContents.executeJavaScript('document.body.innerText.includes("这是独立窗口中的会话内容")'),'actual conversation surface');
+ // Real preload + native IPC + real ArkmeSurface: no auth/timeline response is allowed before the cached first paint.
+ await until(()=>heldReads.some(read=>read.operation==='auth.status'),'blocked child auth refresh');
+ assert.ok(manager.context(child.webContents.id)?.bootstrap?.content?.timeline?.items?.length > 0,'target-local message seed');
+ if(verifyAvatars) {
+  await until(()=>child.webContents.executeJavaScript('Array.from(document.querySelectorAll("[data-arkme-message-avatar] img")).filter(x=>x.complete&&x.naturalWidth>0).length>=2'),'cached peer and self avatars before network');
+  assert.ok(manager.context(child.webContents.id)?.bootstrap?.content?.avatars?.length>=2);
+  assert.equal(imageReads,imageReadsBeforeOpen,'cached avatars must not start another image.read');
+  await fs.writeFile(path.join(assets,'cached-avatars-first-paint.png'),(await child.webContents.capturePage()).toPNG());
+  holdReads=false; for(const read of heldReads.splice(0))read.respond();
+  console.log('PASS peer/self avatars and messages rendered while auth/timeline/profile/image responses are held; no duplicate image.read');
+  return;
+ }
+ await fs.writeFile(path.join(assets,'weak-network-cached-window.png'),(await child.webContents.capturePage()).toPNG());
+ holdReads=false; for(const read of heldReads.splice(0)) read.respond(process.env.ARKME_CONVERSATION_SMOKE_LOCAL_FIRST_ONLY==='1');
+ if(process.env.ARKME_CONVERSATION_SMOKE_STYLE_PARITY==='1') {
+  await checkStyleParity(main,child); return;
+ }
+ if(process.env.ARKME_CONVERSATION_SMOKE_LOCAL_FIRST_ONLY==='1') {
+  await until(()=>child.webContents.executeJavaScript('document.body.innerText.includes("同步失败")'),'non-destructive refresh failure');
+  assert.equal(await child.webContents.executeJavaScript('document.body.innerText.includes("这是独立窗口中的会话内容")'),true);
+  await fs.writeFile(path.join(assets,'weak-network-refresh-failed.png'),(await child.webContents.capturePage()).toPNG());
+  await child.webContents.executeJavaScript('Array.from(document.querySelectorAll("button")).filter(x=>x.textContent.trim()==="重试").forEach(x=>x.click())');
+  await until(()=>child.webContents.executeJavaScript('!document.body.innerText.includes("同步失败")'),'retry recovers without clearing messages');
+
+  for(const index of [1,2]) {
+   await main.webContents.executeJavaScript(`smokeSelect(${index})`);
+   await until(()=>main.webContents.executeJavaScript(`smokeCached(${index})`),'main target cached '+index);
+   holdReads=true;
+   await main.webContents.executeJavaScript(`smokeOpen(${index})`);
+   await until(()=>manager.size===index+1,'child type '+index);
+   const window=BrowserWindow.getAllWindows().find(w=>manager.context(w.webContents.id)?.source.sourceRef===sources[index].sourceRef);
+   await until(()=>window.webContents.executeJavaScript('document.body.innerText.includes("这是独立窗口中的会话内容")'),'cached child type '+index);
+   assert.ok(manager.context(window.webContents.id)?.bootstrap?.content?.timeline?.items?.length>0);
+   await fs.writeFile(path.join(assets,`weak-network-${sources[index].kind}.png`),(await window.webContents.capturePage()).toPNG());
+   holdReads=false; for(const read of heldReads.splice(0)) read.respond();
+  }
+
+  await until(()=>child.webContents.executeJavaScript('!Array.from(document.querySelectorAll("[role=alert]")).some(x=>x.innerText.includes("同步失败"))'),'recovered cached conversation');
+  await main.webContents.executeJavaScript('smokeOpen(0)'); assert.equal(manager.size,3);
+  await main.webContents.executeJavaScript('arkmeConversation.account(null)'); await until(()=>manager.size===0,'logout releases cached window');
+  assert.equal(errors.filter(e=>e.includes('Minified React error')||e.includes('Uncaught')).length,0);
+  console.log('PASS private/group/self cached first paint with auth/timeline responses held; failure preserves content; retry recovery; duplicate open; account invalidation');
+  return;
+ }
+
  assert.equal(await child.webContents.executeJavaScript('document.body.innerText.includes("回到主窗口")'),false);
  await main.webContents.executeJavaScript('smokeOpen(0)'); assert.equal(manager.size,1);
  await child.webContents.executeJavaScript('smokeDraft(0,"来自独立窗口")'); await until(()=>main.webContents.executeJavaScript('smokeRead(0)==="来自独立窗口"'),'reverse sync');
@@ -111,6 +205,6 @@ function value(op,p={}) {
  await main.webContents.executeJavaScript('arkmeConversation.account(null)'); await until(()=>manager.size===0,'logout closes children');
  console.log('UNKNOWN_FIXTURE_OPERATIONS',JSON.stringify([...unknown])); console.log('RENDER_ERRORS',JSON.stringify(errors));
  assert.equal(errors.filter(e=>e.includes('Minified React error')||e.includes('Uncaught')).length,0);
- console.log('PASS avatar new window/dedup/fallback/account isolation/visible calendar/menu on shared main+child surfaces/native window create/deduplicate/three conversation types/draft sync/send exclusion/close-reopen/logout');
+ console.log('PASS cached first paint while auth/timeline responses are held; avatar new window/dedup/fallback/account isolation/visible calendar/menu on shared main+child surfaces/native window create/deduplicate/three conversation types/draft sync/send exclusion/close-reopen/logout');
 })().then(()=>finish(0),e=>{console.error(e);console.log('UNKNOWN',JSON.stringify([...unknown]));console.log('ERRORS',JSON.stringify(errors)); if(main&&!main.isDestroyed()) main.webContents.executeJavaScript('document.body.innerText').then(text=>{console.log('MAIN_DOM',text);finish(1)}); else finish(1)});
 function finish(code){manager?.closeAll();for(const w of BrowserWindow.getAllWindows())w.destroy();server?.closeAllConnections();server?.close();app.exit(code);}

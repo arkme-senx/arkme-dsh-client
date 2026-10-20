@@ -903,7 +903,8 @@ contextBridge.exposeInMainWorld("arkmeAttachmentPreview", Object.freeze({
 const conversationPrefix = 'arkme-conversation:';
 contextBridge.exposeInMainWorld('arkmeConversation', Object.freeze({
  version: 1,
- open: (target: unknown) => ipcRenderer.invoke(conversationPrefix + 'open', target),
+ bootstrapVersion: 1,
+ open: (target: unknown, bootstrap?: unknown) => ipcRenderer.invoke(conversationPrefix + 'open', target, bootstrap),
  account: (account: string | null) => ipcRenderer.invoke(conversationPrefix + 'account', account),
  context: () => ipcRenderer.invoke(conversationPrefix + 'context'),
  active: () => ipcRenderer.invoke(conversationPrefix + 'active'),
