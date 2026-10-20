@@ -4,7 +4,7 @@ export interface ConversationTarget {
   sourceKey: string;
   source: { kind: 'private_chat' | 'group_chat' | 'send_to_self'; sourceRef: string; displayName: string; sourceKey?: string; [key: string]: unknown };
 }
-export type ConversationEvent = {kind: 'article'; key: string; value: unknown} | {kind: 'call'; source: ConversationTarget['source']; mediaType: 'audio' | 'video'} | { kind: 'draft'; key: string; value: unknown } | { kind: 'changed' } | { kind: 'activate'; source: ConversationTarget['source'] } | { kind: 'busy'; key: string; value: boolean };
+export type ConversationEvent = {kind: 'article'; key: string; value: unknown; revision?: number; restored?: boolean} | {kind: 'call'; source: ConversationTarget['source']; mediaType: 'audio' | 'video'} | { kind: 'draft'; key: string; value: unknown; revision?: number } | { kind: 'changed' } | { kind: 'activate'; source: ConversationTarget['source'] } | { kind: 'busy'; key: string; value: boolean };
 export interface ConversationWindow {
   id: number; show(): void; focus(): void; restore(): void; isMinimized(): boolean;
   close(): void; destroy?(): void; load(): Promise<void>; send(event: string, value?: unknown): void;
@@ -20,6 +20,7 @@ export class ConversationWindows {
   private persistence: ConversationDraftPersistence | undefined;
   private hydration: Promise<void> = Promise.resolve();
   private generation = 0;
+  private revision = 0;
   private loadFailed = false;
   private locks = new Map<string, {sender: number; token: string}>();
   private submissions = new Map<string, {sender: number; key: string}>();
@@ -39,7 +40,10 @@ export class ConversationWindows {
       if (persistenceError) throw persistenceError;
       return persistence?.load() ?? [];
     }).then(events => {
-      if (generation === this.generation) for (const event of events) this.drafts.set(event.key, event);
+      if (generation === this.generation) for (const event of events) {
+        this.revision = Math.max(this.revision, event.revision ?? 0);
+        this.drafts.set(event.key, event.kind === 'article' ? {...event, restored: true} : event);
+      }
     }).catch(error => { if (generation === this.generation) this.loadFailed = true; throw error; });
     return this.hydration;
   }
@@ -88,7 +92,10 @@ export class ConversationWindows {
       if (this.loadFailed) throw new Error('草稿恢复失败，原文件已保留，请重试');
       if (!this.drafts.has(event.key) && this.drafts.size >= 1000) throw new Error('本地草稿数量超过保存上限');
     }
-    if (event.kind === 'draft' || event.kind === 'article') this.drafts.set(event.key, event);
+    if (event.kind === 'draft' || event.kind === 'article') {
+      event = event.kind === 'article' ? {...event, revision: ++this.revision, restored: false} : {...event, revision: ++this.revision};
+      this.drafts.set(event.key, event);
+    }
     const scoped = {...event, accountKey: this.account ?? undefined};
     if (sender !== 0) this.ports.notify(scoped);
     for (const entry of this.entries.values()) if (entry.window.id !== sender && this.isActive(entry.window.id)) entry.window.send('event', scoped);

@@ -74,5 +74,6 @@ export class ConversationDraftStorage implements ConversationDraftPersistence {
 function isMissing(error: unknown): boolean { return error instanceof Error && 'code' in error && error.code === 'ENOENT'; }
 function validSnapshot(event: ConversationSnapshot): boolean {
   return !!event && (event.kind === 'draft' || event.kind === 'article') && typeof event.key === 'string'
+    && (event.revision === undefined || (Number.isSafeInteger(event.revision) && event.revision > 0))
     && event.key.length > 0 && event.key.length < 16384 && event.value !== undefined;
 }

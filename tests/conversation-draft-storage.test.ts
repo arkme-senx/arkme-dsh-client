@@ -40,10 +40,10 @@ it('restores through the broker across null boot state, runtime port changes and
  const directory=await root(); let scope='http://localhost:1';
  const make=()=>new ConversationWindows({scope:()=>scope,create:()=>{throw new Error('unused')},notify:()=>{},persistence:account=>new ConversationDraftStorage(directory,account)});
  const first=make(); await first.setAccount('prod:7'); await first.publish(0,draft);
- scope='http://localhost:2'; await first.setAccount(null); await first.setAccount('prod:7'); expect(first.snapshot()).toEqual([draft]);
- const second=make(); await second.setAccount(null); await second.setAccount('prod:7'); expect(second.snapshot()).toEqual([draft]);
+ scope='http://localhost:2'; await first.setAccount(null); await first.setAccount('prod:7'); expect(first.snapshot()).toEqual([{...draft,revision:1}]);
+ const second=make(); await second.setAccount(null); await second.setAccount('prod:7'); expect(second.snapshot()).toEqual([{...draft,revision:1}]);
  await second.publish(0,{...draft,value:null});
- const third=make(); await third.setAccount('prod:7'); expect(third.snapshot()).toEqual([{...draft,value:null}]);
+ const third=make(); await third.setAccount('prod:7'); expect(third.snapshot()).toEqual([{...draft,value:null,revision:2}]);
  await third.setAccount('test:7'); expect(third.snapshot()).toEqual([]);
 });
 it('drains accepted saves across a transient null account before reloading the same account', async () => {
@@ -58,5 +58,16 @@ it('drains accepted saves across a transient null account before reloading the s
  await manager.setAccount('prod:7'); const saving=manager.publish(0,draft);
  const leaving=manager.setAccount(null), returning=manager.setAccount('prod:7');
  await new Promise(resolve=>setTimeout(resolve,10)); expect(reads).toBe(1);
- complete(); await Promise.all([saving,leaving,returning]); expect(manager.snapshot()).toEqual([draft]);
+ complete(); await Promise.all([saving,leaving,returning]); expect(manager.snapshot()).toEqual([{...draft,revision:1}]);
 });
+
+it('marks disk articles as recovery snapshots and assigns revisions beyond the persisted maximum', async()=>{
+ const directory=await root(),account='prod:7';
+ const persistence=new ConversationDraftStorage(directory,account);await persistence.load()
+ await persistence.save({kind:'article',key:'card',revision:9,value:{sending:true}})
+ const manager=new ConversationWindows({scope:()=> 'profile',create:()=>{throw new Error('unused')},notify:()=>{},persistence:account=>new ConversationDraftStorage(directory,account)})
+ await manager.setAccount(account)
+ expect(manager.snapshot()).toEqual([{kind:'article',key:'card',revision:9,restored:true,value:{sending:true}}])
+ await manager.publish(0,{kind:'article',key:'card',revision:1,restored:true,value:null})
+ expect(manager.snapshot()).toEqual([{kind:'article',key:'card',revision:10,restored:false,value:null}])
+})
