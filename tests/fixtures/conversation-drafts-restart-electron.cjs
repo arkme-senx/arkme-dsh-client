@@ -34,12 +34,20 @@ app.on('before-quit',event=>{
  await window.loadURL(origin+(phase==='other-account'?'/?user=43':''));
  for(let attempt=0;attempt<100;attempt++) {if(await window.webContents.executeJavaScript('typeof draftReady === "function"'))break;await new Promise(resolve=>setTimeout(resolve,20))}
  await window.webContents.executeJavaScript('draftReady()');
- if(phase==='write')await window.webContents.executeJavaScript(keys.map((key,i)=>`draftWrite(${JSON.stringify(key)},${JSON.stringify(values[i])})`).join(';'));
+ if(phase==='write'||phase==='navigate')await window.webContents.executeJavaScript(keys.map((key,i)=>`draftWrite(${JSON.stringify(key)},${JSON.stringify(values[i])})`).join(';'));
  else if(phase==='read'||phase==='clear'){
   for(let i=0;i<keys.length;i++)assert.equal(await window.webContents.executeJavaScript(`draftRead(${JSON.stringify(keys[i])}).text`),values[i]);
   if(phase==='clear')await window.webContents.executeJavaScript(keys.map(key=>`draftClear(${JSON.stringify(key)})`).join(';'));
  } else if(phase==='read-cleared'||phase==='other-account')for(const key of keys)assert.equal(await window.webContents.executeJavaScript(`draftRead(${JSON.stringify(key)}).text`),'');
  else throw new Error('Unknown phase');
+ if(phase==='navigate'){
+  // Drain the live editor before replacing it with a native status page.
+  await manager.prepareToClose();
+  await window.loadURL('data:text/html,<p>Starting</p>');
+  // The status document has no editor callback: a stale handshake must not
+  // turn a subsequent shutdown into a five-second rejection.
+  await manager.prepareToClose();
+ }
  await fs.writeFile(path.join(root,phase+'.json'),JSON.stringify({phase,origin}));
  // Do not wait for the 40 ms edit timer: the real close barrier must flush it.
  app.quit();

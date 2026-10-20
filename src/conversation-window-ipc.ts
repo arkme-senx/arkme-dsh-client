@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { BrowserWindow, ipcMain, shell } from 'electron';
 import { ConversationWindows, type ConversationEvent } from './conversation-windows.js';
 import { installAttachmentPreviewNative } from './attachment-preview-native.js';
 import { ConversationDraftStorage } from './conversation-draft-storage.js';
@@ -9,11 +9,17 @@ export class ConversationDraftSaveError extends Error {
 }
 export function installConversationWindowIpc(options: {
  main(): BrowserWindow | null; origin(): string | null; scope(): string; preload(): string; draftsDirectory?(): string | null;
+ onDraftSaveError?(error: unknown): void;
 }) {
  const sameOrigin = (url: string) => { try { return new URL(url).origin === options.origin(); } catch { return false; } };
  const closePrepared = new Set<number>();
  const manager = new ConversationWindows({scope: options.scope,
-  persistence: account => { const root = options.draftsDirectory?.(); return root ? new ConversationDraftStorage(root, account) : undefined; },
+  persistence: account => {
+   if (!options.draftsDirectory) return undefined;
+   const root = options.draftsDirectory();
+   if (!root) throw new Error('Conversation draft Profile is unavailable');
+   return new ConversationDraftStorage(root, account);
+  },
   notify: event => { const main = options.main(); if (main && !main.isDestroyed()) main.webContents.send(prefix + 'event', event); },
   create: target => {
    const main = options.main(); if (!main || main.isDestroyed() || !sameOrigin(main.webContents.getURL())) throw new Error('Arkme 尚未就绪');
@@ -37,7 +43,7 @@ export function installConversationWindowIpc(options: {
     if (closePrepared.has(id)) return;
     event.preventDefault();
     void prepareToClose().then(() => { if (!window.isDestroyed()) { closePrepared.add(id); window.close(); } })
-     .catch(() => dialog.showErrorBox('草稿尚未保存', '请保留会话窗口，稍后重试关闭。'));
+     .catch(error => options.onDraftSaveError?.(error));
    });
    window.on('closed', () => closePrepared.delete(windowId));
    window.webContents.on('render-process-gone', () => window.destroy());
@@ -98,15 +104,23 @@ export function installConversationWindowIpc(options: {
   if (ready === true) {
    if (!observedFlushSenders.has(event.sender)) {
     observedFlushSenders.add(event.sender);
-    const id = event.sender.id; event.sender.once('destroyed', () => flushReady.delete(id));
+    const id = event.sender.id;
+    event.sender.once('destroyed', () => flushReady.delete(id));
+    event.sender.on('render-process-gone', () => flushReady.delete(id));
+    // Readiness belongs to the document, not the WebContents lifetime. Native
+    // status pages and a reloaded editor cannot acknowledge the old handler.
+    event.sender.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => {
+     if (mainFrame && !inPlace) flushReady.delete(id);
+    });
    }
    flushReady.add(event.sender.id);
   } else flushReady.delete(event.sender.id);
  });
  let closing: Promise<void> | undefined;
  const prepareToClose = (): Promise<void> => closing ??= (async () => {
-  const windows = BrowserWindow.getAllWindows().filter(window => flushReady.has(window.webContents.id)
-   && (window === options.main() || manager.isActive(window.webContents.id)) && !window.isDestroyed());
+  const windows = BrowserWindow.getAllWindows().filter(window => !window.isDestroyed()
+   && flushReady.has(window.webContents.id) && sameOrigin(window.webContents.getURL())
+   && (window === options.main() || manager.isActive(window.webContents.id)));
   const requestId = randomUUID();
   await new Promise<void>((resolve, reject) => {
    const waiting = new Set(windows.map(window => window.webContents.id));

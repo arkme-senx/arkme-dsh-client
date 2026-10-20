@@ -545,7 +545,6 @@ function registerApplicationLifecycle(): void {
     quit: () => app.quit(),
     onStopError: (error: unknown) => {
       console.error("Failed to stop Harness cleanly", error);
-      dialog.showErrorBox('未能安全退出', '草稿保存或服务退出尚未完成。窗口已保留，请稍后重试。');
     },
     onCloseError: (error: unknown) => {
       console.error("Failed to close directory picker bridge", error);
@@ -743,9 +742,11 @@ async function attestDesktopAccountScope(
   if (accountScopeTransitions.active) throw new Error("DSH account scope transition is already active");
   const store = accountScopeStore;
   if (store === null) throw new Error("DSH account scope store is unavailable");
+  await conversationWindows.prepareToClose();
   // Reconciliation only plans legacy moves. The stopped-process relaunch owns
   // the actual rename, including recovery after commit but before migration.
   const result = await store.reconcile(identity, {deferLegacyMigration: true});
+  if (result.status !== "ready") await renderAccountScopeWaiting();
   activeAccountScope = result.launch;
   accountScopeReady = result.status === "ready";
   if (accountScopeReady) {
@@ -753,7 +754,6 @@ async function attestDesktopAccountScope(
     await revealAttestedHarness();
   }
   else {
-    await renderAccountScopeWaiting();
     scheduleAccountScopeRelaunch();
   }
   return { status: result.status };
@@ -766,8 +766,8 @@ async function prepareDesktopAccountScope(
   const previousReady = accountScopeReady;
   return await accountScopeTransitions.prepare(identity, {
     enter: async () => {
-      accountScopeReady = false;
       await renderAccountScopeWaiting();
+      accountScopeReady = false;
     },
     restore: async () => {
       accountScopeReady = previousReady;
@@ -811,6 +811,7 @@ async function revealAttestedHarness(): Promise<void> {
 }
 
 async function renderAccountScopeWaiting(): Promise<void> {
+  if (activeHarnessOrigin !== null) await conversationWindows.prepareToClose();
   desktopSessionSelection.invalidate();
   const window = mainWindow;
   if (window === null || window.isDestroyed()) return;
@@ -843,7 +844,8 @@ function scheduleAccountScopeRelaunch(): void {
 }
 
 async function switchAccountScopeRuntime(): Promise<void> {
-  await conversationWindows.prepareToClose();
+  // The editor was drained before the account waiting page replaced it.
+  await conversationWindows.flush();
   desktopSessionSelection.invalidate();
   const store = accountScopeStore;
   const runtime = activeLaunchRuntime;
@@ -1540,8 +1542,9 @@ registerDesktopBrandingIpc<Electron.IpcMainInvokeEvent | Electron.IpcMainEvent>(
 const conversationWindows = installConversationWindowIpc({
   main: () => mainWindow,
   origin: () => activeHarnessOrigin,
-  scope: () => JSON.stringify([activeHarnessOrigin, activeAccountScope?.dshHome, accountScopeReady]),
-  draftsDirectory: () => accountScopeReady && activeAccountScope ? path.join(path.dirname(activeAccountScope.settingsPath), 'conversation-drafts') : null,
+  scope: () => JSON.stringify([activeHarnessOrigin, activeAccountScope?.dshHome]),
+  draftsDirectory: () => activeAccountScope ? path.join(path.dirname(activeAccountScope.settingsPath), 'conversation-drafts') : null,
+  onDraftSaveError: error => logDiagnostic('conversation-draft-save-failed', error),
   preload: () => resolveArkmePreloadPath(moduleDirectory, app.isPackaged, process.resourcesPath),
 });
 
@@ -1735,6 +1738,8 @@ function installNavigationPolicy(window: BrowserWindow): void {
 async function renderState(state: HarnessState | RuntimeInstallProgress): Promise<void> {
   const window = mainWindow;
   if (window === null || window.isDestroyed()) return;
+  // Every native page replacement must drain the still-live editor first.
+  if (activeHarnessOrigin !== null) await conversationWindows.prepareToClose();
 
   if (state.kind === "ready") {
     lastHarnessReadyState = state;
@@ -1869,6 +1874,7 @@ function installApplicationMenu(): void {
           label: "重新启动 Harness",
           accelerator: "CmdOrCtrl+Shift+R",
           click: () => enqueueAction(async () => {
+            await conversationWindows.prepareToClose();
             await controller?.retry();
           })
         },
@@ -1919,8 +1925,8 @@ async function refreshAccountScopeMenu(): Promise<void> {
 async function activateDesktopAccountContainer(containerRef: string): Promise<void> {
   const store = accountScopeStore;
   if (store === null) throw new Error("DSH account scope store is unavailable");
-  accountScopeReady = false;
   await renderAccountScopeWaiting();
+  accountScopeReady = false;
   activeAccountScope = await store.activate(containerRef);
   scheduleAccountScopeRelaunch();
 }
@@ -1992,7 +1998,7 @@ async function reloadCurrentRuntimeEnvironment(): Promise<void> {
 }
 
 async function showActionError(error: unknown): Promise<void> {
-  if (error instanceof ConversationDraftSaveError) { dialog.showErrorBox('草稿尚未保存', error.message); return; }
+  if (error instanceof ConversationDraftSaveError) { logDiagnostic('conversation-draft-save-failed', error); return; }
   console.error("Desktop action failed", error);
   await renderFailure(error);
 }

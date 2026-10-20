@@ -31,9 +31,14 @@ export class ConversationWindows {
     this.account = account; this.accountScope = this.ports.scope(); this.closeAll(); this.drafts.clear(); this.locks.clear();
     this.loadFailed = false;
     const previous = this.persistence, priorHydration = this.hydration;
-    this.persistence = account === null ? undefined : this.ports.persistence?.(account);
+    let persistenceError: unknown;
+    try { this.persistence = account === null ? undefined : this.ports.persistence?.(account); }
+    catch (error) { this.persistence = undefined; persistenceError = error; }
     const persistence = this.persistence;
-    this.hydration = priorHydration.catch(() => undefined).then(() => previous?.flush()).then(() => persistence?.load() ?? []).then(events => {
+    this.hydration = priorHydration.catch(() => undefined).then(() => previous?.flush()).then(() => {
+      if (persistenceError) throw persistenceError;
+      return persistence?.load() ?? [];
+    }).then(events => {
       if (generation === this.generation) for (const event of events) this.drafts.set(event.key, event);
     }).catch(error => { if (generation === this.generation) this.loadFailed = true; throw error; });
     return this.hydration;
