@@ -1,9 +1,10 @@
+import type { ConversationDraftPersistence } from './conversation-draft-storage.js';
 export interface ConversationTarget {
   accountKey: string;
   sourceKey: string;
   source: { kind: 'private_chat' | 'group_chat' | 'send_to_self'; sourceRef: string; displayName: string; sourceKey?: string; [key: string]: unknown };
 }
-export type ConversationEvent = {kind: 'article'; key: string; value: unknown} | {kind: 'call'; source: ConversationTarget['source']; mediaType: 'audio' | 'video'} | { kind: 'draft'; key: string; value: unknown } | { kind: 'changed' } | { kind: 'activate'; source: ConversationTarget['source'] } | { kind: 'busy'; key: string; value: boolean };
+export type ConversationEvent = {kind: 'article'; key: string; value: unknown; revision?: number; restored?: boolean} | {kind: 'call'; source: ConversationTarget['source']; mediaType: 'audio' | 'video'} | { kind: 'draft'; key: string; value: unknown; revision?: number } | { kind: 'changed' } | { kind: 'activate'; source: ConversationTarget['source'] } | { kind: 'busy'; key: string; value: boolean };
 export interface ConversationWindow {
   id: number; show(): void; focus(): void; restore(): void; isMinimized(): boolean;
   close(): void; destroy?(): void; load(): Promise<void>; send(event: string, value?: unknown): void;
@@ -14,16 +15,39 @@ export class ConversationWindows {
   private account: string | null = null;
   private accountScope = "";
   private closing = new Set<number>();
-  matchesAccount(account: unknown): boolean { return account === this.account && account !== null && this.accountScope === this.ports.scope(); }
+  matchesAccount(account: unknown): boolean { return account === this.account && account !== null && !this.loadFailed && this.accountScope === this.ports.scope(); }
   private drafts = new Map<string, ConversationEvent>();
+  private persistence: ConversationDraftPersistence | undefined;
+  private hydration: Promise<void> = Promise.resolve();
+  private generation = 0;
+  private revision = 0;
+  private loadFailed = false;
   private locks = new Map<string, {sender: number; token: string}>();
   private submissions = new Map<string, {sender: number; key: string}>();
-  constructor(private readonly ports: { scope(): string; create(target: ConversationTarget): ConversationWindow; notify(event: ConversationEvent): void }) {}
+  constructor(private readonly ports: { scope(): string; create(target: ConversationTarget): ConversationWindow; notify(event: ConversationEvent): void; persistence?(account: string): ConversationDraftPersistence | undefined }) {}
   get size() { return this.entries.size; }
-  setAccount(account: string | null): void {
-    if (account === this.account && this.accountScope === this.ports.scope()) return;
+  setAccount(account: string | null): Promise<void> {
+    if (account === this.account && this.accountScope === this.ports.scope() && !this.loadFailed) return this.hydration;
+    const generation = ++this.generation;
     this.account = account; this.accountScope = this.ports.scope(); this.closeAll(); this.drafts.clear(); this.locks.clear();
+    this.loadFailed = false;
+    const previous = this.persistence, priorHydration = this.hydration;
+    let persistenceError: unknown;
+    try { this.persistence = account === null ? undefined : this.ports.persistence?.(account); }
+    catch (error) { this.persistence = undefined; persistenceError = error; }
+    const persistence = this.persistence;
+    this.hydration = priorHydration.catch(() => undefined).then(() => previous?.flush()).then(() => {
+      if (persistenceError) throw persistenceError;
+      return persistence?.load() ?? [];
+    }).then(events => {
+      if (generation === this.generation) for (const event of events) {
+        this.revision = Math.max(this.revision, event.revision ?? 0);
+        this.drafts.set(event.key, event.kind === 'article' ? {...event, restored: true} : event);
+      }
+    }).catch(error => { if (generation === this.generation) this.loadFailed = true; throw error; });
+    return this.hydration;
   }
+  async flush(): Promise<void> { await this.hydration; await this.persistence?.flush(); }
   validateTarget(value: unknown): ConversationTarget {
     const raw = value as ConversationTarget | null;
     if (!raw || typeof raw !== 'object' || !raw.source || !['private_chat', 'group_chat', 'send_to_self'].includes(raw.source.kind)
@@ -48,7 +72,7 @@ export class ConversationWindows {
       for (const [token, item] of this.submissions) if (item.sender === window.id) this.release(item.sender, item.key, token);
     });
     try { await window.load(); if (this.isActive(window.id)) { window.show(); window.focus(); } }
-    catch (error) { window.close(); throw error; }
+    catch (error) { if (window.destroy) window.destroy(); else window.close(); throw error; }
   }
   context(id: number): ConversationTarget | undefined { return this.isActive(id) ? this.entries.get(id)?.target : undefined; }
   isActive(id: number): boolean {
@@ -62,12 +86,20 @@ export class ConversationWindows {
   }
   close(id: number): void { if (!this.deferClose(id)) this.entries.get(id)?.window.close(); }
   snapshot(): ConversationEvent[] { return [...this.drafts.values(), ...[...this.locks.keys()].map(key => ({kind: 'busy' as const, key, value: true}))]; }
-  publish(sender: number, event: ConversationEvent): void {
+  async publish(sender: number, event: ConversationEvent): Promise<void> {
     if (sender > 0 && !this.isActive(sender)) return;
-    if (event.kind === 'draft' || event.kind === 'article') this.drafts.set(event.key, event);
+    if (event.kind === 'draft' || event.kind === 'article') {
+      if (this.loadFailed) throw new Error('草稿恢复失败，原文件已保留，请重试');
+      if (!this.drafts.has(event.key) && this.drafts.size >= 1000) throw new Error('本地草稿数量超过保存上限');
+    }
+    if (event.kind === 'draft' || event.kind === 'article') {
+      event = event.kind === 'article' ? {...event, revision: ++this.revision, restored: false} : {...event, revision: ++this.revision};
+      this.drafts.set(event.key, event);
+    }
     const scoped = {...event, accountKey: this.account ?? undefined};
     if (sender !== 0) this.ports.notify(scoped);
     for (const entry of this.entries.values()) if (entry.window.id !== sender && this.isActive(entry.window.id)) entry.window.send('event', scoped);
+    return (event.kind === 'draft' || event.kind === 'article') ? this.persistence?.save(event) ?? Promise.resolve() : Promise.resolve();
   }
   acquire(sender: number, key: string, token = key): boolean {
     if ((sender !== 0 && !this.isActive(sender)) || this.locks.has(key) || this.submissions.has(token)) return false;

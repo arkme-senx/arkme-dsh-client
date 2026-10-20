@@ -903,6 +903,7 @@ contextBridge.exposeInMainWorld("arkmeAttachmentPreview", Object.freeze({
 const conversationPrefix = 'arkme-conversation:';
 contextBridge.exposeInMainWorld('arkmeConversation', Object.freeze({
  version: 1,
+ draftPersistence: 1,
  open: (target: unknown) => ipcRenderer.invoke(conversationPrefix + 'open', target),
  account: (account: string | null) => ipcRenderer.invoke(conversationPrefix + 'account', account),
  context: () => ipcRenderer.invoke(conversationPrefix + 'context'),
@@ -915,6 +916,17 @@ contextBridge.exposeInMainWorld('arkmeConversation', Object.freeze({
  acquire: (key: string, account: string, token: string) => ipcRenderer.invoke(conversationPrefix + 'acquire', key, account, token),
  consumed: (key: string, account: string, token: string) => ipcRenderer.invoke(conversationPrefix + 'consumed', key, account, token),
  release: (key: string, account: string, token: string) => ipcRenderer.invoke(conversationPrefix + 'release', key, account, token),
+ onFlush: (listener: () => Promise<void>) => {
+  const handler = (_event: Electron.IpcRendererEvent, requestId: unknown) => {
+   if (typeof requestId !== 'string') return;
+   void Promise.resolve().then(listener).then(
+    () => ipcRenderer.send(conversationPrefix + 'flushed', requestId, true),
+    () => ipcRenderer.send(conversationPrefix + 'flushed', requestId, false));
+  };
+  ipcRenderer.on(conversationPrefix + 'flush', handler);
+  ipcRenderer.send(conversationPrefix + 'flush-ready', true);
+  return () => { ipcRenderer.removeListener(conversationPrefix + 'flush', handler); ipcRenderer.send(conversationPrefix + 'flush-ready', false); };
+ },
  onEvent: (listener: (value: unknown) => void) => {
   const handler = (_event: Electron.IpcRendererEvent, value: unknown) => listener(value);
   ipcRenderer.on(conversationPrefix + 'event', handler);
