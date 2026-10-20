@@ -3,7 +3,7 @@ import { revealAfterAccountAcknowledgement } from "./account-scope-navigation.js
 import { isMasChannel, resolveMasRuntime, MasBookmarks } from "./mas/runtime.js";
 import {installScreenshotShortcut} from './screenshot-shortcut-ipc.js';
 import { installScreenshotIpc } from './desktop-screenshot-ipc.js';
-import { installConversationWindowIpc } from './conversation-window-ipc.js';
+import { ConversationDraftSaveError, installConversationWindowIpc } from './conversation-window-ipc.js';
 import { installAttachmentPreviewNative } from "./attachment-preview-native.js";
 import { installLongArticleWindowIpc } from "./long-article-window-ipc.js";
 import { DesktopSessionSelection } from "./session-selection.js";
@@ -255,6 +255,7 @@ let runtimeDataStore: RuntimeDataTransactionStore | null = null;
 let runtimeRecoveryRequired = false;
 let bufferedHarnessReadyState: Extract<HarnessState, {kind: "ready"}> | null = null;
 let controller: DesktopController | null = null;
+let conversationQuitPrepared = false;
 let activeHarnessOrigin: string | null = null;
 let activeHarnessVersion: string | undefined;
 let logPath = "";
@@ -544,6 +545,7 @@ function registerApplicationLifecycle(): void {
     quit: () => app.quit(),
     onStopError: (error: unknown) => {
       console.error("Failed to stop Harness cleanly", error);
+      dialog.showErrorBox('未能安全退出', '草稿保存或服务退出尚未完成。窗口已保留，请稍后重试。');
     },
     onCloseError: (error: unknown) => {
       console.error("Failed to close directory picker bridge", error);
@@ -591,10 +593,12 @@ function registerApplicationLifecycle(): void {
 
 async function stopHarnessForExit(): Promise<void> {
   if (longArticleWindows.size > 0) throw new Error("请先保存并关闭长文窗口，再重试更新或退出");
+  await conversationWindows.prepareToClose();
   desktopSessionSelection.invalidate();
   await desktopSessionSelection.flush();
   await controller?.stop("quit");
   await harnessCookieInstaller?.idle();
+  conversationQuitPrepared = true;
 }
 
 async function closeDirectoryPickerForExit(): Promise<void> {
@@ -839,6 +843,7 @@ function scheduleAccountScopeRelaunch(): void {
 }
 
 async function switchAccountScopeRuntime(): Promise<void> {
+  await conversationWindows.prepareToClose();
   desktopSessionSelection.invalidate();
   const store = accountScopeStore;
   const runtime = activeLaunchRuntime;
@@ -1536,6 +1541,7 @@ const conversationWindows = installConversationWindowIpc({
   main: () => mainWindow,
   origin: () => activeHarnessOrigin,
   scope: () => JSON.stringify([activeHarnessOrigin, activeAccountScope?.dshHome, accountScopeReady]),
+  draftsDirectory: () => accountScopeReady && activeAccountScope ? path.join(path.dirname(activeAccountScope.settingsPath), 'conversation-drafts') : null,
   preload: () => resolveArkmePreloadPath(moduleDirectory, app.isPackaged, process.resourcesPath),
 });
 
@@ -1630,6 +1636,7 @@ function createMainWindow(): void {
   }, statusHtmlPath, runtimeEnvironment);
 
   lockWindowTitle(mainWindow, appName);
+  mainWindow.on('close', event => { if (!conversationQuitPrepared) { event.preventDefault(); app.quit(); } });
   mainWindow.on('closed', () => conversationWindows.closeAll());
   mainWindow.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) conversationWindows.closeAll(); });
   mainWindow.webContents.on('render-process-gone', () => conversationWindows.closeAll());
@@ -1924,6 +1931,7 @@ function enqueueAction(action: () => Promise<void>): void {
 
 async function handleAppAction(action: AppAction): Promise<void> {
   if (appUpdateNotices.isInstalling()) return;
+  if (action === 'reload-runtime' || action === 'retry' || action === 'choose-workspace') await conversationWindows.prepareToClose();
   if (action === "reload-runtime") {
     await reloadCurrentRuntimeEnvironment();
     return;
@@ -1957,6 +1965,7 @@ async function handleAppAction(action: AppAction): Promise<void> {
 }
 
 async function reloadCurrentRuntimeEnvironment(): Promise<void> {
+  await conversationWindows.prepareToClose();
   if (!app.isPackaged || runtimeManager === null) {
     throw new Error("当前客户端没有可重新加载的运行环境");
   }
@@ -1983,6 +1992,7 @@ async function reloadCurrentRuntimeEnvironment(): Promise<void> {
 }
 
 async function showActionError(error: unknown): Promise<void> {
+  if (error instanceof ConversationDraftSaveError) { dialog.showErrorBox('草稿尚未保存', error.message); return; }
   console.error("Desktop action failed", error);
   await renderFailure(error);
 }

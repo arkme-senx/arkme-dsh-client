@@ -1,12 +1,19 @@
-import { BrowserWindow, ipcMain, shell } from 'electron';
+import { BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { ConversationWindows, type ConversationEvent } from './conversation-windows.js';
 import { installAttachmentPreviewNative } from './attachment-preview-native.js';
+import { ConversationDraftStorage } from './conversation-draft-storage.js';
+import { randomUUID } from 'node:crypto';
 const prefix = 'arkme-conversation:';
+export class ConversationDraftSaveError extends Error {
+ constructor(cause: unknown) { super('草稿尚未保存，窗口已保留，请稍后重试。', {cause}); this.name = 'ConversationDraftSaveError'; }
+}
 export function installConversationWindowIpc(options: {
- main(): BrowserWindow | null; origin(): string | null; scope(): string; preload(): string;
+ main(): BrowserWindow | null; origin(): string | null; scope(): string; preload(): string; draftsDirectory?(): string | null;
 }) {
  const sameOrigin = (url: string) => { try { return new URL(url).origin === options.origin(); } catch { return false; } };
+ const closePrepared = new Set<number>();
  const manager = new ConversationWindows({scope: options.scope,
+  persistence: account => { const root = options.draftsDirectory?.(); return root ? new ConversationDraftStorage(root, account) : undefined; },
   notify: event => { const main = options.main(); if (main && !main.isDestroyed()) main.webContents.send(prefix + 'event', event); },
   create: target => {
    const main = options.main(); if (!main || main.isDestroyed() || !sameOrigin(main.webContents.getURL())) throw new Error('Arkme 尚未就绪');
@@ -14,6 +21,7 @@ export function installConversationWindowIpc(options: {
    const window = new BrowserWindow({width: 900, height: 780, minWidth: 640, minHeight: 520, show: false,
     title: target.source.displayName, backgroundColor: '#ffffff', autoHideMenuBar: true,
     webPreferences: {session: main.webContents.session, preload: options.preload(), sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true}});
+   const windowId = window.webContents.id;
    const preview = installAttachmentPreviewNative(window, options.origin);
    window.webContents.on('will-navigate', (event, destination) => { if (destination !== url.href) event.preventDefault(); });
    window.webContents.on('will-redirect', event => event.preventDefault());
@@ -23,7 +31,15 @@ export function installConversationWindowIpc(options: {
     try { if (['http:', 'https:'].includes(new URL(details.url).protocol)) void shell.openExternal(details.url); } catch {}
     return {action: 'deny'};
    });
-   window.on('close', event => { if (manager.deferClose(window.webContents.id)) event.preventDefault(); });
+   window.on('close', event => {
+    const id = window.webContents.id;
+    if (manager.deferClose(id)) { event.preventDefault(); return; }
+    if (closePrepared.has(id)) return;
+    event.preventDefault();
+    void prepareToClose().then(() => { if (!window.isDestroyed()) { closePrepared.add(id); window.close(); } })
+     .catch(() => dialog.showErrorBox('草稿尚未保存', '请保留会话窗口，稍后重试关闭。'));
+   });
+   window.on('closed', () => closePrepared.delete(windowId));
    window.webContents.on('render-process-gone', () => window.destroy());
    return { id: window.webContents.id, show: () => window.show(), focus: () => window.focus(), restore: () => window.restore(),
     isMinimized: () => window.isMinimized(), close: () => window.close(), destroy: () => window.destroy(), load: () => window.loadURL(url.href),
@@ -36,21 +52,25 @@ export function installConversationWindowIpc(options: {
   if (manager.isActive(event.sender.id)) return event.sender.id;
  };
  const keyValid = (key: unknown): key is string => typeof key === 'string' && key.length > 0 && key.length < 16384;
- ipcMain.handle(prefix + 'account', (event, account: unknown) => {
+ ipcMain.handle(prefix + 'account', async (event, account: unknown) => {
   if (sender(event) !== 0 || (account !== null && (typeof account !== 'string' || account.length > 256))) return false;
-  manager.setAccount(account as string | null); return true;
+  await manager.setAccount(account as string | null); return true;
  });
  ipcMain.handle(prefix + 'open', async (event, target: unknown) => { if (sender(event) === undefined) throw new Error('Untrusted conversation opener'); await manager.open(target); return true; });
  ipcMain.handle(prefix + 'context', event => sender(event) === undefined ? null : manager.context(event.sender.id) ?? null);
  ipcMain.handle(prefix + 'active', event => sender(event) !== undefined);
  ipcMain.handle(prefix + 'close', event => { if (sender(event)) manager.close(event.sender.id); });
- ipcMain.handle(prefix + 'snapshot', (event, account: unknown) => sender(event) === undefined || !manager.matchesAccount(account) ? [] : manager.snapshot());
- ipcMain.handle(prefix + 'publish', (event, value: unknown, account: unknown) => {
+ ipcMain.handle(prefix + 'snapshot', async (event, account: unknown) => {
+  await manager.flush();
+  return sender(event) === undefined || !manager.matchesAccount(account) ? [] : manager.snapshot();
+ });
+ ipcMain.handle(prefix + 'publish', async (event, value: unknown, account: unknown) => {
+  await manager.flush();
   if (!manager.matchesAccount(account)) return false;
   const id = sender(event); if (id === undefined || !value || typeof value !== 'object') return false;
   const message = value as ConversationEvent;
   if (message.kind !== 'changed' && ((message.kind !== 'draft' && message.kind !== 'article') || !keyValid(message.key) || JSON.stringify(message).length > 2000000)) return false;
-  manager.publish(id, message); return true;
+  await manager.publish(id, message); return true;
  });
  ipcMain.handle(prefix + 'acquire', (event, key: unknown, account: unknown, token: unknown) => { const id = sender(event); return manager.matchesAccount(account) && id !== undefined && keyValid(key) && keyValid(token) && manager.acquire(id, key, token); });
  ipcMain.handle(prefix + 'consumed', (event, key: unknown, account: unknown, token: unknown) => { const id = sender(event); if (manager.matchesAccount(account) && id !== undefined && keyValid(key) && keyValid(token)) manager.consumed(id, key, token); });
@@ -69,5 +89,39 @@ export function installConversationWindowIpc(options: {
   manager.publish(id, {kind: 'activate', source: destination.source});
   if (main.isMinimized()) main.restore(); main.show(); main.focus(); return true;
  });
- return manager;
+ const flushReady = new Set<number>();
+ const observedFlushSenders = new WeakSet<Electron.WebContents>();
+ ipcMain.on(prefix + 'flush-ready', (event, ready: unknown) => {
+  // Reuse the main-frame/origin gate used by all conversation IPC.
+  if (!event.senderFrame || event.senderFrame !== event.sender.mainFrame || !sameOrigin(event.senderFrame.url)) return;
+  if (event.sender.id !== options.main()?.webContents.id && !manager.isActive(event.sender.id)) return;
+  if (ready === true) {
+   if (!observedFlushSenders.has(event.sender)) {
+    observedFlushSenders.add(event.sender);
+    const id = event.sender.id; event.sender.once('destroyed', () => flushReady.delete(id));
+   }
+   flushReady.add(event.sender.id);
+  } else flushReady.delete(event.sender.id);
+ });
+ let closing: Promise<void> | undefined;
+ const prepareToClose = (): Promise<void> => closing ??= (async () => {
+  const windows = BrowserWindow.getAllWindows().filter(window => flushReady.has(window.webContents.id)
+   && (window === options.main() || manager.isActive(window.webContents.id)) && !window.isDestroyed());
+  const requestId = randomUUID();
+  await new Promise<void>((resolve, reject) => {
+   const waiting = new Set(windows.map(window => window.webContents.id));
+   const finish = (error?: Error) => { clearTimeout(timer); ipcMain.removeListener(prefix + 'flushed', acknowledged); error ? reject(error) : resolve(); };
+   const acknowledged = (event: Electron.IpcMainEvent, id: unknown, ok: unknown) => {
+    if (id !== requestId || !waiting.has(event.sender.id) || !event.senderFrame || event.senderFrame !== event.sender.mainFrame || !sameOrigin(event.senderFrame.url)) return;
+    if (ok !== true) { finish(new Error('草稿保存失败，请保留窗口并重试')); return; }
+    waiting.delete(event.sender.id); if (waiting.size === 0) finish();
+   };
+   const timer = setTimeout(() => finish(new Error('草稿尚未保存，请稍后重试退出')), 5000);
+   ipcMain.on(prefix + 'flushed', acknowledged);
+   if (waiting.size === 0) finish();
+   for (const window of windows) window.webContents.send(prefix + 'flush', requestId);
+  });
+  await manager.flush();
+ })().catch(error => { throw new ConversationDraftSaveError(error); }).finally(() => { closing = undefined; });
+ return Object.assign(manager, {prepareToClose});
 }
