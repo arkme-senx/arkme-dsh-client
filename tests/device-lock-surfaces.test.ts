@@ -38,14 +38,47 @@ vi.mock('electron', async () => {
 function setup() {
   const window = new BrowserWindow({show: true}) as any;
   const original = {show: window.show, showInactive: window.showInactive, focus: window.focus, hide: window.hide};
-  let locked = false;
-  const snapshot = (): DeviceLockSnapshot => ({supported: true, locked, sessionEnded: false, needsCredentials: false, platform: 'macos', message: ''});
-  const owner = {get protected() {return locked;}, snapshot} as DesktopDeviceLockOwner;
+  let locked = false, sessionEnded = false;
+  const snapshot = (): DeviceLockSnapshot => ({supported: true, locked: locked || sessionEnded, sessionEnded, needsCredentials: false, platform: 'macos', message: ''});
+  const owner = {get protected() {return locked || sessionEnded;}, snapshot} as DesktopDeviceLockOwner;
   const surfaces = new DeviceLockSurfaces(owner, 'preload', 'lock.html');
-  return {window, original, surfaces, update: (value: boolean) => {locked = value; surfaces.update(snapshot());}, guard: () => mock.windows.at(-1)};
+  return {window, original, surfaces,
+    update: (value: boolean, ended = false) => {locked = value; sessionEnded = ended; surfaces.update(snapshot());},
+    guard: () => mock.windows.at(-1)};
 }
 beforeEach(() => {mock.app.removeAllListeners(); mock.windows.length = 0;});
 describe('lock surface visibility', () => {
+  it('protects an ended session without presenting it as a device lock', () => {
+    const f = setup(); f.window.focused = true;
+    f.update(false, true);
+    const guard = f.guard();
+    expect(f.window.isVisible()).toBe(false);
+    expect(f.window.isContentProtected()).toBe(true);
+    expect(f.window.getTitle()).toBe('正在退出登录…');
+    expect(guard.getTitle()).toBe('正在退出登录…');
+    f.window.setTitle('private account');
+    expect(f.window.getTitle()).toBe('正在退出登录…');
+    guard.show.mockClear(); guard.focus.mockClear();
+    for (let i = 0; i < 1000; i++) f.update(false, true);
+    expect(guard.show).not.toHaveBeenCalled();
+    expect(guard.focus).not.toHaveBeenCalled();
+    f.update(false);
+    expect(guard.isDestroyed()).toBe(true);
+    expect(f.window.isVisible()).toBe(true);
+    expect(f.window.getTitle()).toBe('private account');
+  });
+  it('reuses an existing lock guard for logout without reactivating it', () => {
+    const f = setup(); f.update(true);
+    const guard = f.guard(); guard.show.mockClear(); guard.showInactive.mockClear(); guard.focus.mockClear();
+    f.update(true, true);
+    expect(f.guard()).toBe(guard);
+    expect(guard.getTitle()).toBe('正在退出登录…');
+    expect(f.window.getTitle()).toBe('正在退出登录…');
+    expect(guard.show).not.toHaveBeenCalled();
+    expect(guard.showInactive).not.toHaveBeenCalled();
+    expect(guard.focus).not.toHaveBeenCalled();
+    expect(f.window.isVisible()).toBe(false);
+  });
   it('never shows or focuses windows on ordinary unlocked snapshots', () => {
     const f = setup(); f.window.minimized = true;
     for (let i = 0; i < 1000; i++) f.update(false);

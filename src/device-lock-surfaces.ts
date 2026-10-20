@@ -39,6 +39,7 @@ export class DeviceLockSurfaces {
     this.update(owner.snapshot());
   }
   private allowed(id: number): boolean { return this.guard?.webContents.id === id; }
+  private get title(): string { return this.owner.snapshot().sessionEnded ? "正在退出登录…" : "即我已锁定"; }
   revealOnActivate(window: BrowserWindow | null): void {
     if (window === null || window.isDestroyed() || !this.windows.has(window)
       || BrowserWindow.getAllWindows().some(item => item.isVisible())) return;
@@ -62,9 +63,9 @@ export class DeviceLockSurfaces {
     };
     window.hide = () => { state.visible = false; state.hide(); };
     window.focus = () => { if (this.owner.protected) this.showGuard(window); else state.focus(); };
-    window.setTitle = title => { state.title = title; state.setTitle(this.owner.protected ? "即我已锁定" : title); };
+    window.setTitle = title => { state.title = title; state.setTitle(this.owner.protected ? this.title : title); };
     window.on("page-title-updated", (event, title) => {
-      if (this.owner.protected) { event.preventDefault(); state.title = title; state.setTitle("即我已锁定"); }
+      if (this.owner.protected) { event.preventDefault(); state.title = title; state.setTitle(this.title); }
     });
     window.on("show", () => {
       if (this.owner.protected) { state.visible = true; this.protect(window); this.showGuard(window); }
@@ -78,6 +79,7 @@ export class DeviceLockSurfaces {
   }
   private protect(window: BrowserWindow): void {
     const state = this.windows.get(window); if (state === undefined || window.isDestroyed()) return;
+    if (window.getTitle() !== this.title) state.setTitle(this.title);
     if (this.covers.has(window) && !window.isVisible()) return;
     // An opaque native child also protects any synchronous show during window
     // construction; hide removes the underlying view from native accessibility.
@@ -88,7 +90,7 @@ export class DeviceLockSurfaces {
       window.contentView.addChildView(cover); this.resizeCover(window);
     }
     window.setContentProtection(true); window.webContents.closeDevTools();
-    state.setTitle("即我已锁定"); state.hide();
+    state.hide();
     if (process.platform === "darwin") window.closeFilePreview();
   }
   private resizeCover(window: BrowserWindow): void {
@@ -102,7 +104,7 @@ export class DeviceLockSurfaces {
       this.creatingGuard = true;
       let guard: BrowserWindow;
       try {
-        guard = new BrowserWindow({ ...source.getBounds(), show: false, title: "即我已锁定",
+        guard = new BrowserWindow({ ...source.getBounds(), show: false, title: this.title,
           minWidth: 420, minHeight: 400, backgroundColor: "#eeeeee",
           webPreferences: { preload: this.preload, contextIsolation: true, sandbox: true, nodeIntegration: false } });
       } finally { this.creatingGuard = false; }
@@ -139,6 +141,7 @@ export class DeviceLockSurfaces {
         this.protect(window);
       }
       if (changed && visible !== undefined && this.guard === undefined) this.showGuard(focused ?? visible, focused !== undefined);
+      if (this.guard !== undefined && this.guard.getTitle() !== this.title) this.guard.setTitle(this.title);
       this.guard?.webContents.send("arkme-device-lock:changed", snapshot);
       return;
     }

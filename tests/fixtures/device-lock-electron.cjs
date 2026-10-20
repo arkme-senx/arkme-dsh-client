@@ -18,11 +18,11 @@ app.setName('即我锁定验收');
   // Preserve content protection owned by an existing window feature.
   const alreadyProtected = new BrowserWindow({ show: false });
   alreadyProtected.setContentProtection(true);
-  let locked = true;
+  let locked = true, sessionEnded = false;
   let surfaces;
   const owner = {
-    get protected() { return locked; },
-    snapshot: () => ({ supported: true, locked, sessionEnded: false, needsCredentials: false, platform: process.platform === 'win32' ? 'windows' : 'macos', message: '你可以在手机即我首页的设备状态栏解锁。' }),
+    get protected() { return locked || sessionEnded; },
+    snapshot: () => ({ supported: true, locked: locked || sessionEnded, sessionEnded, needsCredentials: false, platform: process.platform === 'win32' ? 'windows' : 'macos', message: '你可以在手机即我首页的设备状态栏解锁。' }),
     requestUnlock: async () => { locked = false; surfaces.update(owner.snapshot()); return owner.snapshot(); }
   };
   surfaces = new DeviceLockSurfaces(owner, path.join(root, 'dist/device-lock-preload.cjs'), path.join(root, 'dist/ui/device-lock.html'));
@@ -75,5 +75,29 @@ app.setName('即我锁定验收');
   locked = false; surfaces.update(owner.snapshot());
   assert.equal(first.window.isVisible(), false, 'remote unlock must respect a closed guard');
   surfaces.revealOnActivate(first.window); assert.equal(first.window.isVisible(), true);
-  console.log(JSON.stringify({ status: 'passed', checks: ['private native windows hidden including accessibility', 'new window protection', 'private title redaction', 'trusted preload IPC', 'restore after authorized unlock', '1000 idle snapshots preserve minimized window', 'hidden and closed windows stay hidden', 'explicit reopening after unlock'], artifacts }));
+  // Both a normal logout and remote logout from an existing lock retain native
+  // privacy, without exposing a lock illustration or password action.
+  for (const fromLock of [false, true]) {
+    if (fromLock) { locked = true; surfaces.update(owner.snapshot()); }
+    sessionEnded = true; surfaces.update(owner.snapshot());
+    const logoutGuard = BrowserWindow.getAllWindows().find(item => ![first.window, second.window, alreadyProtected].includes(item));
+    assert.ok(logoutGuard);
+    await until(async () => !logoutGuard.webContents.isLoading() && await logoutGuard.webContents.executeJavaScript('document.querySelector("#title")?.textContent === "正在退出登录…"'));
+    const view = await logoutGuard.webContents.executeJavaScript(`({
+      title: document.title,
+      visible: !document.querySelector("#surface").hidden,
+      illustration: getComputedStyle(document.querySelector("#illustration")).display,
+      unlock: getComputedStyle(document.querySelector("#unlock")).display,
+      message: getComputedStyle(document.querySelector("#message")).display
+    })`);
+    assert.deepEqual(view, {title: '正在退出登录…', visible: true, illustration: 'none', unlock: 'none', message: 'none'});
+    assert.equal(first.window.isVisible(), false);
+    assert.equal(first.window.getTitle(), '正在退出登录…');
+    await writeFile(path.join(artifacts, fromLock ? 'logout-from-lock.png' : 'logout-surface.png'), (await logoutGuard.webContents.capturePage()).toPNG());
+    // Only completed credential cleanup restores the safe business/login view.
+    locked = false; sessionEnded = false; surfaces.update(owner.snapshot());
+    assert.equal(logoutGuard.isDestroyed(), true);
+    assert.equal(first.window.isVisible(), true);
+  }
+  console.log(JSON.stringify({ status: 'passed', checks: ['private native windows hidden including accessibility', 'new window protection', 'private title redaction', 'trusted preload IPC', 'restore after authorized unlock', '1000 idle snapshots preserve minimized window', 'hidden and closed windows stay hidden', 'explicit reopening after unlock', 'logout stays protected without lock UI', 'locked logout uses existing guard'], artifacts }));
 })().then(() => app.exit(0), error => { console.error(error); app.exit(1); });
