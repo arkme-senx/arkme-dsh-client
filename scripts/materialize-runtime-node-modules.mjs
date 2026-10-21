@@ -1,4 +1,4 @@
-import { cp, lstat, mkdir, readdir, realpath, rename, rm } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, readdir, realpath, rename, rm } from "node:fs/promises";
 import path from "node:path";
 
 export async function materializeRuntimeNodeModules(runtimeRoot) {
@@ -6,10 +6,11 @@ export async function materializeRuntimeNodeModules(runtimeRoot) {
   const staging = path.join(runtimeRoot, "node_modules.materialized");
   await rm(staging, { recursive: true, force: true });
   await mkdir(staging, { recursive: true });
+  const selectedPackages = new Map();
   // Read the pnpm graph from the source tree, but write only concrete package
   // directories to staging. Copying .pnpm first would skip its package
   // payloads when avoiding recursive package-local node_modules links.
-  await hoistVirtualStorePackages(source, staging);
+  await hoistVirtualStorePackages(source, staging, selectedPackages);
   for (const entry of await readdir(source)) {
     if (entry === ".pnpm" || entry === ".bin" || entry === ".modules.yaml") continue;
     // Direct links in the deployed root are the dependency graph selected by
@@ -23,21 +24,35 @@ export async function materializeRuntimeNodeModules(runtimeRoot) {
       for (const scopedEntry of await readdir(path.join(source, entry))) {
         const scopedDestination = path.join(destination, scopedEntry);
         await rm(scopedDestination, { recursive: true, force: true });
-        await copyResolvedTree(
+        await copyPackage(
           path.join(source, entry, scopedEntry),
-          scopedDestination
+          scopedDestination,
+          selectedPackages
         );
       }
     } else {
       await rm(destination, { recursive: true, force: true });
-      await copyResolvedTree(path.join(source, entry), destination);
+      await copyPackage(path.join(source, entry), destination, selectedPackages);
     }
   }
+  // pnpm legacy deploy leaves a backlink to the source workspace package.
+  // It is not a runtime dependency: following it would copy the development
+  // workspace's own dependency graph back into this standalone runtime.
+  const runtimeName = await readFile(path.join(runtimeRoot, "package.json"), "utf8")
+    .then(text => JSON.parse(text).name, () => undefined);
+  if (typeof runtimeName === "string") {
+    const backlink = path.join(staging, runtimeName);
+    if (selectedPackages.has(backlink)) {
+      selectedPackages.delete(backlink);
+      await rm(backlink, { recursive: true, force: true });
+    }
+  }
+  await preserveDependencyResolution(selectedPackages, staging);
   await rm(source, { recursive: true, force: true });
   await rename(staging, source);
 }
 
-async function hoistVirtualStorePackages(sourceRoot, destinationRoot) {
+async function hoistVirtualStorePackages(sourceRoot, destinationRoot, selectedPackages) {
   const virtualStore = path.join(sourceRoot, ".pnpm");
   const packageDirs = await readdir(virtualStore);
   const packageNodeModulesRoots = [path.join(virtualStore, "node_modules")];
@@ -58,20 +73,77 @@ async function hoistVirtualStorePackages(sourceRoot, destinationRoot) {
       const source = path.join(packageNodeModules, entry);
       if (entry.startsWith("@")) {
         for (const scopedPackage of await readdir(source)) {
-          await copyIfMissing(source + "/" + scopedPackage, path.join(destinationRoot, entry, scopedPackage));
+          await copyIfMissing(source + "/" + scopedPackage, path.join(destinationRoot, entry, scopedPackage), selectedPackages);
         }
       } else {
-        await copyIfMissing(source, path.join(destinationRoot, entry));
+        await copyIfMissing(source, path.join(destinationRoot, entry), selectedPackages);
       }
     }
   }
 }
 
-async function copyIfMissing(source, destination) {
+async function copyIfMissing(source, destination, selectedPackages) {
   try {
     await lstat(destination);
   } catch {
-    await copyResolvedTree(source, destination);
+    await copyPackage(source, destination, selectedPackages);
+  }
+}
+
+async function copyPackage(source, destination, selectedPackages) {
+  const actual = await realpath(source).catch(() => undefined);
+  if (actual === undefined) return;
+  await copyResolvedTree(actual, destination);
+  selectedPackages.set(destination, actual);
+}
+
+/**
+ * Flatten only dependencies that resolve to the selected package identity.
+ * In particular, negotiator 1.1 needs content-type 2 while legacy consumers
+ * still need content-type 1. Losing that package-local choice crashes HTTP
+ * compression on the first request. Nested concrete packages preserve Node's
+ * lookup rules without shipping pnpm links or escaping the runtime archive.
+ */
+async function preserveDependencyResolution(selectedPackages, staging) {
+  const rootScope = new Map([...selectedPackages].map(([destination, source]) =>
+    [path.relative(staging, destination).split(path.sep).join("/"), source]));
+  const dependencyCache = new Map();
+  async function dependencies(source) {
+    if (dependencyCache.has(source)) return dependencyCache.get(source);
+    const manifest = await readFile(path.join(source, "package.json"), "utf8")
+      .then(JSON.parse, () => ({}));
+    const resolved = new Map();
+    for (const name of Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies, ...manifest.peerDependencies })) {
+      let directory = source;
+      while (true) {
+        const candidate = await realpath(path.join(directory, "node_modules", name)).catch(() => undefined);
+        if (candidate !== undefined) {
+          resolved.set(name, candidate);
+          break;
+        }
+        const parent = path.dirname(directory);
+        if (parent === directory) break;
+        directory = parent;
+      }
+    }
+    dependencyCache.set(source, resolved);
+    return resolved;
+  }
+  async function preserve(source, destination, inheritedScope, ancestors) {
+    const ownDependencies = await dependencies(source);
+    const conflicts = [...ownDependencies].filter(([name, actual]) => inheritedScope.get(name) !== actual);
+    const scope = new Map(inheritedScope);
+    for (const [name, actual] of conflicts) scope.set(name, actual);
+    const nextAncestors = new Set(ancestors).add(source);
+    for (const [name, actual] of conflicts) {
+      if (nextAncestors.has(actual)) throw new Error(`Cannot materialize cyclic dependency conflict: ${name}`);
+      const nested = path.join(destination, "node_modules", name);
+      await copyResolvedTree(actual, nested);
+      await preserve(actual, nested, scope, nextAncestors);
+    }
+  }
+  for (const [destination, source] of selectedPackages) {
+    await preserve(source, destination, rootScope, new Set());
   }
 }
 

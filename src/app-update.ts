@@ -135,7 +135,8 @@ export function appUpdateFeedURL(base: string, platform: UpdatePlatform, arch: U
     throw new Error(`unsupported Arkme app update target: ${platform}/${arch}`);
   }
   const endpoint = `${origin(base)}/api/public/v1/arkme/app-update/${target.platform}/${target.arch}/latest`;
-  return (target.platform === "darwin" || target.platform === "win32") && appId === "cc.jiwo.arkme" ? `${endpoint}?installation=jiwo-v3-cc-jiwo-arkme` : endpoint;
+  // Historical V3 protocol marker and feed paths remain stable across the macOS ID change.
+  return (target.platform === "darwin" || target.platform === "win32") && (appId === "cc.jiwo.arkme" || (target.platform === "darwin" && appId === "com.senqisi.Jotmo")) ? `${endpoint}?installation=jiwo-v3-cc-jiwo-arkme` : endpoint;
 }
 
 export class ArkmeAppUpdateController {

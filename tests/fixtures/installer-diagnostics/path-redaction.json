@@ -1,0 +1,35 @@
+{
+  "input": "Installation scope conflict: legacy=all target=current legacyPath=D:\\jotmo targetPath=C:\\Users\\Alice Smith\\AppData\\Local\\Programs\\arkme otherUserProfiles=1\nFailed at: Begin-Overlay C:\\Users\\Alice Smith\\AppData\\Local\\Temp\\ns123.tmp\\windows-migration.ps1:882\nAccess denied: /Users/alice/Library/Application Support/Arkme Harness/file.json\nSignature failed: /Applications/即我.app/Contents/MacOS/arkme\nBackup failed: /Library/Application Support/cc.jiwo.installer/backup/即我.app\nUNC=\\\\private-host\\private-share\\jotmo\\jotmo.exe\npassword=secret123 reason=AccessDenied function=Begin-Overlay\nToken validation failed in Validate-Token\n{\"token\":\"quoted secret\",\"reason\":\"expired\"}\nRunAs User: DOMAIN\\alice\nemail alice@example.org\nUsername: Alice Smith\npassword=\"escaped\\\"secret\" reason=PermissionDenied\nPath=C:\\\\Users\\\\alice\\\\AppData\\\\Local\\\\Programs\\\\arkme\nAuthorization: Basic private-basic-value\nCookie: a=private-cookie; b=second-cookie\n",
+  "keep": [
+    "legacyPath=D:\\jotmo",
+    "C:\\Users\\<user>\\AppData\\Local\\Programs\\arkme",
+    "windows-migration.ps1:882",
+    "Begin-Overlay",
+    "otherUserProfiles=1",
+    "/Users/<user>/Library/Application Support/Arkme Harness/file.json",
+    "/Applications/即我.app/Contents/MacOS/arkme",
+    "/Library/Application Support/cc.jiwo.installer/backup/即我.app",
+    "jotmo\\jotmo.exe",
+    "reason=AccessDenied",
+    "Token validation failed in Validate-Token",
+    "expired",
+    "\\\\<server>\\<share>\\jotmo\\jotmo.exe",
+    "reason=PermissionDenied",
+    "C:\\\\Users\\\\<user>\\\\AppData"
+  ],
+  "hide": [
+    "Alice Smith",
+    "alice",
+    "private-host",
+    "private-share",
+    "secret123",
+    "quoted secret",
+    "DOMAIN",
+    "Smith",
+    "escaped",
+    "secret\"",
+    "private-basic-value",
+    "private-cookie",
+    "second-cookie"
+  ]
+}

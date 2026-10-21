@@ -12,6 +12,10 @@ function pinDependencies(dependencies) {
   for (const name of Object.keys(dependencies)) {
     // Retired type-only build dependency in the plugin's own development tree;
     // no rc2 version was published and it is absent from the runtime peer graph.
+    if (["@deepseek-ai/dsh-invariants", "@deepseek-ai/dsh-client-schema-form", "@deepseek-ai/dsh-code-runtime"].includes(name)) {
+      delete dependencies[name];
+      continue;
+    }
     if (name === "@deepseek-ai/dsh-client-runtime") continue;
     if (isDshPackage(name)) dependencies[name] = targetVersion;
   }

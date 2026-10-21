@@ -459,6 +459,85 @@ try {
     Assert-True (([IO.File]::ReadAllText($saved.LegacyFiles[0].Path)) -eq 'reinstalled Flutter') 'cleanup must not touch a reinstalled active path'
     foreach($entry in $saved.LegacyFiles){Assert-True (!(Test-Path ($entry.Path+$RetiredSuffix))) 'cleanup resumes after a prior retirement was removed'}
   }
+  Test-Case 'regular update journals changed files only and restores after interruption' {
+    New-Fixture
+    $originalRegular=${function:Test-RegularUpdate}
+    function Test-RegularUpdate {return $true}
+    try {
+      foreach($dir in @($Destination,$Stage)){[IO.File]::WriteAllText((Join-Path $dir 'same.dll'),'unchanged asset')}
+      $manifestObject=Get-Content $Manifest -Raw | ConvertFrom-Json
+      $same=Join-Path $Stage 'same.dll'
+      $manifestObject.files+=@([pscustomobject]@{path='same.dll';size=(Get-Item $same).Length;sha256=(Get-FileHash $same -Algorithm SHA256).Hash})
+      $manifestObject | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 $Manifest
+      $stamp=(Get-Item (Join-Path $Destination 'same.dll')).LastWriteTimeUtc
+      Begin-Overlay $Stage 'Uninstall arkme.exe' $null
+      $saved=Get-Content (Join-Path (Get-JournalDirectory) 'journal.json') -Raw | ConvertFrom-Json
+      Assert-True (@($saved.Files | Where-Object {$_.Path -eq 'same.dll'}).Count -eq 0) 'unchanged assets must not be copied into transaction'
+      Assert-True ((Get-Item (Join-Path $Destination 'same.dll')).LastWriteTimeUtc -eq $stamp) 'unchanged asset must not be replaced'
+      Recover-Overlay
+      Assert-True ((Read-Installed) -eq 'old executable') 'regular update rollback restores old program'
+      Assert-True ([IO.File]::ReadAllText((Join-Path $Destination 'same.dll')) -eq 'unchanged asset') 'rollback preserves skipped asset'
+    } finally { ${function:Test-RegularUpdate}=$originalRegular }
+  }
+  Test-Case 'native admission refuses active rollback and cleans only a committed transaction' {
+    New-Fixture
+    Begin-Overlay $Stage 'Uninstall arkme.exe' $null
+    $record=Join-Path (Get-JournalDirectory) 'journal.json'
+    $before=[IO.File]::ReadAllText($record)
+    Assert-Fails {Recover-Overlay -CommittedOnly} 'automatic update must not roll back active transaction'
+    Assert-True ([IO.File]::ReadAllText($record) -eq $before) 'active record must be preserved'
+    Assert-True ((Read-Installed) -eq 'new executable') 'automatic update must not restore old program'
+    Complete-Overlay
+    Recover-Overlay -CommittedOnly
+    Assert-True (!(Test-Path (Get-JournalDirectory))) 'committed journal removed'
+    Assert-True ((Read-Installed) -eq 'new executable') 'committed cleanup preserves installed program'
+  }
+  Test-Case 'shared Flutter shortcut stays outside rollback and committed cleanup' {
+    foreach ($committed in @($false,$true)) {
+      New-Fixture
+      $script:PreservedLegacy=[pscustomobject]@{Root=(Join-Path $script:caseRoot 'shared-flutter');Scope='all'}
+      try {
+        $link=(Get-ShortcutLocations)[0].Path
+        [pscustomobject]@{Exists=$true;Target=(Join-Path $script:PreservedLegacy.Root 'jotmo.exe');Arguments=''} | ConvertTo-Json | Set-Content -Encoding UTF8 $link
+        $before=(Get-FileHash $link).Hash
+        Begin-Overlay $Stage 'Uninstall arkme.exe' $null
+        $saved=Get-Content (Join-Path (Get-JournalDirectory) 'journal.json') -Raw | ConvertFrom-Json
+        Assert-True ($saved.PreserveShortcuts -and @($saved.Shortcuts).Count -eq 0) 'shared links must be outside backup/restore ownership'
+        Reconcile-InstalledShortcuts
+        if ($committed) {Complete-Overlay}
+        Recover-Overlay
+        Assert-True ((Get-FileHash $link).Hash -eq $before) 'shared Flutter link bytes must survive recovery and cleanup'
+      } finally {$script:PreservedLegacy=$null}
+    }
+  }
+  Test-Case 'unregistered Flutter shortcut can roll back or commit without modifying its program or data' {
+    foreach ($stale in @($false,$true)) {
+      foreach ($committed in @($false,$true)) {
+        New-Fixture
+        $orphan=Join-Path $script:caseRoot 'orphan-flutter'
+        $null=New-Item -ItemType Directory -Path (Join-Path $orphan 'data/flutter_assets') -Force
+        [IO.File]::WriteAllText((Join-Path $orphan 'precious.db'),'keep')
+        if (!$stale) {
+          [IO.File]::WriteAllText((Join-Path $orphan 'jotmo.exe'),'signed old program fixture')
+          [IO.File]::WriteAllText((Join-Path $orphan 'flutter_windows.dll'),'flutter')
+        }
+        function Get-ShortcutTargetVersion {return [pscustomobject]@{ProductName='即我';OriginalFilename='jotmo.exe';FileMajorPart=2;FileVersion='2.61.34.270';FilePrivatePart=270}}
+        $link=(Get-ShortcutLocations)[0].Path
+        @{Exists=$true;Target=(Join-Path $orphan 'jotmo.exe');Arguments=''} | ConvertTo-Json | Set-Content -Encoding UTF8 $link
+        $before=(Get-FileHash $link).Hash
+        Begin-Overlay $Stage 'Uninstall arkme.exe' $null
+        $saved=Get-Content (Join-Path (Get-JournalDirectory) 'journal.json') -Raw | ConvertFrom-Json
+        Assert-True ($saved.Shortcuts[0].Compatibility -eq $(if($stale){'stale-flutter'}else{'verified-flutter'})) 'fallback classification must be journaled'
+        # Simulate the builder replacing the link after the durable snapshot.
+        @{Exists=$true;Target=(Join-Path $Destination 'arkme.exe');Arguments=''} | ConvertTo-Json | Set-Content -Encoding UTF8 $link
+        if ($committed) {Complete-Overlay}
+        Recover-Overlay
+        if (!$committed) {Assert-True ((Get-FileHash $link).Hash -eq $before) 'rollback must restore original shortcut bytes'}
+        Assert-True ([IO.File]::ReadAllText((Join-Path $orphan 'precious.db')) -eq 'keep') 'orphan data must stay untouched'
+        Assert-True ((Test-Path (Join-Path $orphan 'jotmo.exe')) -eq (!$stale)) 'orphan executable must not be retired or synthesized'
+      }
+    }
+  }
   if ($script:failures.Count) { throw ($script:failures -join "`n") }
   Write-Output 'Durable recovery fixtures passed.'
 } finally {

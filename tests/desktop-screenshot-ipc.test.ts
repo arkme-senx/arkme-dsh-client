@@ -1,6 +1,6 @@
 import {EventEmitter} from 'node:events';
 import {beforeEach,afterEach,expect,it,vi} from 'vitest';
-const mocks=vi.hoisted(()=>({handlers:new Map<string,Function>(),windows:[] as any[],sources:vi.fn(),save:vi.fn(),write:vi.fn(),scope:'a',blocked:false,allowed:true,displayEvents:new Map<string,Function>(),displays:[] as any[],nativeWindows:[] as any[],physicalBounds:vi.fn(),load:vi.fn(),construct:vi.fn(),clipboard:vi.fn()}));
+const mocks=vi.hoisted(()=>({handlers:new Map<string,Function>(),windows:[] as any[],permission:vi.fn(),guidance:vi.fn(),openSettings:vi.fn(),sources:vi.fn(),save:vi.fn(),write:vi.fn(),scope:'a',blocked:false,allowed:true,displayEvents:new Map<string,Function>(),displays:[] as any[],nativeWindows:[] as any[],physicalBounds:vi.fn(),load:vi.fn(),construct:vi.fn(),clipboard:vi.fn()}));
 vi.mock('../src/native-screenshot-windows.js',()=>({readScreenshotWindows:()=>mocks.nativeWindows}));
 vi.mock('node:fs/promises',()=>({writeFile:mocks.write}));
 vi.mock('electron',async()=>{
@@ -14,7 +14,7 @@ vi.mock('electron',async()=>{
   async loadURL(url:string){this.webContents.mainFrame.url=url;this.visible=false;await mocks.load(this)}
   destroy(){this.destroyed=true;this.emit('closed')}
  }
- return {BrowserWindow:Window,ipcMain:{handle:(k:string,v:Function)=>mocks.handlers.set(k,v)},desktopCapturer:{getSources:mocks.sources},dialog:{showSaveDialog:mocks.save},
+ return {app:{getName:()=>'即我'},systemPreferences:{getMediaAccessStatus:mocks.permission},shell:{openExternal:mocks.openSettings},BrowserWindow:Window,ipcMain:{handle:(k:string,v:Function)=>mocks.handlers.set(k,v)},desktopCapturer:{getSources:mocks.sources},dialog:{showSaveDialog:mocks.save,showMessageBox:mocks.guidance},
  clipboard:{writeImage:mocks.clipboard},nativeImage:{createFromBuffer:(bytes:Buffer)=>({isEmpty:()=>false,toPNG:()=>bytes})},screen:{on:(k:string,v:Function)=>mocks.displayEvents.set(k,v),
  dipToScreenRect:mocks.physicalBounds,getAllDisplays:()=>mocks.displays,getCursorScreenPoint:()=>({x:0,y:0}),getDisplayNearestPoint:()=>({id:10}),getDisplayMatching:()=>({id:10})}};
 });
@@ -24,13 +24,61 @@ let owner:any, controller:ReturnType<typeof installScreenshotIpc>;
 const event=(window:any,frame?:any)=>({sender:window.webContents,senderFrame:frame??window.webContents.mainFrame});
 const call=(name:string,e:any,...args:any[])=>mocks.handlers.get('arkme-screenshot:'+name)!(e,...args);
 const png=()=>{const b=Buffer.alloc(33);Buffer.from([137,80,78,71,13,10,26,10]).copy(b);b.writeUInt32BE(13,8);b.write('IHDR',12);b.writeUInt32BE(100,16);b.writeUInt32BE(50,20);return b.toString('base64')};
-beforeEach(()=>{vi.useFakeTimers();mocks.handlers.clear();mocks.clipboard.mockReset();mocks.windows.length=0;mocks.scope='a';mocks.blocked=false;mocks.allowed=true;mocks.construct.mockReset();mocks.load.mockReset();mocks.nativeWindows=[];mocks.physicalBounds.mockImplementation((_window:any,bounds:any)=>bounds);mocks.write.mockReset();mocks.save.mockReset();mocks.sources.mockReset();
+beforeEach(()=>{vi.useFakeTimers();mocks.permission.mockReset().mockReturnValue('granted');mocks.guidance.mockReset().mockResolvedValue({response:0});mocks.openSettings.mockReset().mockResolvedValue(undefined);mocks.handlers.clear();mocks.clipboard.mockReset();mocks.windows.length=0;mocks.scope='a';mocks.blocked=false;mocks.allowed=true;mocks.construct.mockReset();mocks.load.mockReset();mocks.nativeWindows=[];mocks.physicalBounds.mockImplementation((_window:any,bounds:any)=>bounds);mocks.write.mockReset();mocks.save.mockReset();mocks.sources.mockReset();
  mocks.displays=[{id:10,bounds:{x:-800,y:0,width:800,height:600},size:{width:800,height:600},scaleFactor:2}];
  owner=new BrowserWindow();mocks.sources.mockResolvedValue([{display_id:'10',thumbnail:{isEmpty:()=>false,getSize:()=>({width:1600,height:1200}),toPNG:()=>Buffer.from('frame')}}]);
  controller=installScreenshotIpc({blocked:()=>mocks.blocked,main:()=>owner,origin:()=> 'http://localhost:1234',scope:()=>mocks.scope,preload:()=>'/preload',allowed:id=>mocks.allowed && id===owner.webContents.id});
 });
 afterEach(()=>{for(const w of mocks.windows)if(!w.destroyed)w.destroy();vi.useRealTimers();vi.unstubAllGlobals()});
 async function start(){const result=call('capture',event(owner),'request');await vi.advanceTimersByTimeAsync(200);return {result,child:mocks.windows[1]}}
+it.each(['not-determined','denied','restricted'])('guides missing screen permission (%s) without capturing',async status=>{
+ vi.stubGlobal('process',{...process,platform:'darwin'});mocks.permission.mockReturnValue(status);
+ const {result}=await start();await expect(result).resolves.toEqual({status:'cancelled'});
+ expect(mocks.guidance).toHaveBeenCalledWith(expect.objectContaining({message:'需要开启录屏权限',buttons:['暂不开启','打开系统设置'],cancelId:0}));
+ expect(mocks.guidance.mock.calls[0]![0].detail).toContain('允许“即我”录制屏幕');
+ expect(mocks.sources).not.toHaveBeenCalled();expect(mocks.windows).toHaveLength(1);expect(mocks.openSettings).not.toHaveBeenCalled();
+});
+it('opens screen recording settings for the global clipboard shortcut without a second error',async()=>{
+ vi.stubGlobal('process',{...process,platform:'darwin'});mocks.permission.mockReturnValue('denied');mocks.guidance.mockResolvedValue({response:1});
+ await controller.captureClipboard(owner);
+ expect(mocks.openSettings).toHaveBeenCalledExactlyOnceWith('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
+ expect(mocks.clipboard).not.toHaveBeenCalled();expect(mocks.sources).not.toHaveBeenCalled();
+});
+it('keeps one permission prompt active, allows reading it beyond the capture timeout and retries after permission is granted',async()=>{
+ vi.stubGlobal('process',{...process,platform:'darwin'});mocks.permission.mockReturnValue('denied');
+ let resolve!:Function;mocks.guidance.mockReturnValue(new Promise(r=>resolve=r));
+ const {result}=await start();await vi.advanceTimersByTimeAsync(30_000);
+ await expect(call('capture',event(owner),'other')).rejects.toThrow('正在截屏');expect(mocks.guidance).toHaveBeenCalledOnce();
+ resolve({response:0});await expect(result).resolves.toEqual({status:'cancelled'});
+ mocks.permission.mockReturnValue('granted');const next=await start();expect(next.child).toBeDefined();
+ call('close',event(next.child));await next.result;
+});
+it('does not open settings after the requesting account changes',async()=>{
+ vi.stubGlobal('process',{...process,platform:'darwin'});mocks.permission.mockReturnValue('denied');
+ let resolve!:Function;mocks.guidance.mockReturnValue(new Promise(r=>resolve=r));
+ const {result}=await start();mocks.scope='changed';resolve({response:1});
+ await expect(result).resolves.toEqual({status:'cancelled'});expect(mocks.openSettings).not.toHaveBeenCalled();
+});
+it('provides the manual settings path when opening settings fails',async()=>{
+ vi.stubGlobal('process',{...process,platform:'darwin'});mocks.permission.mockReturnValue('denied');mocks.guidance.mockResolvedValue({response:1});
+ mocks.openSettings.mockRejectedValue(new Error('OS error'));
+ await expect(call('capture',event(owner),'request')).rejects.toThrow('请手动前往系统设置 → 隐私与安全性 → 录屏与系统录音');
+});
+it('rechecks permissions when screen capture fails after the initial permission check',async()=>{
+ vi.stubGlobal('process',{...process,platform:'darwin'});mocks.permission.mockReturnValueOnce('granted').mockReturnValue('denied');
+ mocks.sources.mockRejectedValue(new Error('capture failed'));
+ const {result}=await start();await expect(result).resolves.toEqual({status:'cancelled'});expect(mocks.guidance).toHaveBeenCalledOnce();
+});
+it('preserves unrelated capture failures when screen permission is granted',async()=>{
+ mocks.sources.mockRejectedValue(new Error('capture device unavailable'));
+ await expect(call('capture',event(owner),'request')).rejects.toThrow('capture device unavailable');
+ expect(mocks.guidance).not.toHaveBeenCalled();
+});
+it('does not use macOS permission checks on Windows',async()=>{
+ vi.stubGlobal('process',{...process,platform:'win32'});mocks.permission.mockReturnValue('denied');
+ const {result,child}=await start();expect(mocks.permission).not.toHaveBeenCalled();expect(mocks.guidance).not.toHaveBeenCalled();
+ call('close',event(child));await result;
+});
 it('keeps opener visible, captures physical pixels and returns only the editor result',async()=>{
  const {result,child}=await start();expect(owner.visible).toBe(true);
  expect(mocks.sources).toHaveBeenCalledWith({types:['screen'],thumbnailSize:{width:1600,height:1200}});

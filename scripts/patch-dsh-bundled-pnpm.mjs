@@ -3,6 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const FORWARDER_PATTERN = /([ \t]*)const result = spawnSync\("pnpm", args\.map\(\(argument\) => anchorPathSpec\(argument, process\.cwd\(\)\)\), \{\r?\n[ \t]*cwd: dir,\r?\n[ \t]*stdio: "inherit",\r?\n[ \t]*shell: process\.platform === "win32"\r?\n[ \t]*\}\);/g;
+const MANAGED_FORWARDER_PATTERN = /^([ \t]*)(async function runPlugin\(profile, args, packageManager\) \{)$/gm;
+const MANAGED_MARKER = "const arkmeBundledPnpmCli = process.env.ARKME_PNPM_CLI_PATH;";
 
 function replacement(indentation) {
   const nested = `${indentation}${indentation.includes("\t") ? "\t" : "  "}`;
@@ -32,6 +34,23 @@ export async function patchDshBundledPnpm(dshRoot) {
   const matches = [];
   for (const candidate of candidates) {
     const source = await readFile(candidate, "utf8");
+    if (source.includes(MANAGED_MARKER)) return candidate;
+    // DSH 0.2.1 delegates package operations to the public plugin-manager API.
+    // Supply its application-owned invocation; preserve explicit caller options.
+    const managed = [...source.matchAll(MANAGED_FORWARDER_PATTERN)];
+    if (managed.length === 1 && source.includes('from "@deepseek-ai/dsh-plugin-manager/operations"')) {
+      const patched = source.replace(MANAGED_FORWARDER_PATTERN, (_line, indentation, declaration) => [
+        `${indentation}${declaration}`,
+        `${indentation}\t${MANAGED_MARKER}`,
+        `${indentation}\tif (packageManager === void 0 && arkmeBundledPnpmCli !== void 0) packageManager = {`,
+        `${indentation}\t\tcommand: process.execPath,`,
+        `${indentation}\t\targs: [arkmeBundledPnpmCli],`,
+        `${indentation}\t\tenv: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }`,
+        `${indentation}\t};`,
+      ].join("\n"));
+      await writeFile(candidate, patched, "utf8");
+      return candidate;
+    }
     const occurrences = [...source.matchAll(FORWARDER_PATTERN)];
     if (occurrences.length > 0) matches.push({ candidate, source, occurrences });
   }

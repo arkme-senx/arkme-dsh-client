@@ -2,7 +2,7 @@
 
 ## 产品与数据合同
 
-正式版外壳为「即我」和 Flutter 2.0 正式图标，应用 ID/AUMID 为 `cc.jiwo.arkme`。macOS 目标 `/Applications/即我.app`，PKG 标识固定为 `cc.jiwo.arkme.installer`，安装 helper 签名标识为 `cc.jiwo.arkme.installer.helper`。Electron Helper 从主应用 ID 派生。测试和本地测试继续使用原独立名称、图标、ID、协议和 Windows GUID。
+正式版外壳为「即我」和 Flutter 2.0 正式图标，macOS Bundle ID 为 `com.senqisi.Jotmo`（与 iOS 正式版一致），Windows AUMID 仍为 `cc.jiwo.arkme`。macOS 目标 `/Applications/即我.app`，PKG 标识固定为 `cc.jiwo.arkme.installer`，安装 helper 签名标识为 `cc.jiwo.arkme.installer.helper`。Electron Helper 从主应用 ID 派生。测试和本地测试继续使用原独立名称、图标、ID、协议和 Windows GUID。
 
 内部程序仍为 `arkme`/`arkme.exe`，npm 包名仍为 `arkme`，数据目录仍为 `Arkme Harness`，协议仍为 `arkme://`，内部页面品牌不改。Windows NSIS GUID 固定为 `14ace15a-7c69-5467-bedd-7df6c628d51a`，以保留原有安装目录、作用域和卸载记录。
 
@@ -49,7 +49,7 @@ PKG标题「即我安装」，最低系统来自`build.mac.minimumSystemVersion`
 
 固定简单恢复记录放在`/Library/Application Support/cc.jiwo.installer`，保存本次编号、来源/目标应用身份版本、暂存/备份路径与归属、提交标记。修改程序前持久化；同一时间只有一个安装实例。旧记录未安全收尾不能覆盖。暂存程序始终完整校验后才替换旧程序。
 
-可信来源为同团队Developer ID签名的Flutter `com.senqisi.Jotmo`/`com.senqisi.jotmo` 2.x、旧Arkme `com.senx.arkme.harness`、新身份 `cc.jiwo.arkme`。发现来源使用历史路径、LaunchServices及Spotlight；商店收据、测试ID、未知同名应用、无效签名、更高版本和不安全路径拒绝处理。正式发布必须验证自定义路径、Spotlight关闭和多用户Installer上下文。
+可信来源为同团队Developer ID签名的Flutter `com.senqisi.Jotmo`/`com.senqisi.jotmo` 2.x、旧Arkme `com.senx.arkme.harness`、新身份 `com.senqisi.Jotmo`。发现来源使用历史路径、LaunchServices及Spotlight；商店收据、测试ID、未知同名应用、无效签名、更高版本和不安全路径拒绝处理。正式发布必须验证自定义路径、Spotlight关闭和多用户Installer上下文。
 
 - 暂存未完成：只清理本次拥有的暂存内容，然后重跑。
 - 旧程序已备份但未提交：验证全体现场，恢复旧程序后再安装。恢复再次中断也可重跑。
@@ -112,7 +112,7 @@ export ARKME_RUNTIME_SERVICE_BASE_URL=https://jotmo.senguo.me
 export ARKME_MIGRATION_TEST=1
 ```
 
-此标记写入签名包内的配置，使运行时沿用 `cc.jiwo.arkme`、即我及 `arkme://`，与正式安装器身份一致。服务、凭据环境和数据目录仍隔离到测试环境（`Arkme Harness Test`）。不设置标记的普通测试版继续使用独立测试身份；正式接口拒绝迁移测试标记。测试迁移包会替换正式客户端程序，必须在迁移测试设备上使用，不能作为正式环境制品发布。打正式包时清除这两个环境变量。
+此标记写入签名包内的配置，使运行时使用当前平台正式身份（macOS `com.senqisi.Jotmo`、Windows `cc.jiwo.arkme`）、即我及 `arkme://`，与正式安装器身份一致。服务、凭据环境和数据目录仍隔离到测试环境（`Arkme Harness Test`）。不设置标记的普通测试版继续使用独立测试身份；正式接口拒绝迁移测试标记。测试迁移包会替换正式客户端程序，必须在迁移测试设备上使用，不能作为正式环境制品发布。打正式包时清除这两个环境变量。
 
 ## 插件与客户端组合版本展示（同分支上线）
 
@@ -121,3 +121,15 @@ export ARKME_MIGRATION_TEST=1
 客户端启动时读取实际安装应用 package.json 的 versionCode，经受现有页面来源校验保护的 `arkme-app-update:app-version-code` IPC 暴露到只读 `window.arkmeDesktop.appVersionCode`。这里展示的是安装客户端构建号，不是 Harness 或远端候选版本。插件兼容旧客户端：缺失或非法值只展示插件版本。
 
 发布时必须同时包含客户端 main/preload 更新与插件 product navigation 更新。动态 Release Set 必须引用含本改动的插件制品；仅构建客户端不会自动发布本地插件源代码。插件和客户端的既有升级、签名、制品校验门禁继续执行。
+
+## macOS 与 iOS 统一身份
+
+macOS 正式身份通过 `build.mac.appId` 单独配置；Windows 和普通测试版身份不变。Flutter 2.x 与新即我可能共享 Bundle ID，迁移同时识别版本、可执行文件、签名和 Flutter/Electron 布局。旧数据目录、凭据前缀、协议、PKG 标识和恢复目录不变。
+
+更新继续发送 `installation=jiwo-v3-cc-jiwo-arkme`，制品继续使用现有 `cc.jiwo.arkme` 目录；这些是兼容合同，不表示应用当前 Bundle ID。后端合同无需改动。不提供已上线 `cc.jiwo.arkme` 客户端的迁移或 ZIP 更新兼容保证，也不新增专用分流；未知安装目标和旧恢复记录仍按安全规则中止。
+
+下一候选为 3.0.8 / 285，正式出包前核对生产最高构建号再设置版本。身份代码调整不等于已经重新签名、公证或发布。Mac App Store 沙盒与提审另行处理。
+
+## 3.0.10 / 287 额外旧副本兼容
+
+目标路径校验失败仍中止；其他路径身份或签名校验失败且未运行时保留原样，不进入迁移事务、不发送退出请求、不注销入口。日志记录路径、仅供诊断的 Bundle ID 及原始错误。预检查及切换前只读检查被跳过副本的运行状态，运行中则中止。可信的高版本继续阻止降级。签名检查保持并发上限 2 和进程内缓存，不增加深度校验次数。Windows 安装逻辑不变。

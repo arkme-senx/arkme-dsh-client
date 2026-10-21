@@ -17,6 +17,7 @@ module.exports = {
   },
   mac: {
     ...build.mac,
+    appId: "cc.jiwo.arkme.local-test",
     executableName: "arkme Local Test",
     icon: "build/icon-test.icns",
     extendInfo: {

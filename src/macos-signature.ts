@@ -4,9 +4,9 @@ export interface MacCodeSigningDetails {
 }
 
 export function validateMacHelperIdentifiers(identifiers: readonly string[]): void {
-  const prefix = "cc.jiwo.arkme.helper";
+  const prefix = "com.senqisi.Jotmo.helper";
   if (identifiers.length === 0 || identifiers.some(id => id !== prefix && !id.startsWith(`${prefix}.`))) {
-    throw new Error("Signed Helper identifiers must derive from cc.jiwo.arkme.helper");
+    throw new Error("Signed Helper identifiers must derive from com.senqisi.Jotmo.helper");
   }
 }
 
@@ -19,9 +19,9 @@ const requiredMainProcessEntitlements = [
 
 export function validateMacCodeSigningDetails(output: string): MacCodeSigningDetails {
   const identifier = detailValue(output, "Identifier");
-  if (identifier !== "cc.jiwo.arkme") {
+  if (identifier !== "com.senqisi.Jotmo") {
     throw new Error(
-      `Signed Harness must use identifier cc.jiwo.arkme; received ${identifier ?? "none"}`
+      `Signed Harness must use identifier com.senqisi.Jotmo; received ${identifier ?? "none"}`
     );
   }
 
