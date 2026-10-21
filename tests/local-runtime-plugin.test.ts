@@ -3,6 +3,17 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, test } from 'vitest';
 import { assertRuntimePluginReady, stageLocalRuntimePlugin } from '../scripts/local-runtime-plugin.mjs';
+
+test('refuses packaging an old plugin declaration into a newer Harness release set', () => {
+  const manifest = {
+    name: '@senguoyun/dsh-arkme', version: '3.0.18',
+    arkme: { desktopHarnessReady: { version: 1 } },
+    peerDependencies: { '@deepseek-ai/dsh-llm': '^0.1.5-rc.2' },
+  };
+  expect(() => assertRuntimePluginReady(manifest, '0.2.1-rc.2')).toThrow('does not declare compatibility');
+  expect(() => assertRuntimePluginReady(manifest, '0.1.5-rc.2')).not.toThrow();
+  expect(() => assertRuntimePluginReady({ ...manifest, engines: { dsh: '0.2.1-rc.2' } }, '0.2.1-rc.2')).not.toThrow();
+});
 import { validatePackagedPluginMetadata, writePluginProvenance } from '../scripts/production-plugin-source.mjs';
 
 test('production readiness gate rejects published plugin without the ready capability', () => {
