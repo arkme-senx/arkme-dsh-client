@@ -8,9 +8,9 @@ import {
 
 describe("production Helper identities", () => {
   it("requires signed Helpers to derive from the new production bundle ID", () => {
-    expect(() => validateMacHelperIdentifiers(["cc.jiwo.arkme.helper", "cc.jiwo.arkme.helper.GPU"])).not.toThrow();
+    expect(() => validateMacHelperIdentifiers(["com.senqisi.Jotmo.helper", "com.senqisi.Jotmo.helper.GPU"])).not.toThrow();
     expect(() => validateMacHelperIdentifiers(["com.senx.arkme.harness.helper"])).toThrow(/Helper/);
-    expect(() => validateMacHelperIdentifiers(["cc.jiwo.arkme.test.helper"])).toThrow(/Helper/);
+    expect(() => validateMacHelperIdentifiers(["com.senqisi.Jotmo.test.helper"])).toThrow(/Helper/);
     expect(() => validateMacHelperIdentifiers([])).toThrow(/Helper/);
   });
 });
@@ -18,19 +18,19 @@ describe("production Helper identities", () => {
 describe("validateMacCodeSigningDetails", () => {
   it("accepts a team-signed Harness bundle", () => {
     expect(validateMacCodeSigningDetails(`
-Identifier=cc.jiwo.arkme
+Identifier=com.senqisi.Jotmo
 Authority=Developer ID Application: Jotmo (ABCDE12345)
 TeamIdentifier=ABCDE12345
 Sealed Resources version=2 rules=13 files=42
 `)).toEqual({
-      identifier: "cc.jiwo.arkme",
+      identifier: "com.senqisi.Jotmo",
       teamIdentifier: "ABCDE12345"
     });
   });
 
   it("rejects the ad-hoc signature produced without an Apple signing identity", () => {
     expect(() => validateMacCodeSigningDetails(`
-Identifier=cc.jiwo.arkme
+Identifier=com.senqisi.Jotmo
 Signature=adhoc
 TeamIdentifier=not set
 `)).toThrow(/Apple code-signing identity/);
@@ -41,7 +41,7 @@ TeamIdentifier=not set
 Identifier=Electron
 Authority=Apple Development: Developer (ABCDE12345)
 TeamIdentifier=ABCDE12345
-`)).toThrow(/cc\.jiwo\.arkme/);
+`)).toThrow(/com\.senqisi\.Jotmo/);
   });
 });
 

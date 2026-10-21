@@ -537,3 +537,7 @@ test.each([false, true])("protects an active/completed auto download from a late
   await expect(controller.checkNow()).resolves.toMatchObject({ status: "downloaded" });
   expect(calls).toBe(2);
 });
+
+test("new macOS identity retains the V3 update contract", () => {
+  expect(appUpdateFeedURL("https://api.jotmo.cc", "darwin", "arm64", "com.senqisi.Jotmo")).toContain("installation=jiwo-v3-cc-jiwo-arkme");
+});

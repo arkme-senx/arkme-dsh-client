@@ -36,12 +36,17 @@ export function patchInstallSection(source) {
   const shortcuts = '!insertmacro addStartMenuLink $keepShortcuts\n!insertmacro addDesktopLink $keepShortcuts';
   const commit = '!ifmacrodef customInstall\n  !insertmacro customInstall\n!endif';
   const icon = '!ifdef UNINSTALLER_ICON\n  File /oname=uninstallerIcon.ico "${UNINSTALLER_ICON}"\n!endif';
-  const anchors = [uninstall, shortcuts, commit, icon, '!insertmacro installApplicationFiles'];
+  const anchors = [uninstall, shortcuts, commit, icon, '!insertmacro installApplicationFiles', '!macro doStartApp'];
   if (anchors.some(anchor => source.split(anchor).length !== 2) || source.split('!insertmacro CHECK_APP_RUNNING').length !== 3) throw new Error('Unsupported electron-builder NSIS template');
-  return source.replace(icon, '').replace(uninstall, '!insertmacro windowsMigrationPrepare')
+  const route = (native, migration) => '${If} $JiwoNativeUpdate == "1"\n' + native + '\n${Else}\n' + migration + '\n${EndIf}';
+  return source.replace('!insertmacro setLinkVars', '!insertmacro setLinkVars\n${If} $JiwoNativeUpdate == "1"\n  !insertmacro windowsMigrationRun UpdateCheck\n${EndIf}')
+    .replace(icon, route(icon, ''))
+    .replace(uninstall, route(uninstall, '!insertmacro windowsMigrationPrepare'))
     .replace('!insertmacro installApplicationFiles', '!insertmacro windowsMigrationStage')
-    .replace(shortcuts, '').replace(commit, commit+'\n'+shortcuts+'\n!insertmacro windowsMigrationFinalize')
-    .replaceAll('!insertmacro CHECK_APP_RUNNING', '!insertmacro windowsMigrationGracefulCheck');
+    .replace(shortcuts, '')
+    .replace(commit, commit+'\n${If} $JiwoPreserveShortcuts != "1"\n'+shortcuts+'\n${EndIf}\n!insertmacro windowsMigrationFinalize')
+    .replaceAll('!insertmacro CHECK_APP_RUNNING', route('!insertmacro CHECK_APP_RUNNING', '!insertmacro windowsMigrationGracefulCheck'))
+    .replace('!macro doStartApp', '!macro doStartApp\n  $' + '{If} $JiwoMigrationCommitted != "1"\n    SetErrorLevel 1\n    Quit\n  $' + '{EndIf}');
 }
 
 export function patchShortcutMacros(source) {

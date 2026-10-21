@@ -11,7 +11,8 @@ const project = path.resolve(__dirname, '../..');
 const runtime = path.resolve(process.argv[2] || path.join(project, '.runtime/dsh-arm64'));
 if (process.versions.electron !== '43.2.0' || process.versions.modules !== '148') throw new Error('Browser smoke requires Electron 43.2.0 / ABI 148');
 const runtimeVersion = JSON.parse(fs.readFileSync(path.join(runtime, 'node_modules/@deepseek-ai/dsh/package.json'), 'utf8')).version;
-if (runtimeVersion !== '0.1.5-rc.2') throw new Error('Browser smoke requires the prepared official Harness 0.1.5-rc.2 runtime');
+const selectedHarnessVersion = JSON.parse(fs.readFileSync(path.join(project, 'runtime/package.json'), 'utf8')).dependencies['@deepseek-ai/dsh'];
+if (runtimeVersion !== selectedHarnessVersion) throw new Error('Browser smoke requires the selected official Harness runtime');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'arkme-rc2-browser-'));
 app.setPath('userData', path.join(root, 'user-data'));
@@ -54,7 +55,7 @@ app.whenReady().then(async () => {
   const home = path.join(root, 'home');
   const workspace = path.join(root, 'workspace');
   await Promise.all([fsp.mkdir(home), fsp.mkdir(workspace)]);
-  await provisionArkmeWebProfile({ dshHome, pluginDir: path.join(runtime, 'node_modules/@senguoyun/dsh-arkme'), dshVersion: '0.1.5-rc.2' });
+  await provisionArkmeWebProfile({ dshHome, pluginDir: path.join(runtime, 'node_modules/@senguoyun/dsh-arkme'), dshVersion: runtimeVersion });
   await fsp.writeFile(path.join(dshHome, 'profiles/web/cordis.patch.yml'), '- id: arkme-self\n  config:\n    updateCheckEnabled: false\n');
   const browserSession = session.fromPartition('rc2-browser-smoke');
   const cookieInstaller = new HarnessCookieInstaller(browserSession.cookies);
@@ -77,7 +78,7 @@ app.whenReady().then(async () => {
   let readyAccepted = 0;
   ipcMain.on('arkme-runtime:page-ready-nonce', event => { event.returnValue = readiness.nonce(sender(event)); });
   ipcMain.on('arkme-runtime:page-ready', (event, nonce) => { readySignals++; if (readiness.accept(sender(event), nonce)) readyAccepted++; });
-  ipcMain.on('arkme-runtime:harness-version', event => { event.returnValue = '0.1.5-rc.2'; });
+  ipcMain.on('arkme-runtime:harness-version', event => { event.returnValue = runtimeVersion; });
   ipcMain.on('arkme-app-update:app-version', event => { event.returnValue = '0.2.9-smoke'; });
   ipcMain.on('arkme:desktop-notification:permission-state', event => { event.returnValue = false; });
   ipcMain.on('arkme-desktop:attention-capabilities', event => { event.returnValue = { schemaVersion: 1, notificationShow: false, notificationPermission: 'unavailable', badgeMode: 'unsupported' }; });

@@ -40,18 +40,18 @@ describe("pnpm DSH release pin", () => {
       }
     })).toEqual({
       dependencies: {
-        "@deepseek-ai/dsh-llm-pi-ai": "0.1.5-rc.2",
+        "@deepseek-ai/dsh-llm-pi-ai": "0.2.1-rc.2",
         "ordinary-package": "^1.0.0"
       },
       devDependencies: {
-        "@deepseek-ai/dsh": "0.1.5-rc.2",
+        "@deepseek-ai/dsh": "0.2.1-rc.2",
         "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.7"
       },
       optionalDependencies: {
-        "@deepseek-ai/dsh-attachment-local": "0.1.5-rc.2"
+        "@deepseek-ai/dsh-attachment-local": "0.2.1-rc.2"
       },
       peerDependencies: {
-        "@deepseek-ai/dsh-llm": "0.1.5-rc.2",
+        "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
         "@deepseek-ai/dshark": "^1.0.0"
       }
     });

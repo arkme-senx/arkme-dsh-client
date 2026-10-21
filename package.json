@@ -1,7 +1,7 @@
 {
   "name": "arkme",
-  "version": "3.0.0",
-  "versionCode": 277,
+  "version": "3.0.13",
+  "versionCode": 291,
   "private": true,
   "author": "Jotmo",
   "description": "即我",
@@ -12,6 +12,8 @@
     "node": ">=24.0.0"
   },
   "scripts": {
+    "prepare:mas": "node scripts/mas/prepare.mjs",
+    "test:mas": "vitest run tests/mas",
     "build": "node scripts/validate-app-version-code.mjs && node scripts/build-device-auth.mjs && tsc -p tsconfig.build.json && node scripts/copy-static.mjs",
     "build:test": "ARKME_RUNTIME_SERVICE_BASE_URL=https://jotmo.senguo.me pnpm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -37,26 +39,29 @@
     "dist:test:linux": "pnpm run build:test && electron-builder --config electron-builder.test-config.cjs --linux AppImage --x64 --publish never && node scripts/packaged-smoke.mjs --platform linux --app-root release-test-dynamic/linux-unpacked",
     "dist:win": "pnpm run build && pnpm run build:windows-artifacts && node scripts/packaged-smoke.mjs --platform win32",
     "dist:linux": "pnpm run build && electron-builder --linux AppImage --x64 --publish never && node scripts/packaged-smoke.mjs --platform linux",
-    "dist:migration:mac": "node scripts/build-macos-migration.mjs"
+    "dist:migration:mac": "node scripts/build-macos-migration.mjs",
+    "pack:mas:dev": "node scripts/mas/build-dev.mjs",
+    "verify:mas": "node scripts/mas/verify-dev.mjs",
+    "dist:mas": "node scripts/mas/dist.mjs"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.2",
-    "@deepseek-ai/dsh": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-anonymous-user-id": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-attachment": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-locale": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-layout": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-primitives": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-settings": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-sidebar": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-slots": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-theme": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-host-webserver": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-llm": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-llm-deepseek": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-system-prompt": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-tools": "0.1.5-rc.2",
-    "@deepseek-ai/schemastery": "3.18.2",
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-anonymous-user-id": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-attachment": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-locale": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-layout": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-theme": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm-deepseek": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "3.18.5",
     "@electron/asar": "3.4.1",
     "@electron/rebuild": "4.2.0",
     "@senguoyun/dsh-arkme": "catalog:production",
@@ -104,7 +109,11 @@
       "extendInfo": {
         "CFBundleExecutable": "arkme",
         "CFBundleDevelopmentRegion": "en",
-        "CFBundleLocalizations": ["en", "zh-Hans", "zh-Hant"],
+        "CFBundleLocalizations": [
+          "en",
+          "zh-Hans",
+          "zh-Hant"
+        ],
         "NSLocationUsageDescription": "即我仅在你开启位置记录后，将当前位置写入你发送的快记快照。",
         "NSLocationWhenInUseUsageDescription": "即我仅在你开启位置记录后，将当前位置写入你发送的快记快照。"
       },
@@ -118,8 +127,9 @@
           ]
         }
       ],
-      "bundleVersion": "277",
-      "minimumSystemVersion": "12.0"
+      "bundleVersion": "291",
+      "minimumSystemVersion": "12.0",
+      "appId": "com.senqisi.Jotmo"
     },
     "win": {
       "icon": "build/icon.ico",

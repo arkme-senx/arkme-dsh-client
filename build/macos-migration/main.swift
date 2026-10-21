@@ -1,5 +1,9 @@
 import Foundation
 
+let diagnosticStart = DispatchTime.now().uptimeNanoseconds
+var installerEngine: MacMigration?
+var installerStage = "检查系统及安装权限"
+
 do {
     let timer = MigrationTimer("installer-\(CommandLine.arguments.last ?? "unknown")"); defer { timer.finish() }
     guard CommandLine.arguments.count == 2, ["preflight", "install"].contains(CommandLine.arguments[1]) else {
@@ -22,17 +26,34 @@ do {
             version: ReleaseMetadata.version, build: ReleaseMetadata.build, appID: ReleaseMetadata.appID)
         let system = NativeMigrationSystem(teamID: ReleaseMetadata.teamID)
         let engine = MacMigration(configuration: configuration, system: system)
+        installerEngine = engine
+        installerStage = "检查上次安装恢复记录"
         try engine.recover()
+        installerStage = "检查旧应用"
         let candidates = try system.discover(target: configuration.target)
         if CommandLine.arguments[1] == "preflight" {
             try engine.preflight(candidates: candidates)
         } else {
             let payload = root.appendingPathComponent("payload/即我.app")
+            let updateOwner = ApplicationUpdateOwner.resolve(target: configuration.target)
+            installerStage = "安装新应用"
             try engine.install(payload: payload, candidates: candidates)
+            // Ownership is ancillary to the committed installation. A failure
+            // leaves a valid installed app; native updating may still authorize.
+            if let owner = updateOwner {
+                do {
+                    try owner.apply(to: configuration.target)
+                    FileHandle.standardError.write(Data("[jiwo-update] application owner uid=\(owner.uid) gid=\(owner.gid)\n".utf8))
+                } catch {
+                    FileHandle.standardError.write(Data("[jiwo-update] ownership deferred; updates may require authorization: \(error)\n".utf8))
+                }
+            } else {
+                FileHandle.standardError.write(Data("[jiwo-update] no eligible user; retaining system ownership\n".utf8))
+            }
             // Registration is ancillary to the committed transaction. No GUI
             // app is launched as root and no user's preferences are rewritten.
             let register = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-            for candidate in candidates where candidate != configuration.target {
+            for candidate in engine.migratedCandidates where candidate != configuration.target {
                 _ = try? command(register, ["-u", candidate.path])
             }
             _ = try? command(register, ["-f", configuration.target.path])
@@ -41,7 +62,19 @@ do {
             try? FileManager.default.removeItem(at: payload)
         }
     }
+    InstallerDiagnostics.complete(version: ReleaseMetadata.version, build: ReleaseMetadata.build,
+        stage: CommandLine.arguments[1], result: "success", recovery: "not_needed", details: "",
+        elapsed: Int((DispatchTime.now().uptimeNanoseconds - diagnosticStart) / 1_000_000), records: MigrationTimer.records)
 } catch {
-    FileHandle.standardError.write(Data("即我安装失败：\(error)\n".utf8))
+    let outcome = installerEngine?.recoveryStatus ?? "本次尚未修改原应用"
+    let recovery = outcome.contains("未修改") ? "not_needed" : (outcome.contains("已完成恢复") ? "completed" : "unknown")
+    InstallerDiagnostics.complete(version: ReleaseMetadata.version, build: ReleaseMetadata.build,
+        stage: CommandLine.arguments.last == "preflight" ? "preflight" : "install", result: "failure", recovery: recovery,
+        details: "Stage: \(installerEngine?.failureStage ?? installerStage)\nOutcome: \(outcome)\n\(error)",
+        elapsed: Int((DispatchTime.now().uptimeNanoseconds - diagnosticStart) / 1_000_000), records: MigrationTimer.records)
+    MigrationFailurePresentation.report(
+        stage: installerStage == "安装新应用" ? (installerEngine?.failureStage ?? installerStage) : installerStage,
+        outcome: installerEngine?.recoveryStatus ?? "本次尚未修改原应用",
+        error: error, version: "\(ReleaseMetadata.version) / \(ReleaseMetadata.build)")
     exit(1)
 }

@@ -37,9 +37,9 @@ export function minimumMacOSVersion(manifest) {
 }
 
 export function assertMigrationRelease(manifest, info, signature) {
-  if (manifest.build?.appId !== "cc.jiwo.arkme" || manifest.build?.productName !== "即我"
+  if (manifest.build?.mac?.appId !== "com.senqisi.Jotmo" || manifest.build?.productName !== "即我"
     || !Number.isSafeInteger(manifest.versionCode) || manifest.versionCode < 1
-    || info.CFBundleIdentifier !== manifest.build.appId || info.CFBundleName !== "即我"
+    || info.CFBundleIdentifier !== manifest.build.mac.appId || info.CFBundleName !== "即我"
     || info.CFBundleExecutable !== "arkme" || info.CFBundleShortVersionString !== manifest.version
     || info.CFBundleVersion !== String(manifest.versionCode)
     || info.LSMinimumSystemVersion !== minimumMacOSVersion(manifest)) throw new Error("Migration application identity/version does not match release manifest");
@@ -105,14 +105,14 @@ export async function buildMigrationPackage({ appRoot, outputDirectory }) {
     await mkdir(scripts);
     // This is the exact already-signed app used by the ZIP build.
     const payload = await stageMigrationPayload(appRoot, work);
-    await writeFile(path.join(work, "ReleaseMetadata.swift"), `enum ReleaseMetadata {\nstatic let minimumSystemVersion = ${JSON.stringify(minimumSystemVersion)}\nstatic let appID = ${JSON.stringify(manifest.build.appId)}\nstatic let teamID = ${JSON.stringify(teamID)}\nstatic let version = ${JSON.stringify(manifest.version)}\nstatic let build = ${manifest.versionCode}\n}\n`);
+    await writeFile(path.join(work, "ReleaseMetadata.swift"), `enum ReleaseMetadata {\nstatic let minimumSystemVersion = ${JSON.stringify(minimumSystemVersion)}\nstatic let appID = ${JSON.stringify(manifest.build.mac.appId)}\nstatic let teamID = ${JSON.stringify(teamID)}\nstatic let version = ${JSON.stringify(manifest.version)}\nstatic let build = ${manifest.versionCode}\n}\n`);
     const binaries = [];
     const verifierBinaries = [];
     for (const architecture of ["arm64", "x86_64"]) {
       const binary = path.join(work, `migration-${architecture}`);
       run("/usr/bin/xcrun", ["swiftc", "-O", "-target", `${architecture}-apple-macos${minimumSystemVersion}`,
         "-module-cache-path", path.join(work, "modules"), "build/macos-migration/Migration.swift", "build/macos-migration/System.swift",
-        "build/macos-migration/main.swift", path.join(work, "ReleaseMetadata.swift"), "-o", binary]);
+        "build/macos-migration/Diagnostics.swift", "build/macos-migration/main.swift", path.join(work, "ReleaseMetadata.swift"), "-o", binary]);
       binaries.push(binary);
       const verifier = path.join(work, `signature-verifier-${architecture}`);
       run("/usr/bin/xcrun", ["swiftc", "-O", "-target", `${architecture}-apple-macos${minimumSystemVersion}`,

@@ -102,7 +102,7 @@ const localPluginDir = process.env.ARKME_RUNTIME_LOCAL_PLUGIN_DIR?.trim();
 const runtimePluginSource = localPluginDir
   ? await stageLocalRuntimePlugin({ localPluginDir, pluginDir: stagedPlugin })
   : productionPluginSource;
-assertRuntimePluginReady(JSON.parse(await readFile(path.join(stagedPlugin, "package.json"), "utf8")));
+assertRuntimePluginReady(JSON.parse(await readFile(path.join(stagedPlugin, "package.json"), "utf8")), harnessVersion);
 await prepareRuntimePluginTransaction({
   pluginDir: stagedPlugin,
   runtimeRoot,

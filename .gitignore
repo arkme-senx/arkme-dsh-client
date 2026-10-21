@@ -27,3 +27,7 @@ secrets*.json
 /settings.json
 *.db
 *.sqlite*
+
+# Independent Mac App Store build workspace
+.mas-build/
+release-mas/

@@ -14,7 +14,7 @@ test("migration test packages keep release identity while retaining test service
   const config = readPackagedRuntimeServiceConfig(root);
   expect(config.migrationTest).toBe(true);
   expect(config.environment).toBe("test");
-  expect(resolveArkmeAppIdentity(config.environment, false, config.migrationTest).appId).toBe("cc.jiwo.arkme");
+  expect(resolveArkmeAppIdentity(config.environment, false, config.migrationTest, "win32").appId).toBe("cc.jiwo.arkme");
   expect(resolvePackagedExecutableName("test", true)).toBe("arkme");
   expect(resolveArkmeAppIdentity("test").appId).toBe("cc.jiwo.arkme.test");
 });

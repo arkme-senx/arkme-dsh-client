@@ -3,12 +3,17 @@ import { FileDeviceLockStore } from "./device-lock-store.js";
 import { DeviceLockSurfaces } from "./device-lock-surfaces.js";
 import { deviceAuthExecutable, runDeviceAuthentication } from "./device-lock-native-auth.js";
 import { hostname } from "node:os";
+import { pluginHostPolicy } from "./plugin-host-policy.js";
+import { revealAfterAccountAcknowledgement } from "./account-scope-navigation.js";
+import { isMasChannel, resolveMasRuntime, MasBookmarks } from "./mas/runtime.js";
 import {installScreenshotShortcut} from './screenshot-shortcut-ipc.js';
 import { installScreenshotIpc } from './desktop-screenshot-ipc.js';
-import { installConversationWindowIpc } from './conversation-window-ipc.js';
+import { ConversationDraftSaveError, installConversationWindowIpc } from './conversation-window-ipc.js';
 import { installAttachmentPreviewNative } from "./attachment-preview-native.js";
 import { installLongArticleWindowIpc } from "./long-article-window-ipc.js";
 import { DesktopSessionSelection } from "./session-selection.js";
+import { DesktopRecordingFiles, type RecordingFilesContext } from './recording-import-files.js';
+import { NativeRecordingPicker } from './recording-file-picker.js';
 import { harnessCookieHeader, type HarnessAuthSession } from "./harness-auth-session.js";
 import { HarnessCookieInstaller } from "./harness-cookie-install.js";
 import { HarnessPageReadiness, localHarnessMountFailure, settleHarnessPageRendering } from "./harness-page-ready.js";
@@ -17,7 +22,7 @@ import { RuntimeDataTransactionStore, type RuntimeDataTransaction } from "./runt
 import { commitRuntimeUpgrade, recoverRuntimeUpgrade, restoreFailedRuntimeTrial } from "./runtime-upgrade.js";
 import { RUNTIME_CACHE_EPOCH, readPreviousRuntimeBaseline, resolveRuntimeCacheRoot } from "./runtime/cache-epoch.js";
 import { createDesktopDeviceReader } from "./desktop-device.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { access, mkdir, readFile } from "node:fs/promises";
 import { RotatingLog } from "./rotating-log.js";
@@ -185,6 +190,7 @@ import {
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const runtimeServiceConfig = readPackagedRuntimeServiceConfig(moduleDirectory);
 const runtimeEnvironment = runtimeServiceConfig.environment;
+const masChannel = isMasChannel(process.resourcesPath, app.isPackaged, process.mas === true);
 const packagedLocalTest = app.isPackaged
   && existsSync(path.join(process.resourcesPath, "ARKME_TEST_PLUGIN.json"));
 const startupEnvironment = withStartupUpdateCheckEnvironment(
@@ -201,9 +207,12 @@ let appName: string = appIdentity.appName;
 const deepLinks = new ArkmeDeepLinkQueue();
 app.setName(appName);
 app.setAppUserModelId(appIdentity.appId);
-const appDataPath = resolveArkmeAppDataPath(app.getPath("appData"), process.env.ARKME_APP_DATA_PATH);
+const appDataPath = masChannel ? app.getPath("appData") : resolveArkmeAppDataPath(app.getPath("appData"), process.env.ARKME_APP_DATA_PATH);
 app.setPath("appData", appDataPath);
+// Share directory naming/layout; MAS keeps the OS-provided sandbox appData root.
 app.setPath("userData", resolveUserDataPath(appDataPath, runtimeEnvironment));
+const masBookmarks = masChannel ? new MasBookmarks(path.join(app.getPath("userData"), "directory-bookmarks.json"), bookmark => { const stop = app.startAccessingSecurityScopedResource(bookmark); return () => stop(); }) : null;
+app.once("will-quit", () => masBookmarks?.close());
 const diagnosticLogPath = path.join(
   app.getPath("userData"),
   "logs",
@@ -253,6 +262,7 @@ let runtimeDataStore: RuntimeDataTransactionStore | null = null;
 let runtimeRecoveryRequired = false;
 let bufferedHarnessReadyState: Extract<HarnessState, {kind: "ready"}> | null = null;
 let controller: DesktopController | null = null;
+let conversationQuitPrepared = false;
 let activeHarnessOrigin: string | null = null;
 let activeHarnessVersion: string | undefined;
 let logPath = "";
@@ -610,10 +620,12 @@ function registerApplicationLifecycle(): void {
 
 async function stopHarnessForExit(): Promise<void> {
   if (longArticleWindows.size > 0) throw new Error("请先保存并关闭长文窗口，再重试更新或退出");
+  await conversationWindows.prepareToClose();
   desktopSessionSelection.invalidate();
   await desktopSessionSelection.flush();
   await controller?.stop("quit");
   await harnessCookieInstaller?.idle();
+  conversationQuitPrepared = true;
 }
 
 async function closeDirectoryPickerForExit(): Promise<void> {
@@ -744,7 +756,7 @@ async function configureAccountScopeForRuntime(
   });
   if (await arkmePluginSupportsDesktopAccountScope(runtime.arkmePluginPath)) {
     accountScopeStore = store;
-    activeAccountScope = await store.launch({deferLegacyMigration: runtime.runtimeManaged});
+    activeAccountScope = await store.launch({deferLegacyMigration: runtime.runtimeManaged || masChannel});
     accountScopeReady = false;
     return;
   }
@@ -763,9 +775,11 @@ async function attestDesktopAccountScope(
   if (accountScopeTransitions.active) throw new Error("DSH account scope transition is already active");
   const store = accountScopeStore;
   if (store === null) throw new Error("DSH account scope store is unavailable");
+  await conversationWindows.prepareToClose();
   // Reconciliation only plans legacy moves. The stopped-process relaunch owns
   // the actual rename, including recovery after commit but before migration.
   const result = await store.reconcile(identity, {deferLegacyMigration: true});
+  if (result.status !== "ready") await renderAccountScopeWaiting();
   activeAccountScope = result.launch;
   accountScopeReady = result.status === "ready";
   if (accountScopeReady) {
@@ -773,7 +787,6 @@ async function attestDesktopAccountScope(
     await revealAttestedHarness();
   }
   else {
-    await renderAccountScopeWaiting();
     scheduleAccountScopeRelaunch();
   }
   return { status: result.status };
@@ -786,8 +799,8 @@ async function prepareDesktopAccountScope(
   const previousReady = accountScopeReady;
   return await accountScopeTransitions.prepare(identity, {
     enter: async () => {
-      accountScopeReady = false;
       await renderAccountScopeWaiting();
+      accountScopeReady = false;
     },
     restore: async () => {
       accountScopeReady = previousReady;
@@ -826,10 +839,13 @@ async function abortDesktopAccountScope(transitionRef: string): Promise<{ status
 }
 
 async function revealAttestedHarness(): Promise<void> {
-  if (lastHarnessReadyState !== null) await renderState(lastHarnessReadyState);
+  const state = lastHarnessReadyState;
+  if (state !== null) await revealAfterAccountAcknowledgement(
+    () => renderState(state), error => logDiagnostic("account-scope-render-failed", error));
 }
 
 async function renderAccountScopeWaiting(): Promise<void> {
+  if (activeHarnessOrigin !== null) await conversationWindows.prepareToClose();
   desktopSessionSelection.invalidate();
   const window = mainWindow;
   if (window === null || window.isDestroyed()) return;
@@ -862,6 +878,8 @@ function scheduleAccountScopeRelaunch(): void {
 }
 
 async function switchAccountScopeRuntime(): Promise<void> {
+  // The editor was drained before the account waiting page replaced it.
+  await conversationWindows.flush();
   desktopSessionSelection.invalidate();
   const store = accountScopeStore;
   const runtime = activeLaunchRuntime;
@@ -1089,6 +1107,10 @@ function finishRuntimeBootstrap(harnessLogPath: string): void {
 }
 
 async function resolveLaunchRuntime(userDataPath: string, shellVersionCode: number, manualRetry = false): Promise<LaunchRuntime> {
+  if (masChannel) {
+    await masBookmarks?.restore();
+    return resolveMasRuntime(process.resourcesPath, process.arch, app.getVersion());
+  }
   if (!app.isPackaged) {
     const dshBinPath = resolveDshBinPath(false, process.resourcesPath, import.meta.url);
     const packageManagerBinPath = resolvePnpmBinDirectory(false, process.resourcesPath, import.meta.url);
@@ -1223,8 +1245,9 @@ async function initializeHarnessRuntime(
     appVersion: app.getVersion(),
     ...(dshVersion === undefined ? {} : { dshVersion }),
     runtimeManaged: runtime.runtimeManaged,
+    ...(masChannel ? { forceEmbedded: true } : {}),
     ...(runtime.release === undefined ? {} : { runtimeReleaseId: runtime.release.releaseId }),
-    ...(runtime.runtimeManaged ? {} : { packageManager: {
+    ...(runtime.runtimeManaged || masChannel ? {} : { packageManager: {
       executable: process.execPath,
       prefixArgs: [runtime.packageManagerCliPath],
       installArgs: ["--frozen-lockfile=false"],
@@ -1258,14 +1281,15 @@ async function initializeHarnessRuntime(
     inheritedEnv: {
       ...packageManagerEnvironment,
       ARKME_APP_VERSION: app.getVersion(),
+      ARKME_HOST_POLICY: pluginHostPolicy(masChannel),
       ...(paths.accountScopeRequired ? {
         ARKME_ACCOUNT_SCOPE_REQUIRED: "1",
         ARKME_DSH_RUNTIME_SCOPE_REF: paths.runtimeScopeRef
       } : {}),
-      ...(runtime.runtimeManaged ? { ARKME_RUNTIME_MANAGED: "1" } : {}),
+      ...(runtime.runtimeManaged || masChannel ? { ARKME_RUNTIME_MANAGED: "1" } : {}),
       ...(runtime.release === undefined ? {} : { ARKME_RUNTIME_RELEASE_ID: runtime.release.releaseId })
     },
-    managedRestart: resolveManagedExtensionRestartPaths(
+    ...(masChannel ? {} : { managedRestart: resolveManagedExtensionRestartPaths(
       runtime.arkmePluginPath,
       paths.dshHome,
       runtime.release?.releaseId
@@ -1275,6 +1299,7 @@ async function initializeHarnessRuntime(
       environment: runtimeEnvironment,
       ...(runtime.release === undefined ? {} : { runtimeReleaseId: runtime.release.releaseId })
     },
+    }),
     ...(directoryPickerBridge === null ? {} : { directoryPickerBridge }),
     ...(desktopCapabilityBridge === null ? {} : { desktopCapabilityBridge })
   });
@@ -1387,7 +1412,7 @@ async function readDshPackageVersion(dshBinPath: string): Promise<string | undef
 }
 
 async function installAppUpdateController(currentVersionCode: number): Promise<void> {
-  if (packagedLocalTest) return;
+  if (packagedLocalTest || masChannel) return;
   const target = resolveSupportedAppUpdateTarget(process.platform, process.arch);
   if (target === null) return;
   const receiptPath = resolveAppUpdateInstallReceiptPath(app.getPath("userData"));
@@ -1551,7 +1576,9 @@ registerDesktopBrandingIpc<Electron.IpcMainInvokeEvent | Electron.IpcMainEvent>(
 const conversationWindows = installConversationWindowIpc({
   main: () => mainWindow,
   origin: () => activeHarnessOrigin,
-  scope: () => JSON.stringify([activeHarnessOrigin, activeAccountScope?.dshHome, accountScopeReady]),
+  scope: () => JSON.stringify([activeHarnessOrigin, activeAccountScope?.dshHome]),
+  draftsDirectory: () => activeAccountScope ? path.join(path.dirname(activeAccountScope.settingsPath), 'conversation-drafts') : null,
+  onDraftSaveError: error => logDiagnostic('conversation-draft-save-failed', error),
   preload: () => resolveArkmePreloadPath(moduleDirectory, app.isPackaged, process.resourcesPath),
 });
 
@@ -1576,6 +1603,45 @@ ipcMain.handle("arkme-session-selection:save", (event, value: unknown) => {
 });
 
 const readDesktopDevice = createDesktopDeviceReader();
+const recordingFiles = new DesktopRecordingFiles(bookmark => { const stop = app.startAccessingSecurityScopedResource(bookmark); return () => { stop(); }; });
+const recordingPicker = new NativeRecordingPicker(owner => dialog.showOpenDialog(owner, {
+  properties: ['openFile', 'multiSelections'],
+  filters: [{ name: '录音', extensions: ['wav', 'mp3', 'm4a'] }],
+  securityScopedBookmarks: process.mas === true,
+}), details => logDiagnostic('native-recording-file-picker', details));
+function recordingFilesContext(event: Electron.IpcMainInvokeEvent, accountKey?: string): RecordingFilesContext {
+  const scope = activeAccountScope;
+  const origin = activeHarnessOrigin;
+  const authenticated = harnessAuthSession;
+  const document = event.senderFrame;
+  const valid = () => accountScopeReady && activeAccountScope === scope && activeHarnessOrigin === origin
+    && harnessAuthSession === authenticated && authenticated !== null && !authenticated.signal.aborted
+    && !event.sender.isDestroyed() && event.sender.mainFrame === document && isCurrentAppUpdateSender(event);
+  if (!scope || scope.owner.kind !== 'account' || !origin || !authenticated || !valid()) throw new Error('请在已登录的主窗口导入录音');
+  if (accountKey !== undefined) {
+    const match = /^(prod|test):(\d+)$/.exec(accountKey);
+    if (!match || match[1] !== runtimeEnvironment || createHash('sha256').update(`arkme-dsh-account-scope-v1\n${Number(match[2])}`).digest('hex') !== scope.owner.accountRef) throw new Error('导入队列账号不匹配');
+  }
+  return { directory: path.dirname(scope.settingsPath), origin, cookie: harnessCookieHeader(authenticated), valid };
+}
+ipcMain.handle('arkme-recording-import:list', (event, accountKey: string) => recordingFiles.list(recordingFilesContext(event, accountKey), accountKey));
+ipcMain.handle('arkme-recording-import:change', (event, accountKey: string, upserts, removals) => recordingFiles.change(recordingFilesContext(event, accountKey), accountKey, upserts, removals));
+ipcMain.handle('arkme-recording-import:pick', async event => {
+  const context = recordingFilesContext(event);
+  const owner = mainWindow;
+  if (!owner) throw new Error('录音导入窗口已关闭');
+  const selected = await recordingPicker.pick(owner, context.valid);
+  if (selected.canceled) return [];
+  return await recordingFiles.capture(context, selected.filePaths, selected.bookmarks);
+});
+ipcMain.handle('arkme-recording-import:capture', (event, paths: string[]) => {
+  if (process.mas) throw new Error('请点击选择文件，以保存重启后的文件授权');
+  return recordingFiles.capture(recordingFilesContext(event), paths);
+});
+ipcMain.handle('arkme-recording-import:stat', (event, token: string) => recordingFiles.stat(recordingFilesContext(event), token));
+ipcMain.handle('arkme-recording-import:read', (event, token: string, start: number, end: number) => recordingFiles.read(recordingFilesContext(event), token, start, end));
+ipcMain.handle('arkme-recording-import:upload', (event, token: string, request) => recordingFiles.upload(recordingFilesContext(event), token, request));
+ipcMain.handle('arkme-recording-import:cancel', (event, id: string) => recordingFiles.cancel(recordingFilesContext(event), id));
 ipcMain.handle("arkme-desktop:directory-badge", (event, count: unknown) => (
   isCurrentAppUpdateSender(event) && nativeBadges.applyDirectoryCount(count).accepted
 ));
@@ -1647,6 +1713,7 @@ function createMainWindow(): void {
   }, statusHtmlPath, runtimeEnvironment);
 
   lockWindowTitle(mainWindow, appName);
+  mainWindow.on('close', event => { if (!conversationQuitPrepared) { event.preventDefault(); app.quit(); } });
   mainWindow.on('closed', () => conversationWindows.closeAll());
   mainWindow.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) conversationWindows.closeAll(); });
   mainWindow.webContents.on('render-process-gone', () => conversationWindows.closeAll());
@@ -1745,6 +1812,8 @@ function installNavigationPolicy(window: BrowserWindow): void {
 async function renderState(state: HarnessState | RuntimeInstallProgress): Promise<void> {
   const window = mainWindow;
   if (window === null || window.isDestroyed()) return;
+  // Every native page replacement must drain the still-live editor first.
+  if (activeHarnessOrigin !== null) await conversationWindows.prepareToClose();
 
   if (state.kind === "ready") {
     lastHarnessReadyState = state;
@@ -1838,11 +1907,15 @@ async function showDirectoryDialog(title: string): Promise<string | null> {
   const options: Electron.OpenDialogOptions = {
     title,
     buttonLabel: "使用此项目",
-    properties: ["openDirectory"]
+    properties: ["openDirectory"],
+    ...(masChannel ? { securityScopedBookmarks: true } : {})
   };
   const result = mainWindow === null || !mainWindow.isVisible()
     ? await dialog.showOpenDialog(options)
     : await dialog.showOpenDialog(mainWindow, options);
+  if (!result.canceled && result.filePaths[0] && result.bookmarks?.[0]) {
+    await masBookmarks?.remember(result.filePaths[0], result.bookmarks[0]);
+  }
   return result.canceled ? null : (result.filePaths[0] ?? null);
 }
 
@@ -1876,6 +1949,7 @@ function installApplicationMenu(): void {
           label: "重新启动 Harness",
           accelerator: "CmdOrCtrl+Shift+R",
           click: () => enqueueAction(async () => {
+            await conversationWindows.prepareToClose();
             await controller?.retry();
           })
         },
@@ -1926,8 +2000,8 @@ async function refreshAccountScopeMenu(): Promise<void> {
 async function activateDesktopAccountContainer(containerRef: string): Promise<void> {
   const store = accountScopeStore;
   if (store === null) throw new Error("DSH account scope store is unavailable");
-  accountScopeReady = false;
   await renderAccountScopeWaiting();
+  accountScopeReady = false;
   activeAccountScope = await store.activate(containerRef);
   scheduleAccountScopeRelaunch();
 }
@@ -1938,6 +2012,7 @@ function enqueueAction(action: () => Promise<void>): void {
 
 async function handleAppAction(action: AppAction): Promise<void> {
   if (appUpdateNotices.isInstalling()) return;
+  if (action === 'reload-runtime' || action === 'retry' || action === 'choose-workspace') await conversationWindows.prepareToClose();
   if (action === "reload-runtime") {
     await reloadCurrentRuntimeEnvironment();
     return;
@@ -1971,6 +2046,7 @@ async function handleAppAction(action: AppAction): Promise<void> {
 }
 
 async function reloadCurrentRuntimeEnvironment(): Promise<void> {
+  await conversationWindows.prepareToClose();
   if (!app.isPackaged || runtimeManager === null) {
     throw new Error("当前客户端没有可重新加载的运行环境");
   }
@@ -1997,6 +2073,7 @@ async function reloadCurrentRuntimeEnvironment(): Promise<void> {
 }
 
 async function showActionError(error: unknown): Promise<void> {
+  if (error instanceof ConversationDraftSaveError) { logDiagnostic('conversation-draft-save-failed', error); return; }
   console.error("Desktop action failed", error);
   await renderFailure(error);
 }
@@ -2020,7 +2097,7 @@ async function renderFailure(error: unknown): Promise<void> {
       technicalDetails: error.technicalDetails,
       showWorkspaceAction: error.showWorkspaceAction,
       ...("showReloadRuntimeAction" in error
-        ? { showReloadRuntimeAction: error.showReloadRuntimeAction }
+        ? { showReloadRuntimeAction: !masChannel && error.showReloadRuntimeAction }
         : {})
     }
     : {};

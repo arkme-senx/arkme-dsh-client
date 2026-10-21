@@ -57,3 +57,45 @@ foreach($direction in @('user-to-machine','machine-to-user')) {
  Assert-True (!$links.ContainsKey("$direction/legacy.lnk")) 'validated duplicate source shortcut must be retired'
 }
 Write-Output 'Shortcut reconciliation fixtures passed.' 
+
+# Shared Flutter remains installed; user Desktop, Programs and Startup links are read-only.
+$Destination='C:\Apps\arkme'
+$shared=[pscustomobject]@{Root='D:\jotmo';Scope='all'}
+function Get-ShortcutLocations {
+  foreach ($role in @('Desktop','Programs','Startup')) {
+    [pscustomobject]@{Path="$role/arkme.lnk";Role=$role;Canonical=$false}
+    [pscustomobject]@{Path="$role/jiwo.lnk";Role=$role;Canonical=$true}
+  }
+}
+$script:links=@{}
+foreach ($role in @('Desktop','Programs','Startup')) {
+  & $write "$role/arkme.lnk" $new
+  & $write "$role/jiwo.lnk" 'D:\jotmo\jotmo.exe'
+}
+$before=$script:links | ConvertTo-Json -Depth 5
+Assert-PreservedShortcuts $shared $read
+Assert-True (($script:links | ConvertTo-Json -Depth 5) -eq $before) 'preserved links must not change, including startup intention'
+& $write 'Startup/jiwo.lnk' 'D:\unrelated.exe'
+$failed=$false
+try { Assert-PreservedShortcuts $shared $read } catch { $failed=$true }
+Assert-True $failed 'coexistence must not exempt unknown targets'
+
+# An admitted orphan is accepted only while the original shortcut bytes still match.
+$temp=Join-Path ([IO.Path]::GetTempPath()) ('jiwo-link-'+[guid]::NewGuid()+'.lnk')
+try {
+ [IO.File]::WriteAllText($temp,'original link fixture')
+ $script:links=@{}
+ & $write $temp 'D:\jotmo\jotmo.exe'
+ $snapshot=[pscustomobject]@{Path=$temp;Role='Startup';Canonical=$true;Existed=$true;Target='D:\jotmo\jotmo.exe';Hash=(Get-FileHash $temp).Hash;Compatibility='stale-flutter'}
+ Invoke-ShortcutReconciliation @($snapshot) $new '' $true $read $write $remove
+ Assert-True (!$links.ContainsKey($temp)) 'stale Flutter startup must not enable Arkme startup'
+ & $write $temp 'D:\jotmo\jotmo.exe'
+ $snapshot.Compatibility='verified-flutter'
+ Invoke-ShortcutReconciliation @($snapshot) $new '' $true $read $write $remove
+ Assert-True ($links[$temp].Target -eq $new) 'verified Flutter startup can transfer to the new client'
+ & $write $temp 'D:\jotmo\jotmo.exe'
+ [IO.File]::WriteAllText($temp,'changed link fixture')
+ $failed=$false
+ try {Invoke-ShortcutReconciliation @($snapshot) $new '' $true $read $write $remove} catch {$failed=$true}
+ Assert-True $failed 'changed orphan shortcut must not inherit admission'
+} finally {Remove-Item -LiteralPath $temp -Force}

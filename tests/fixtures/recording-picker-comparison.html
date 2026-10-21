@@ -1,0 +1,7 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>即我 · 选文件新旧对照</title>
+<style>body{font:17px/1.7 system-ui;padding:40px;color:#222;background:#f5f6f8}dialog{max-width:640px;width:calc(100% - 80px);border:0;border-radius:16px;padding:30px;box-shadow:0 16px 80px #0003}button{font:inherit;padding:10px 20px;margin:8px 8px 8px 0;border:1px solid #ccc;border-radius:9px;background:white;cursor:pointer}button:disabled{opacity:.45;cursor:default}#pick{background:#3469e8;color:white;border:0}#result{white-space:pre-wrap;min-height:70px}small{color:#666}h2{margin-top:0}#judgment[hidden]{display:none}</style></head>
+<body><dialog id="upload"><h2>选文件新旧对照</h2><strong id="method">正在准备…</strong><p>每一项都在刚启动的独立进程中测试，不连接账号，不读取或上传文件。</p><p>点击按钮，等待至少 8 秒，再手动取消。随后记录实际表现，进入下一项。</p>
+<input id="input" type="file" hidden multiple accept=".wav,.mp3,.m4a,audio/wav,audio/mpeg,audio/mp4">
+<button id="pick" disabled>打开系统选文件窗口</button><p id="result" role="status">等待开始</p>
+<div id="judgment" hidden><button data-judgment="manual-cancel">稳定停留，我手动取消</button><button data-judgment="unexpected-dismissal">它自己消失了</button></div>
+<button id="next" disabled>重启验证窗口，测试下一项</button><p><small>共三项：旧版文件输入框 → 当前浏览器接口 → 修复后的原生接口。完成后可关闭此窗口。</small></p></dialog><script src="/comparison.js"></script></body></html>

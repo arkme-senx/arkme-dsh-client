@@ -40,9 +40,9 @@ describe('conversation windows', () => {
  });
  it('relays scoped draft snapshots and clears them on account changes', async () => {
   const {manager, notify, windows} = setup(); await manager.open(target);
-  manager.publish(0, {kind:'draft', key:'draft', value:{text:'hello'}});
-  expect(manager.snapshot()).toEqual([{kind:'draft', key:'draft', value:{text:'hello'}}]);
-  expect(windows[0].send).toHaveBeenCalledWith('event', {kind:'draft', key:'draft', value:{text:'hello'}, accountKey:'prod:7'});
+  manager.publish(0, {kind:'draft', key:'draft', value:{text:'hello'}, revision:1});
+  expect(manager.snapshot()).toEqual([{kind:'draft', key:'draft', value:{text:'hello'}, revision:1}]);
+  expect(windows[0].send).toHaveBeenCalledWith('event', {kind:'draft', key:'draft', value:{text:'hello'}, revision:1, accountKey:'prod:7'});
   manager.publish(1, {kind:'changed'}); expect(notify).toHaveBeenCalledWith({kind:'changed',accountKey:'prod:7'});
   manager.setAccount(null); expect(manager.snapshot()).toEqual([]);
  });
@@ -72,4 +72,36 @@ it('uses the same target validation for opening and main-window fallback', async
  changeScope();
  expect(()=>manager.validateTarget(target)).toThrow();
  await expect(manager.open(target)).rejects.toThrow();
+});
+
+const bootstrap = {version: 1, accountKey: 'prod:7', sourceKey: 'chat:1',
+ auth: {status: 'authenticated', environment: 'prod', userId: 7},
+ content: {timeline: {items: [{itemUid: 'one', textContent: '本地消息'}], hasMore: false, aiPolishNotices: []}}};
+it('hands the optional local projection only to its target window and never overwrites an existing window', async () => {
+ const {manager, windows} = setup(); await manager.open(target, bootstrap);
+ bootstrap.content.timeline.items[0]!.textContent = 'mutated opener';
+ const context = manager.context(1)!;
+ expect((context.bootstrap!.content!.timeline as any).items[0].textContent).toBe('本地消息');
+ (context.bootstrap!.content!.timeline as any).items[0].textContent = 'mutated receiver';
+ expect((manager.context(1)!.bootstrap!.content!.timeline as any).items[0].textContent).toBe('本地消息');
+ await manager.open(target, {...bootstrap, content: {timeline: {items: []}}});
+ expect(windows).toHaveLength(1);
+ expect((manager.context(1)!.bootstrap!.content!.timeline as any).items).toHaveLength(1);
+ await manager.open({...target,sourceKey:'chat:2',source:{...target.source,sourceKey:'chat:2'}});
+ expect(manager.context(2)?.bootstrap).toBeUndefined();
+ manager.setAccount(null); expect(manager.context(1)).toBeUndefined();
+});
+it('discards mismatched or oversized optional seeds and preserves the ordinary open fallback', async () => {
+ for (const seed of [{...bootstrap,accountKey:'test:7'}, {...bootstrap,sourceKey:'chat:2'},
+  {...bootstrap,auth:{...bootstrap.auth,userId:8}}, {...bootstrap,auth:{...bootstrap.auth,environment:'test'}},
+  {...bootstrap,content:{timeline:{items: 'invalid'}}},
+  {...bootstrap,content:{timeline:{items:[{textContent:'字'.repeat(700_000)}]}}}]) {
+  const {manager,windows}=setup(); await manager.open(target,seed);
+  expect(windows).toHaveLength(1); expect(manager.context(1)?.bootstrap).toBeUndefined();
+ }
+});
+it('does not retain auth credential extensions or target-embedded seeds', async () => {
+ const {manager}=setup(); await manager.open({...target,bootstrap}, {...bootstrap,auth:{...bootstrap.auth,token:'secret',qrContent:'secret'}});
+ expect(manager.context(1)?.bootstrap?.auth).toEqual({status:'authenticated',environment:'prod',userId:7});
+ const other=setup(); await other.manager.open({...target,bootstrap}); expect(other.manager.context(1)?.bootstrap).toBeUndefined();
 });

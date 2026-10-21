@@ -1,13 +1,16 @@
 ﻿# Executed only by the signed production NSIS installer. Windows PowerShell 5.1.
 [CmdletBinding()]
 param(
-  [ValidateSet('Prepare','Apply','Commit','Finalize','Rollback','Check','Library')][string]$Action,
+  [ValidateSet('Prepare','Apply','Commit','Finalize','Rollback','Check','UpdateCheck','Report','Library')][string]$Action,
   [string]$Destination,
   [ValidateSet('current','all')][string]$Scope = 'current',
   [string]$Manifest,
   [string]$Stage,
   [string]$UninstallerName,
   [string]$InstallerPath,
+  [string]$CompletionFile,
+  [ValidateSet('','NSIS')][string]$FailureContext='',
+  [string]$ShortcutPolicyFile,
   [string]$ErrorFile
 )
 Set-StrictMode -Version Latest
@@ -15,7 +18,8 @@ $ErrorActionPreference = 'Stop'
 $LegacyKey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\fcf12080-f7e3-1067-bed2-21ffecf3ae64_is1'
 $Publisher = 'Senqisi (Wuhan) Technology Co., Ltd.'
 $RetiredSuffix = '.jiwo-v3-retired'
-$script:ProtectedJournalDirectory='' 
+$script:ProtectedJournalDirectory=''
+$script:PreservedLegacy=$null
 
 function Assert-WindowsCompatibility([version]$Version,[int]$Architecture) {
   if ($Version.Major -lt 10 -or $Architecture -ne 9) { throw 'This production release requires Windows 10/11 on native x64 hardware.' }
@@ -153,11 +157,16 @@ function Test-UserLocalCoexistence([string]$LegacyScope,[string]$TargetScope,[st
 function Test-PathWithin([string]$Path,[string]$Root) {
   return $Root -and $Path.StartsWith($Root.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)
 }
+function Test-HistoricalFlutterSystemPath([string]$Path) {
+  # Only this exact registered historical application directory is supported.
+  # Assert-Legacy still verifies Inno identity, publisher, layout and safe paths.
+  return $env:SystemRoot -and $Path.TrimEnd('\') -ieq (Join-Path $env:SystemRoot 'SysWOW64\jotmo')
+}
 function Test-InstallScopeCompatibility([string]$LegacyScope,[string]$TargetScope,[string]$LegacyRoot,[string]$Target,[string]$Profile,[bool]$Elevated,[bool]$ExistingArkme,[string[]]$ProgramRoots,[int]$OtherProfiles=-1,[bool]$Recovery=$false) {
   if ($LegacyScope -eq $TargetScope) { return $true }
   if (!$Elevated -or (!$ExistingArkme -and !$Recovery) -or !$Profile) { return $false }
   $oldUser=Test-PathWithin $LegacyRoot $Profile; $newUser=Test-PathWithin $Target $Profile
-  $oldShared=@($ProgramRoots | Where-Object { Test-PathWithin $LegacyRoot $_ }).Count -gt 0
+  $oldShared=(@($ProgramRoots | Where-Object { Test-PathWithin $LegacyRoot $_ }).Count -gt 0) -or (Test-HistoricalFlutterSystemPath $LegacyRoot)
   # A registered all-user Arkme may use a custom local path. Its existing
   # destination and protected ACLs are verified separately before replacement.
   if ($LegacyScope -eq 'current' -and $TargetScope -eq 'all') { return $oldUser -and !$newUser }
@@ -375,13 +384,18 @@ function Stop-Normally([string[]]$Roots) {
   }
 }
 function Assert-Payload([string]$Root, [string]$ManifestFile) {
-  Assert-Publisher (Join-Path $Root 'arkme.exe')
-  $entries = @((Get-Content -LiteralPath $ManifestFile -Raw -Encoding UTF8 | ConvertFrom-Json).files)
-  if ($entries.Count -lt 2) { throw 'Missing release file manifest.' }
-  foreach ($entry in $entries) {
-    if ($entry.path -match '(^[\\/]|\.\.|:)' -or $entry.sha256 -notmatch '^[a-f0-9]{64}$') { throw 'Invalid release file manifest.' }
-    $file = Assert-LocalPath (Join-Path $Root $entry.path)
-    if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ine $entry.sha256) { throw "Installed payload verification failed: $($entry.path)" }
+  $payloadTimer=[Diagnostics.Stopwatch]::StartNew()
+  try {
+    Assert-Publisher (Join-Path $Root 'arkme.exe')
+    $entries = @((Get-Content -LiteralPath $ManifestFile -Raw -Encoding UTF8 | ConvertFrom-Json).files)
+    if ($entries.Count -lt 2) { throw 'Missing release file manifest.' }
+    foreach ($entry in $entries) {
+      if ($entry.path -match '(^[\\/]|\.\.|:)' -or $entry.sha256 -notmatch '^[a-f0-9]{64}$') { throw 'Invalid release file manifest.' }
+      $file = Assert-LocalPath (Join-Path $Root $entry.path)
+      if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ine $entry.sha256) { throw "Installed payload verification failed: $($entry.path)" }
+    }
+  } finally {
+    Write-Output ("Phase=verify-payload root="+$Root+" elapsedMs="+$payloadTimer.ElapsedMilliseconds)
   }
 }
 function Get-LegacyShortcuts($Install) {
@@ -575,7 +589,7 @@ function Invoke-ShortcutReconciliation($Snapshots,[string]$NewExecutable,[string
   # Inspect every candidate before changing any. Never trust a same-name shortcut alone.
   foreach ($entry in $Snapshots) {
     $link=& $ReadShortcut $entry.Path
-    if ($link.Exists -and ($link.Target -notin $allowed -or $link.Arguments -ne '')) { throw 'An unknown shortcut target/arguments occupies an app entry; preserved without changes.' }
+    if ($link.Exists -and ($link.Target -notin $allowed -or $link.Arguments -ne '') -and !(Test-OriginalCompatibleShortcut $entry $link)) { throw 'An unknown shortcut target/arguments occupies an app entry; preserved without changes.' }
     if (!$entry.Canonical -and !$entry.Existed -and $link.Exists) { throw 'A shortcut appeared after preflight; preserved without changes.' }
     $current[$entry.Path]=$link
   }
@@ -584,7 +598,7 @@ function Invoke-ShortcutReconciliation($Snapshots,[string]$NewExecutable,[string
     $canonical=@($entries | Where-Object { $_.Canonical })
     if ($canonical.Count -ne 1) { throw 'Invalid shortcut snapshot layout.' }
     $desired=$canonical[0]
-    $wanted=@($entries | Where-Object { $_.Existed }).Count -gt 0
+    $wanted=@($entries | Where-Object { $_.Existed -and !($_.PSObject.Properties['Compatibility'] -and $_.Compatibility -eq 'stale-flutter' -and $_.Role -eq 'Startup') }).Count -gt 0
     if (!$HadExistingInstall -and $group.Name -ne 'Startup') { $wanted=$current[$desired.Path].Exists }
     if ($wanted) {
       if (!$current[$desired.Path].Exists -or $current[$desired.Path].Target -ine $NewExecutable) { $null=& $WriteShortcut $desired.Path $NewExecutable }
@@ -595,7 +609,7 @@ function Invoke-ShortcutReconciliation($Snapshots,[string]$NewExecutable,[string
       if ($wanted -and $entry.Canonical) { continue }
       $link=& $ReadShortcut $entry.Path
       if (!$link.Exists) { continue }
-      if ($link.Target -notin $allowed -or $link.Arguments -ne '') { throw 'Shortcut changed during migration; unknown entry was preserved.' }
+      if (($link.Target -notin $allowed -or $link.Arguments -ne '') -and !(Test-OriginalCompatibleShortcut $entry $link)) { throw 'Shortcut changed during migration; unknown entry was preserved.' }
       $null=& $RemoveShortcut $entry.Path
       if ((& $ReadShortcut $entry.Path).Exists) { throw 'Old shortcut could not be retired.' }
     }
@@ -623,6 +637,46 @@ function Read-ManagedShortcut([string]$Path) {
   $shell=New-Object -ComObject WScript.Shell
   $link=$shell.CreateShortcut($Path)
   return [pscustomobject]@{Exists=$true;Target=$link.TargetPath;Arguments=$link.Arguments}
+}
+function Get-ShortcutTargetVersion([string]$Target) { return [Diagnostics.FileVersionInfo]::GetVersionInfo($Target) }
+function Get-ShortcutCompatibility($Location,$Link) {
+  if (!$Location.Canonical -or $Link.Arguments -ne '' -or !$Link.Target -or [IO.Path]::GetFileName($Link.Target) -ine 'jotmo.exe') { throw 'Unknown shortcut identity or arguments.' }
+  $target=Assert-LocalPath $Link.Target
+  $root=[IO.Path]::GetDirectoryName($target)
+  $drive=New-Object IO.DriveInfo ([IO.Path]::GetPathRoot($target))
+  if (!$drive.IsReady -or $drive.DriveType -ne [IO.DriveType]::Fixed) { throw 'Shortcut target drive is unavailable or not a fixed local disk.' }
+  if (!(Test-Path -LiteralPath $target)) { return 'stale-flutter' }
+  if (!(Test-Path -LiteralPath $target -PathType Leaf)) { throw 'A non-file occupies the old shortcut target.' }
+  Assert-Publisher $target
+  $info=Get-ShortcutTargetVersion $target
+  if ($info.ProductName -cne '即我' -or $info.OriginalFilename -ine 'jotmo.exe' -or $info.FileMajorPart -ne 2) { throw 'Shortcut target is not a supported Flutter 2.x release.' }
+  foreach ($item in @((Join-Path $root 'flutter_windows.dll'),(Join-Path $root 'data\flutter_assets'))) { $null=Assert-LocalPath $item }
+  if (!(Test-Path -LiteralPath (Join-Path $root 'flutter_windows.dll') -PathType Leaf) -or !(Test-Path -LiteralPath (Join-Path $root 'data\flutter_assets') -PathType Container)) { throw 'Unrecognized Flutter shortcut target layout.' }
+  $incoming=Get-ReleaseManifest
+  Assert-UpgradeAllowed $info.FileVersion ([long]$info.FilePrivatePart) $incoming.version $incoming.versionCode
+  return 'verified-flutter'
+}
+function Test-OriginalCompatibleShortcut($Entry,$Link) {
+  return $Entry.PSObject.Properties['Compatibility'] -and $Entry.Compatibility -in @('verified-flutter','stale-flutter') -and $Entry.Existed -and $Link.Exists -and $Link.Arguments -eq '' -and $Link.Target -ieq $Entry.Target -and (Get-FileHash -LiteralPath $Entry.Path -Algorithm SHA256).Hash -ieq $Entry.Hash
+}
+# Coexisting shared Flutter owns its links, including per-user Startup entries.
+# Keep the existing Arkme links too: their executable path does not change.
+function Assert-PreservedShortcuts($Legacy,[scriptblock]$ReadShortcut) {
+  $allowed=@((Join-Path $Destination 'arkme.exe'),(Join-Path $Legacy.Root 'jotmo.exe'))
+  foreach ($location in @(Get-ShortcutLocations)) {
+    $link=& $ReadShortcut $location.Path
+    if ($link.Exists -and ($link.Target -notin $allowed -or $link.Arguments -ne '')) {
+      $kind=Get-ShortcutCompatibility $location $link
+      Write-Host "Preserving compatible shortcut kind=$kind path=$($location.Path) target=$($link.Target)"
+    }
+  }
+}
+function Write-ShortcutPolicy {
+  $preserve=[bool]$script:PreservedLegacy
+  if ($preserve) { Assert-PreservedShortcuts $script:PreservedLegacy {param($p) Read-ManagedShortcut $p} }
+  if ($ShortcutPolicyFile) {
+    [IO.File]::WriteAllText($ShortcutPolicyFile,"[Shortcuts]`r`nPreserve="+[int]$preserve+"`r`n",[Text.Encoding]::ASCII)
+  }
 }
 function Reconcile-InstalledShortcuts {
   $journal=Get-Content -LiteralPath (Join-Path (Get-JournalDirectory) 'journal.json') -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -791,17 +845,56 @@ function Assert-ElectronDestination {
   }
   return $found
 }
+# Coexistence keeps machine-wide Flutter outside the per-user Arkme transaction.
+function Select-MigrationLegacy($Legacy) {
+  $script:PreservedLegacy=$null
+  if ($Legacy -and $Legacy.Scope -eq 'all' -and $Scope -eq 'current') {
+    if (!(Assert-ElectronDestination)) { throw 'Preserving shared Flutter requires a verified existing current-user Arkme.' }
+    $profile=[Environment]::GetFolderPath('UserProfile')
+    $old=Assert-LocalPath $Legacy.Root
+    if (!(Test-PathWithin $Destination $profile) -or $old -ieq $Destination -or
+        (Test-PathWithin $Destination $old) -or (Test-PathWithin $old $Destination)) {
+      throw 'Shared Flutter and current-user Arkme directories must be separate.'
+    }
+    $script:PreservedLegacy=$Legacy
+    Write-Host "Preserving all-user Flutter: $old; updating current-user Arkme only: $Destination"
+    return $null
+  }
+  return $Legacy
+}
+function Select-OverlayEntries($Entries,[bool]$RegularUpdate) {
+  foreach ($entry in $Entries) {
+    # Keep the executable/uninstaller witnesses required by schema 2. Unchanged
+    # assets are never mutated, so they need no backup or recovery entry.
+    if (!$RegularUpdate -or !$entry.Existed -or $entry.Hash -ine $entry.NewHash -or $entry.Path -in @('arkme.exe','Uninstall arkme.exe')) { $entry }
+  }
+}
+function Test-RegularUpdate([bool]$Existing,$Legacy) {
+  if (!$Existing -or $Legacy) { return $false }
+  $info=[Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $Destination 'arkme.exe'))
+  return $info.ProductName -ceq '即我' -and $info.FileMajorPart -ge 3
+}
 function Begin-Overlay([string]$Stage, [string]$UninstallerName, $Legacy) {
+  $phaseTimer=[Diagnostics.Stopwatch]::StartNew()
   Assert-Payload $Stage $Manifest
+  Write-Output ("Phase=validate-stage elapsedMs="+$phaseTimer.ElapsedMilliseconds); $phaseTimer.Restart()
   $existing = Assert-ElectronDestination
   $directory = Get-JournalDirectory
   if (Test-Path -LiteralPath $directory) { throw 'Unresolved migration recovery directory.' }
-  $entries = @(Get-OverlayEntries $Stage $UninstallerName)
+  $regular=Test-RegularUpdate $existing $Legacy
+  $allEntries=@(Get-OverlayEntries $Stage $UninstallerName)
+  $entries = @(Select-OverlayEntries $allEntries $regular)
+  Write-Output ("Install route="+$(if($regular){'regular-update'}else{'migration'})+" totalFiles="+$allEntries.Count+" transactionFiles="+$entries.Count)
+  Assert-FilesReleased $entries
+  Write-Output ("Phase=plan-and-lock-check elapsedMs="+$phaseTimer.ElapsedMilliseconds); $phaseTimer.Restart()
   if (!$existing -and @($entries | Where-Object { $_.Existed }).Count) { throw 'Unregistered files occupy the destination. Choose a separate empty program directory.' }
   $shortcuts = @()
-  foreach ($location in @(Get-ShortcutLocations $Legacy)) {
+  $preserveShortcuts=[bool]$script:PreservedLegacy
+  if ($preserveShortcuts) { Assert-PreservedShortcuts $script:PreservedLegacy {param($p) Read-ManagedShortcut $p} }
+  foreach ($location in @(Get-ShortcutLocations $Legacy | Where-Object { !$preserveShortcuts })) {
     $file=$location.Path
     $target=''
+    $compatibility=''
     $exists = Test-Path -LiteralPath $file
     if ($exists) {
       $null = Assert-LocalPath $file
@@ -810,10 +903,14 @@ function Begin-Overlay([string]$Stage, [string]$UninstallerName, $Legacy) {
       $target = $link.Target
       $allowed = @((Join-Path $Destination 'arkme.exe'))
       if ($Legacy) { $allowed += (Join-Path $Legacy.Root 'jotmo.exe') }
-      if ($target -notin $allowed -or $link.Arguments -ne '') { throw "An unrelated shortcut target/arguments occupies an app shortcut name. Path=$file Target=$target Arguments=$($link.Arguments)" }
+      if ($target -notin $allowed -or $link.Arguments -ne '') {
+        try { $compatibility=Get-ShortcutCompatibility $location $link }
+        catch { throw "Shortcut compatibility check failed. Path=$file Target=$target Arguments=$($link.Arguments). $($_.Exception.Message)" }
+        Write-Host "Shortcut compatibility=$compatibility path=$file target=$target; only the shortcut enters the transaction"
+      }
     }
     if (Test-Path -LiteralPath ($file+'.jiwo-v3-restore')) { throw 'An unknown shortcut recovery temporary file already exists.' }
-    $shortcuts += [pscustomobject]@{ Path=$file; Role=$location.Role; Canonical=$location.Canonical; Target=$target; Existed=$exists; Hash=$(if ($exists) {(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash} else {''}) }
+    $shortcuts += [pscustomobject]@{ Path=$file; Role=$location.Role; Canonical=$location.Canonical; Target=$target; Compatibility=$compatibility; Existed=$exists; Hash=$(if ($exists) {(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash} else {''}) }
   }
   $incoming=Get-ReleaseManifest
   $legacyFiles=@()
@@ -824,7 +921,7 @@ function Begin-Overlay([string]$Stage, [string]$UninstallerName, $Legacy) {
       $legacyFiles += [pscustomobject]@{Path=$file;Hash=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash}
     }
   }
-  $journal = [pscustomobject]@{ Schema=2; HadExistingInstall=([bool]($existing -or $Legacy)); InstallerVersion=$incoming.version; InstallerVersionCode=$incoming.versionCode; RegistryMetadata=$incoming.registryMetadata; Destination=$Destination; Scope=$Scope; State='preparing'; Files=$entries; Shortcuts=$shortcuts; Registry=@(Get-RegistrySnapshots $Legacy); Legacy=$Legacy; LegacyFiles=$legacyFiles }
+  $journal = [pscustomobject]@{ Schema=2; HadExistingInstall=([bool]($existing -or $Legacy)); InstallerVersion=$incoming.version; InstallerVersionCode=$incoming.versionCode; RegistryMetadata=$incoming.registryMetadata; Destination=$Destination; Scope=$Scope; State='preparing'; PreserveShortcuts=$preserveShortcuts; Files=$entries; Shortcuts=$shortcuts; Registry=@(Get-RegistrySnapshots $Legacy); Legacy=$Legacy; LegacyFiles=$legacyFiles }
   Assert-JournalMetadata $journal
   New-JournalDirectory
   Assert-JournalTrust $directory
@@ -837,15 +934,41 @@ function Begin-Overlay([string]$Stage, [string]$UninstallerName, $Legacy) {
     if ($shortcuts[$i].Existed) { Copy-DurableFile $shortcuts[$i].Path (Join-Path $directory "shortcut-$i") }
   }
   # All staged/backup bytes are flushed before the active marker permits replacement.
+  Write-Output ("Phase=backup-and-stage elapsedMs="+$phaseTimer.ElapsedMilliseconds); $phaseTimer.Restart()
   $journal.State = 'active'; Save-Journal $journal
   Assert-RecoveryScene $directory $journal
+  Assert-FilesReleased $entries
   for ($i=0; $i -lt $entries.Count; $i++) {
     $entry=$entries[$i]
     $target = Join-Path $Destination $entry.Path
     $null = New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($target)) -Force
     Install-StagedFile (Join-Path $directory "payload-$i") $target $entry.NewHash
   }
-  Assert-Payload $Destination $Manifest
+  # Install-StagedFile already verifies transferred bytes. Finalize performs
+  # the one complete destination verification before commit/retirement.
+  Write-Output ("Phase=replace-and-verify elapsedMs="+$phaseTimer.ElapsedMilliseconds)
+}
+function Assert-FilesReleased($Entries,[int]$WaitMilliseconds=10000) {
+  $deadline=[DateTime]::UtcNow.AddMilliseconds($WaitMilliseconds)
+  foreach ($entry in $Entries) {
+    if (!$entry.Existed -or $entry.Hash -ieq $entry.NewHash) { continue }
+    $target=Join-Path $Destination $entry.Path
+    while ($true) {
+      try {
+        $handle=[IO.File]::Open($target,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        $handle.Dispose()
+        break
+      } catch {
+        # Child processes/antivirus may release handles shortly after normal exit.
+        # Only retry sharing/lock violations; permissions and unknown failures abort.
+        $cause=$_.Exception.GetBaseException(); $code=$cause.HResult -band 0xffff
+        if ($code -notin @(32,33) -or [DateTime]::UtcNow -ge $deadline) {
+          throw "Program file is still in use or inaccessible before replacement: $target. $($cause.Message)"
+        }
+        Start-Sleep -Milliseconds 200
+      }
+    }
+  }
 }
 function Copy-DurableFile([string]$Source,[string]$Target) {
   $inputFile=[IO.File]::OpenRead($Source)
@@ -858,6 +981,10 @@ function Get-TransferPath([string]$Target,[string]$Hash) { return $Target+'.jiwo
 function Install-StagedFile([string]$Source,[string]$Target,[string]$Hash) {
   $null=Assert-LocalPath $Source; $null=Assert-LocalPath $Target
   if ((Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash -ine $Hash) { throw 'Staged file integrity check failed.' }
+  if ((Test-Path -LiteralPath $Target -PathType Leaf) -and (Get-FileHash -LiteralPath $Target -Algorithm SHA256).Hash -ieq $Hash) {
+    Remove-Item -LiteralPath $Source -Force
+    return
+  }
   # Copy to the destination volume before atomic replacement. This also gives
   # newly created files the destination's access rights, not the private journal's.
   $temporary=Get-TransferPath $Target $Hash
@@ -865,8 +992,10 @@ function Install-StagedFile([string]$Source,[string]$Target,[string]$Hash) {
   if(Test-Path -LiteralPath $temporary){Assert-RestoreTemporary $temporary $Source;Remove-Item -LiteralPath $temporary -Force}
   Copy-DurableFile $Source $temporary
   if ((Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash -ine $Hash) { throw 'Transfer integrity check failed.' }
-  if (Test-Path -LiteralPath $Target) { [IO.File]::Replace($temporary,$Target,[NullString]::Value) }
-  else { [IO.File]::Move($temporary,$Target) }
+  try {
+    if (Test-Path -LiteralPath $Target) { [IO.File]::Replace($temporary,$Target,[NullString]::Value) }
+    else { [IO.File]::Move($temporary,$Target) }
+  } catch { throw "Atomic replacement failed: $Target. $($_.Exception.Message)" }
   Remove-Item -LiteralPath $Source -Force
 }
 
@@ -885,10 +1014,21 @@ function Assert-JournalMetadata($Journal) {
   # Previously shipped schema-2 records used LegacyFiles for external links.
   # Accept that complete original inventory or the complete expanded inventory.
   if(@($Journal.Shortcuts).Count -ne $locations.Count){$locations=@(Get-ShortcutLocations $Journal.Legacy)}
+  if ($Journal.PSObject.Properties['PreserveShortcuts']) {
+    if ($Journal.PreserveShortcuts -isnot [bool]) { throw 'Invalid shortcut preservation policy.' }
+    if ($Journal.PreserveShortcuts) {
+      if ($Journal.Legacy -or !$Journal.HadExistingInstall -or $Journal.Scope -ne 'current') { throw 'Invalid preserved shortcut scope.' }
+      $locations=@()
+    }
+  }
   $seen=@{}
   foreach ($entry in $Journal.Shortcuts) {
     $location=@($locations | Where-Object { $_.Path -ieq $entry.Path -and $_.Role -eq $entry.Role -and $_.Canonical -eq $entry.Canonical })
     if ($location.Count -ne 1 -or $seen.ContainsKey($entry.Path) -or $entry.Existed -isnot [bool] -or ($entry.Existed -and $entry.Hash -notmatch '^[a-f0-9]{64}$') -or (!$entry.Existed -and $entry.Hash -ne '')) { throw 'Invalid shortcut recovery location or ownership.' }
+    if ($entry.PSObject.Properties['Compatibility'] -and $entry.Compatibility -ne '') {
+      if ($entry.Compatibility -notin @('verified-flutter','stale-flutter') -or !$entry.Canonical -or !$entry.Existed -or [IO.Path]::GetFileName($entry.Target) -ine 'jotmo.exe') { throw 'Invalid compatible shortcut ownership.' }
+      $null=Assert-LocalPath $entry.Target
+    }
     $seen[$entry.Path]=$true
   }
   if ($seen.Count -ne $locations.Count) { throw 'Incomplete shortcut recovery inventory.' }
@@ -1040,11 +1180,12 @@ function Remove-CommittedLegacyRetirements($Journal) {
     }
   }
 }
-function Recover-Overlay {
+function Recover-Overlay([switch]$CommittedOnly) {
   $directory=Get-JournalDirectory
   if (!(Test-Path -LiteralPath $directory)) { return }
   Assert-JournalTrust $directory
   $file=Join-Path $directory 'journal.json'
+  if ($CommittedOnly -and !(Test-Path -LiteralPath $file)) { throw 'Incomplete migration record; run the full installer manually.' }
   if (!(Test-Path -LiteralPath $file)) {
     # Also covers interruption between deleting the terminal journal and its directory.
     if (@(Get-ChildItem -LiteralPath $directory -Force).Count -eq 0) { [IO.Directory]::Delete($directory,$false); return }
@@ -1068,6 +1209,7 @@ function Recover-Overlay {
   }
   $journal=Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
   Assert-JournalMetadata $journal
+  if ($CommittedOnly -and $journal.State -ne 'committed') { throw 'Unfinished migration; run the full installer manually.' }
   # This uses the original transaction's inventory, never the incoming EXE manifest.
   # Inspect the complete scene before the first recovery or cleanup mutation.
   Assert-RecoveryScene $directory $journal
@@ -1127,34 +1269,159 @@ function Complete-Overlay {
   $journal.State = 'committed'; Save-Journal $journal
 }
 
+# One admission check for the stock updater. Old releases retained committed
+# journals; reuse their cleanup, but never roll back an unfinished transaction.
+function Assert-NativeUpdate {
+  $Destination = Assert-LocalPath $Destination
+  Initialize-JournalLocation $null
+  if (Test-Path -LiteralPath (Get-JournalDirectory)) {
+    Recover-Overlay -CommittedOnly
+  }
+  $legacy=Select-MigrationLegacy (Get-LegacyInstall)
+  if ($legacy) { throw 'Legacy installation remains. Run the full installer manually.' }
+  $existing=Assert-ElectronDestination
+  if (!(Test-RegularUpdate $existing $legacy)) { throw 'This installation requires the full manual migration installer.' }
+}
+
+# Best-effort diagnostics. Never throw through an installer/rollback boundary.
+function Protect-InstallerDiagnosticText([string]$Text,[int]$Limit=12000) {
+  $rules=@(
+    @('(?i)(?:https?|file)://[^\s<>"\'']+','[REDACTED]'),
+    @('(?i)\b(Bearer|Basic)\s+[^\s,;"\'']+','${1} [REDACTED]'),
+    @('(?im)^([ \t]*(?:用户名|计算机|username|hostname|computer|machine|authorization|cookie|set-cookie|RunAs 用户|RunAs User)[ \t]*[:=][ \t]*)[^\r\n]*','${1}[REDACTED]'),
+    @('(?i)(\b(?:authorization|cookie|password|passwd|token|secret|api[_-]?key|access[_-]?key|access[_-]?secret|用户名|计算机|username|hostname|computer|RunAs 用户|RunAs User)["'']?[ \t]*[:=][ \t]*)(?:"(?:\\.|[^"\\\r\n])*"|''(?:\\.|[^''\\\r\n])*''|[^\s,;\r\n]+)','${1}[REDACTED]'),
+    @('(?i)((?:[a-z]:)?[\\/]+(?:Users|Documents and Settings)[\\/]+)[^\\/\r\n"<>]+','${1}<user>'),
+    @('(?i)(/(?:Users|home)/)[^/\r\n"<>]+','${1}<user>'),
+    @('(?i)(/(?:mnt|media|Volumes)/)[^/\r\n"<>]+','${1}<volume>'),
+    @('(/var/folders/)[^/\s]+/[^/\s]+','${1}<bucket>/<temp-id>'),
+    @('\\\\[^\\\s]+\\[^\\\r\n"<>]+','\\<server>\<share>'),
+    @('(?m)(^|[ \t=(])[A-Za-z0-9_.\-]+\\[A-Za-z0-9_.\-]+($|[ \t\r\n])','${1}<account>${2}'),
+    @('(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b','[REDACTED]'),
+    @('\b(?:\d{1,3}\.){3}\d{1,3}\b','[REDACTED]')
+  )
+  foreach ($rule in $rules) { $Text=[regex]::Replace($Text,$rule[0],$rule[1]) }
+  $Text=[regex]::Replace($Text,'[\x00-\x08\x0b\x0c\x0e-\x1f]','')
+  # Byte limits must agree with the backend, including Chinese messages.
+  while ([Text.Encoding]::UTF8.GetByteCount($Text) -gt $Limit) { $Text=$Text.Substring(0,[Math]::Max(0,$Text.Length-128)) }
+  return $Text
+}
+function Send-InstallerDiagnostic([string]$Json) {
+  $client=$null; $content=$null; $request=$null
+  try {
+    Add-Type -AssemblyName System.Net.Http
+    $handler=New-Object Net.Http.HttpClientHandler
+    $handler.AllowAutoRedirect=$false; $handler.UseCookies=$false
+    $client=New-Object Net.Http.HttpClient($handler)
+    $client.Timeout=[TimeSpan]::FromMilliseconds(1500)
+    $content=New-Object Net.Http.StringContent($Json,[Text.Encoding]::UTF8,'application/json')
+    $request=$client.PostAsync('https://api.jotmo.cc/api/public/v1/arkme/installer-reports',$content)
+    if (!$request.Wait(1500)) { $client.CancelPendingRequests(); return $false }
+    $response=$request.GetAwaiter().GetResult()
+    try { return [int]$response.StatusCode -eq 202 } finally {$response.Dispose()}
+  } catch { return $false }
+  finally { if($content){$content.Dispose()}; if($client){$client.Dispose()} }
+}
+function Save-InstallerDiagnostic($Report,[string]$Directory,[scriptblock]$Send) {
+  try {
+    # Private local queue, separate from the rollback journal. Reject reparse paths.
+    $null=Assert-LocalPath $Directory
+    $null=New-Item -ItemType Directory -Path $Directory -Force
+    $null=Assert-LocalPath $Directory
+    $Report.details=Protect-InstallerDiagnosticText $Report.details 4096
+    $Report.log=Protect-InstallerDiagnosticText $Report.log 12000
+    $json=$Report | ConvertTo-Json -Depth 4 -Compress
+    if ([Text.Encoding]::UTF8.GetByteCount($json) -gt 32768) { return }
+    $file=Join-Path $Directory ($Report.event_id+'.json')
+    $bytes=[Text.Encoding]::UTF8.GetBytes($json)
+    $stream=New-Object IO.FileStream($file,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try {$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)} finally {$stream.Dispose()}
+    $items=@(Get-ChildItem -LiteralPath $Directory -File | Where-Object {$_.Name -match '^[a-f0-9]{32}\.json$'} | Sort-Object LastWriteTimeUtc -Descending)
+    $index=0
+    foreach ($item in $items) {
+      $position=$index; $index++
+      $null=Assert-LocalPath $item.FullName
+      if ($item.Length -gt 32768 -or $position -ge 20 -or $item.LastWriteTimeUtc -lt [DateTime]::UtcNow.AddDays(-7)) {Remove-Item -LiteralPath $item.FullName -Force;continue}
+      if ($position -lt 2) {
+        try { $queued=Get-Content -LiteralPath $item.FullName -Raw -Encoding UTF8 | ConvertFrom-Json } catch {continue}
+        # Reconstruct the schema: do not upload arbitrary files/extra fields or a queued URL.
+        $safe=[ordered]@{}
+        foreach ($key in @('schema','event_id','platform','os_version','architecture','version','build','stage','result','error_code','recovery','scope','elapsed_ms')) {$safe[$key]=$queued.$key}
+        if ($safe.os_version -notmatch '^\d{1,5}(?:\.\d{1,8}){1,3}$' -or $safe.architecture -notin @('x64','arm64') -or $safe.schema -ne 1 -or $safe.event_id -notmatch '^[a-f0-9]{32}$' -or $safe.version -notmatch '^\d{1,5}\.\d{1,5}\.\d{1,5}$' -or $safe.build -isnot [ValueType] -or [long]$safe.build -lt 1 -or [long]$safe.build -gt 2147483647 -or $safe.elapsed_ms -isnot [ValueType] -or [long]$safe.elapsed_ms -lt 0 -or [long]$safe.elapsed_ms -gt 604800000 -or $safe.stage -notin @('Check','Prepare','Apply','Commit','Finalize','Rollback','UpdateCheck','Report') -or $safe.result -notin @('success','failure','cancelled') -or $safe.error_code -notin @('NONE','INSTALL_FAILED','SIGNATURE_CHECK_FAILED','CANCELLED') -or $safe.recovery -notin @('not_needed','completed','failed','unknown') -or $safe.scope -notin @('current','all','unknown')) {continue}
+        $safe.details=Protect-InstallerDiagnosticText ([string]$queued.details) 4096
+        $safe.log=Protect-InstallerDiagnosticText ([string]$queued.log) 12000
+        if ($safe.event_id -ne $item.BaseName -or $safe.platform -ne 'windows') {continue}
+        if (& $Send ($safe | ConvertTo-Json -Depth 4 -Compress)) {Remove-Item -LiteralPath $item.FullName -Force}
+      }
+    }
+  } catch { Write-Output 'Installer diagnostic delivery deferred; installation result unchanged.' }
+}
+function Complete-InstallerDiagnostic([string]$Result,[string]$Recovery,[string]$Details,[long]$Elapsed) {
+  try {
+    $meta=Get-ReleaseManifest
+    $code=if($Result -eq 'success'){'NONE'}elseif($Details -match '(?i)cancel|取消'){'CANCELLED'}elseif($Details -match '(?i)signature|签名'){'SIGNATURE_CHECK_FAILED'}else{'INSTALL_FAILED'}
+    if($code -eq 'CANCELLED'){$Result='cancelled'}
+    $diagnosticLog=$Details
+    if (Test-Path -LiteralPath $log -PathType Leaf) {
+      $inputFile=[IO.File]::Open($log,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+      try {
+        $null=$inputFile.Seek([Math]::Max(0,$inputFile.Length-16000),[IO.SeekOrigin]::Begin)
+        $buffer=New-Object byte[] 16000; $read=$inputFile.Read($buffer,0,$buffer.Length)
+        $diagnosticLog=[Text.Encoding]::UTF8.GetString($buffer,0,$read)
+      } finally {$inputFile.Dispose()}
+    }
+    $report=[ordered]@{schema=1;event_id=[guid]::NewGuid().ToString('N');platform='windows';os_version=[Environment]::OSVersion.Version.ToString();architecture='x64';version=[string]$meta.version;build=[long]$meta.versionCode;stage=$Action;result=$Result;error_code=$code;recovery=$Recovery;scope=$Scope;elapsed_ms=$Elapsed;details=$Details;log=$diagnosticLog}
+    $directory=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Jiwo Installer Reports'
+    Save-InstallerDiagnostic $report $directory {param($json) Send-InstallerDiagnostic $json}
+  } catch { Write-Output 'Installer diagnostics unavailable; installation result unchanged.' }
+}
+
 if ($Action -eq 'Library') { return }
 $timer=[Diagnostics.Stopwatch]::StartNew()
 $log=Join-Path ([IO.Path]::GetTempPath()) ('jiwo-install-'+[DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')+'-'+$PID+'.log')
 $transcribing=$false
+$diagnosticResult=if($FailureContext -eq 'NSIS'){'failure'}else{'success'}; $diagnosticRecovery='not_needed'; $diagnosticDetails=if($FailureContext -eq 'NSIS'){'NSIS installation failed; recovery requested.'}else{''}
 try { Start-Transcript -LiteralPath $log -ErrorAction Stop | Out-Null; $transcribing=$true } catch { Write-Warning 'Could not create installer diagnostic transcript.' }
 try {
   Write-Output "Migration action=$Action scope=$Scope destination=$Destination log=$log"
 
+  if ($Action -eq 'Report') { exit 0 }
+  if ($Action -eq 'UpdateCheck') {
+    Assert-NativeUpdate
+    Write-ShortcutPolicy
+    if (!$script:PreservedLegacy) {
+      foreach ($location in @(Get-ShortcutLocations)) {
+        $link=Read-ManagedShortcut $location.Path
+        if ($link.Exists -and ($link.Target -ine (Join-Path $Destination 'arkme.exe') -or $link.Arguments -ne '')) { throw 'Shortcut migration requires the full installer; automatic update preserved the existing entry.' }
+      }
+    }
+    Write-Output 'Install route=native-update admission=passed'
+    exit 0
+  }
   $os=Get-CimInstance Win32_OperatingSystem
   $processor=Get-CimInstance Win32_Processor | Select-Object -First 1
   Assert-WindowsCompatibility ([version]$os.Version) ([int]$processor.Architecture)
   $release=Get-ReleaseManifest
   $Destination = Assert-LocalPath $Destination
-  $legacy = Get-LegacyInstall
-  Initialize-JournalLocation $legacy
+  # Recover any existing transaction before validating the replacement destination.
+  Initialize-JournalLocation $null
   if ($Action -in @('Check','Prepare','Rollback')) {
     if (Test-Path -LiteralPath (Get-JournalDirectory)) { Stop-Normally @($Destination); Recover-Overlay }
-    if ($Action -eq 'Rollback') { exit 0 }
+    if ($Action -eq 'Rollback') { $diagnosticRecovery='completed'; exit 0 }
   }
-  $legacy = Get-LegacyInstall
+  $discovered=Get-LegacyInstall
+  Write-Host ("Legacy discovery="+$(if($discovered){"scope=$($discovered.Scope) root=$($discovered.Root) hive=$($discovered.Hive) view=$($discovered.View)"}else{'none'})+" targetScope=$Scope target=$Destination")
+  $legacy = Select-MigrationLegacy $discovered
+  Initialize-JournalLocation $legacy
+  Write-ShortcutPolicy
   $roots = @($Destination)
+  if ($script:PreservedLegacy) { $roots += $script:PreservedLegacy.Root }
   if ($null -ne $legacy) {
     Assert-Legacy $legacy $Destination $Scope
     $roots += $legacy.Root
   }
   if ($Action -in @('Check','Prepare')) { $null=Assert-ElectronDestination }
   Stop-Normally $roots
-  if ($Action -in @('Prepare','Check')) { $null=Assert-ElectronDestination; Assert-DiskCapacity }
+  if ($Action -in @('Prepare','Check')) { Assert-DiskCapacity }
   if ($Action -eq 'Apply') {
     Begin-Overlay $Stage $UninstallerName $legacy
   } elseif ($Action -eq 'Commit') {
@@ -1184,23 +1451,37 @@ try {
       } finally { $base.Dispose() }
     }
     Complete-Overlay
+    if ($CompletionFile) { [IO.File]::WriteAllText($CompletionFile,[string]$release.versionCode,[Text.Encoding]::ASCII) }
     try {
       $committed=Get-Content -LiteralPath (Join-Path (Get-JournalDirectory) 'journal.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-      Remove-CommittedLegacyRetirements $committed
+      Recover-Overlay -CommittedOnly
     } catch { Write-Warning ('Installation committed; retirement cleanup will retry on the next install: '+$_.Exception.Message) }
   } elseif ($null -ne $legacy) { $null = @(Get-LegacyShortcuts $legacy) }
   exit 0
 } catch {
-  $message = $_.Exception.Message
+  $failure = $_
+  $message = $failure.Exception.Message
+  $failureTrace = $failure.ScriptStackTrace
+  $diagnosticResult='failure'
+  if ($Action -eq 'Rollback') {$diagnosticRecovery='failed'}
   if ($Action -in @('Apply','Commit','Finalize')) {
-    try { Recover-Overlay } catch { $message += ' Recovery: '+$_.Exception.Message }
+    try { Recover-Overlay; $diagnosticRecovery='completed' } catch { $diagnosticRecovery='failed'; $message += ' Recovery: '+$_.Exception.Message }
   }
-  if ($ErrorFile) { [IO.File]::WriteAllText($ErrorFile,$message,[Text.Encoding]::Unicode) }
-  Write-Output ('Failed at: '+$_.ScriptStackTrace)
+  $diagnosticDetails=$message+"`n"+$failureTrace
+  $report = "完整日志：$log`r`n$message`r`nFailed at: $failureTrace`r`n"
+  if ($ErrorFile) {
+    try { [IO.File]::WriteAllText($ErrorFile,$report,[Text.Encoding]::Unicode) }
+    catch { Write-Warning ('Could not write installer error report: '+$_.Exception.Message) }
+  }
+  Write-Output ('Failed at: '+$failureTrace)
   Write-Error $message -ErrorAction Continue
   exit 1
 }
 finally {
   Write-Output ('Migration action='+$Action+' elapsedMs='+$timer.ElapsedMilliseconds)
-  if ($transcribing) { Stop-Transcript | Out-Null }
+  if ($transcribing) { try { Stop-Transcript | Out-Null } catch {} }
+  # Recovery and completion markers are already final before any network attempt.
+  if ($diagnosticResult -ne 'success' -or $Action -in @('Check','Finalize','Rollback','UpdateCheck','Report')) {
+    Complete-InstallerDiagnostic $diagnosticResult $diagnosticRecovery $diagnosticDetails $timer.ElapsedMilliseconds
+  }
 }
