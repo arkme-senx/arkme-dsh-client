@@ -541,6 +541,8 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.send("arkme-runtime:page-ready", harnessReadyNonce);
     },
     startupAuthGate: true as const,
+    ...(ipcRenderer.sendSync("arkme-device-lock:available") === true
+      ? { deviceLock: Object.freeze({ version: 1 as const }) } : {}),
     ...(process.platform === "darwin" ? {
       windowDrag: Object.freeze({ send: (message: unknown): void => {
         ipcRenderer.send("arkme-desktop:window-drag", message);

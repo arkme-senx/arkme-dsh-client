@@ -96,6 +96,7 @@ type RequestHandler = Exclude<Parameters<Session["setPermissionRequestHandler"]>
 
 function installedPolicy(options: {
   activeHarnessOrigin?: string | null;
+  locked?: () => boolean;
   currentUrl?: string;
   diagnostic?: Parameters<typeof installHarnessPermissionPolicy>[1]["diagnostic"];
 } = {}): {
@@ -123,6 +124,7 @@ function installedPolicy(options: {
       ? harnessOrigin
       : options.activeHarnessOrigin,
     getMainWebContentsId: () => 7,
+    ...(options.locked === undefined ? {} : { isDeviceLocked: options.locked }),
     ...(options.diagnostic === undefined ? {} : { diagnostic: options.diagnostic })
   });
   if (check === undefined || request === undefined) {
@@ -132,6 +134,16 @@ function installedPolicy(options: {
 }
 
 describe("installHarnessPermissionPolicy", () => {
+  test("rechecks browser notification permission at emission after a lock race", () => {
+    let locked = false;
+    const { check, request, webContents } = installedPolicy({ locked: () => locked });
+    expect(check(webContents, "notifications", harnessOrigin, { isMainFrame: true })).toBe(true);
+    locked = true;
+    expect(check(webContents, "notifications", harnessOrigin, { isMainFrame: true })).toBe(false);
+    const callback = vi.fn();
+    request(webContents, "notifications", callback, { isMainFrame: true, requestingUrl: harnessOrigin });
+    expect(callback).toHaveBeenCalledWith(false);
+  });
   test("installs both Electron 43 handlers and grants scoped geolocation", () => {
     const diagnostic = vi.fn();
     const { check, request, webContents } = installedPolicy({ diagnostic });

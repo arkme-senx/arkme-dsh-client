@@ -219,7 +219,7 @@ describe("application manifest", () => {
     expect(manifest.scripts.dist).not.toContain("prepare:runtime");
     expect(manifest.scripts["dist:win"]).not.toContain("prepare:runtime");
     expect(manifest.scripts["dist:linux"]).not.toContain("prepare:runtime");
-    expect(manifest.build).not.toHaveProperty("extraResources");
+    expect(manifest.build).toHaveProperty("extraResources", [{ from: "dist/device-auth", to: "device-auth" }]);
     expect(manifest.build).not.toHaveProperty("beforePack");
     expect(manifest.build.linux?.target).toEqual([{ target: "AppImage", arch: ["x64"] }]);
   });
@@ -338,7 +338,7 @@ describe("application manifest", () => {
       };
     };
 
-    expect(manifest.build.extraResources).toBeUndefined();
+    expect(manifest.build.extraResources).toEqual([{ from: "dist/device-auth", to: "device-auth" }]);
     expect(manifest.build.nsis).toEqual({
       oneClick: false,
       include: "build/nsis-installer-ui.nsh",

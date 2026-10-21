@@ -1,0 +1,62 @@
+import { randomUUID } from "node:crypto";
+import { readFileSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync, fsyncSync, unlinkSync } from "node:fs";
+import path from "node:path";
+
+export interface LockReport { sequence: number; actual_lock: "locked" | "unlocked"; lock_cycle: string; operation_id?: string; not_applied?: boolean; unlock_source?: "native" }
+export interface LockBinding { userId: number; clientId: number; sessionId: string; cleanupToken: string; loginKey?: string }
+export interface PersistedDeviceLock {
+  schemaVersion: 1;
+  locked: boolean;
+  ended: boolean;
+  cycle: string;
+  sequence: number;
+  binding?: LockBinding;
+  pendingRegistration?: LockBinding & { previousSessionId?: string };
+  pendingReport?: LockReport;
+  pendingCleanup?: LockBinding;
+}
+export interface DeviceLockStore { read(): PersistedDeviceLock | undefined; write(state: PersistedDeviceLock): void }
+
+export class FileDeviceLockStore implements DeviceLockStore {
+  constructor(private readonly file: string) {}
+  read(): PersistedDeviceLock | undefined {
+    let raw: string;
+    try { raw = readFileSync(this.file, "utf8"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+    if (raw.length > 16_384) throw new Error("锁定状态文件无效");
+    const value: unknown = JSON.parse(raw);
+    if (value === null || typeof value !== "object") throw new Error("锁定状态文件无效");
+    const state = value as PersistedDeviceLock;
+    if (state.schemaVersion !== 1 || typeof state.locked !== "boolean" || typeof state.ended !== "boolean"
+      || !/^[A-Za-z0-9_-]{16,128}$/.test(state.cycle) || !Number.isSafeInteger(state.sequence) || state.sequence < 0) throw new Error("锁定状态文件无效");
+    for (const identity of [state.binding, state.pendingCleanup, state.pendingRegistration]) {
+      if (identity !== undefined && (!Number.isSafeInteger(identity.userId) || identity.userId <= 0
+        || (identity.loginKey !== undefined && !/^[a-f0-9]{64}$/.test(identity.loginKey))
+        || !Number.isSafeInteger(identity.clientId) || identity.clientId <= 0
+        || !/^[A-Za-z0-9_-]{16,128}$/.test(identity.sessionId) || !/^[a-f0-9]{64}$/.test(identity.cleanupToken))) throw new Error("锁定会话文件无效");
+    }
+    if (state.pendingRegistration?.previousSessionId !== undefined && state.pendingRegistration.previousSessionId !== "" && !/^[A-Za-z0-9_-]{16,128}$/.test(state.pendingRegistration.previousSessionId)) throw new Error("锁定注册文件无效");
+    if (state.pendingReport !== undefined && (state.pendingReport.sequence !== state.sequence
+      || state.pendingReport.lock_cycle !== state.cycle || state.pendingReport.actual_lock !== (state.locked ? "locked" : "unlocked"))) throw new Error("锁定回执文件无效");
+    if (state.pendingReport?.unlock_source !== undefined && (state.pendingReport.unlock_source !== "native"
+      || state.pendingReport.actual_lock !== "unlocked" || state.pendingReport.operation_id !== undefined || state.pendingReport.not_applied)) throw new Error("锁定回执文件无效");
+    return state;
+  }
+  write(state: PersistedDeviceLock): void {
+    mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
+    const temporary = `${this.file}.${randomUUID()}.tmp`;
+    const descriptor = openSync(temporary, "wx", 0o600);
+    try {
+      try {
+        writeFileSync(descriptor, `${JSON.stringify(state)}\n`);
+        // Windows requires a writable handle to flush the file to disk.
+        fsyncSync(descriptor);
+      } finally { closeSync(descriptor); }
+      renameSync(temporary, this.file);
+    } finally {
+      // A failed write/flush/replace preserves the previous state and must not
+      // accumulate credential-bearing temporary files on every sync retry.
+      try { unlinkSync(temporary); } catch { /* Already renamed or unavailable. */ }
+    }
+  }
+}
