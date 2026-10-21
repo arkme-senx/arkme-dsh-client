@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 // This runs before either the root Harness runtime or its same-origin iframe.
 // localStorage is only the official boot handoff; the account file is authoritative.
@@ -498,6 +498,17 @@ let harnessReadyNotified = false;
 contextBridge.exposeInMainWorld(
   "arkmeDesktop",
   Object.freeze({
+    recordingImports: Object.freeze({
+      version: 1,
+      list: (accountKey: string) => ipcRenderer.invoke('arkme-recording-import:list', accountKey),
+      change: (accountKey: string, upserts: unknown[], removals: string[]) => ipcRenderer.invoke('arkme-recording-import:change', accountKey, upserts, removals),
+      pick: () => ipcRenderer.invoke('arkme-recording-import:pick'),
+      capture: (files: File[]) => ipcRenderer.invoke('arkme-recording-import:capture', files.map(file => webUtils.getPathForFile(file))),
+      stat: (token: string) => ipcRenderer.invoke('arkme-recording-import:stat', token),
+      read: (token: string, start: number, end: number) => ipcRenderer.invoke('arkme-recording-import:read', token, start, end),
+      upload: (token: string, request: unknown) => ipcRenderer.invoke('arkme-recording-import:upload', token, request),
+      cancel: (id: string) => ipcRenderer.invoke('arkme-recording-import:cancel', id),
+    }),
     branding: Object.freeze({
       schemaVersion: 1 as const,
       current: ipcRenderer.sendSync("arkme-desktop:branding-snapshot") as unknown,
