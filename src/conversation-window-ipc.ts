@@ -62,7 +62,7 @@ export function installConversationWindowIpc(options: {
   if (sender(event) !== 0 || (account !== null && (typeof account !== 'string' || account.length > 256))) return false;
   await manager.setAccount(account as string | null); return true;
  });
- ipcMain.handle(prefix + 'open', async (event, target: unknown) => { if (sender(event) === undefined) throw new Error('Untrusted conversation opener'); await manager.open(target); return true; });
+ ipcMain.handle(prefix + 'open', async (event, target: unknown, bootstrap: unknown) => { if (sender(event) === undefined) throw new Error('Untrusted conversation opener'); await manager.open(target, bootstrap); return true; });
  ipcMain.handle(prefix + 'context', event => sender(event) === undefined ? null : manager.context(event.sender.id) ?? null);
  ipcMain.handle(prefix + 'active', event => sender(event) !== undefined);
  ipcMain.handle(prefix + 'close', event => { if (sender(event)) manager.close(event.sender.id); });
