@@ -6,7 +6,7 @@ interface Device { client_id: number; session_id: string; actual_lock?: "locked"
 export interface DeviceLockSnapshot {
   supported: boolean; locked: boolean; sessionEnded: boolean; needsCredentials: boolean;
   platform: "macos" | "windows"; message: string; operationState?: string;
-  sessionId?: string; userId?: number; clientId?: number;
+  sessionId?: string; userId?: number; clientId?: number; loginKey?: string | undefined;
 }
 interface Options {
   store: DeviceLockStore;
@@ -34,6 +34,8 @@ export class DesktopDeviceLockOwner {
   private authentication: AbortController | undefined;
   private mobileFallback: ReturnType<typeof setTimeout> | undefined;
   private fence = 0;
+  private bindEpoch = 0;
+  private requestedLogin = "";
   private readonly now: () => number;
   private clock: { server: number; monotonic: number } | undefined;
   private readonly fetch: typeof fetch;
@@ -53,7 +55,7 @@ export class DesktopDeviceLockOwner {
     return { supported: this.available, locked: this.protected, sessionEnded: this.state.ended,
       needsCredentials: this.needsCredentials, platform: this.options.platform, message: this.message,
       ...(this.operationState === undefined ? {} : { operationState: this.operationState }),
-      ...(this.state.binding === undefined ? {} : { sessionId: this.state.binding.sessionId, userId: this.state.binding.userId, clientId: this.state.binding.clientId }) };
+      ...(this.state.pendingRegistration !== undefined ? { userId: this.state.pendingRegistration.userId, clientId: this.state.pendingRegistration.clientId, loginKey: this.state.pendingRegistration.loginKey } : this.state.binding === undefined ? {} : { sessionId: this.state.binding.sessionId, userId: this.state.binding.userId, clientId: this.state.binding.clientId, loginKey: this.state.binding.loginKey }) };
   }
   async initialize(): Promise<void> { this.available = await this.options.available(); this.emit(); }
   private emit(): void { this.options.changed(this.snapshot()); }
@@ -86,7 +88,7 @@ export class DesktopDeviceLockOwner {
     const started = performance.now();
     const response = await this.fetch(new URL(`/api/${publicRequest ? "public/" : ""}v1/device-control/${route}`, this.options.baseURL), {
       method: "POST", redirect: "error", signal: AbortSignal.timeout(timeoutMs),
-      headers: { "Content-Type": "application/json", ...(publicRequest ? {} : { Authorization: `Bearer ${this.token}` }) }, body: JSON.stringify(body)
+      headers: { "Content-Type": "application/json", ...(publicRequest ? {} : { Authorization: `Bearer ${this.token}`, "X-Jotmo-Device-Instance": this.state.binding?.sessionId ?? "" }) }, body: JSON.stringify(body)
     });
     const serverTime = Number(response.headers.get("X-Jotmo-Server-Time"));
     if (Number.isSafeInteger(serverTime) && serverTime > 0) {
@@ -95,7 +97,7 @@ export class DesktopDeviceLockOwner {
       // later wall-clock changes cannot prolong an authorization window.
       this.clock = { server: serverTime + monotonic - started, monotonic };
     }
-    if (!publicRequest && response.status === 403 && response.headers.get("X-Jotmo-Auth-Failure") === "session_ended") {
+    if (!publicRequest && response.status === 403 && response.headers.get("X-Jotmo-Device-Failure") === "instance_ended") {
       this.endSession();
       throw new Error("session-ended");
     }
@@ -112,6 +114,7 @@ export class DesktopDeviceLockOwner {
       if (route === "command" && response.status === 409) {
         throw new Error("设备状态已变化，请重试");
       }
+      if (publicRequest && route === "cleanup" && response.status === 403) return { obsolete: true } as T;
       throw new Error("暂时无法获取设备状态，请重试");
     }
     const raw = await response.text(); if (raw.length > 65_536) throw new Error("设备响应无效");
@@ -120,43 +123,54 @@ export class DesktopDeviceLockOwner {
     return result.data;
   }
 
-  bind(accessToken: string): Promise<DeviceLockSnapshot> {
-    if (accessToken.length > 8192 || accessToken.split(".").length !== 3) return Promise.reject(new Error("无效登录凭据"));
-    let claims: { user_id?: number; client_id?: number; session_id?: string };
+  bind(accessToken: string, loginKey: string): Promise<DeviceLockSnapshot> {
+    if (!/^[a-f0-9]{64}$/.test(loginKey) || accessToken.length > 8192 || accessToken.split(".").length !== 3) return Promise.reject(new Error("无效登录凭据"));
+    let claims: { user_id?: number; client_id?: number };
     try { claims = JSON.parse(Buffer.from(accessToken.split(".")[1]!, "base64url").toString("utf8")); }
     catch { return Promise.reject(new Error("无效登录凭据")); }
     if (claims === null || !Number.isSafeInteger(claims.user_id) || !Number.isSafeInteger(claims.client_id) || (claims.user_id ?? 0) <= 0 || (claims.client_id ?? 0) <= 0) return Promise.reject(new Error("无效设备身份"));
-    const bound = this.state.binding;
-    // Claims can only cancel an in-flight proof, never authorize a new login.
-    // Fence before serial queuing so an open OS dialog cannot delay account change.
-    if (bound !== undefined && (claims.user_id !== bound.userId || claims.client_id !== bound.clientId
-      || (claims.session_id !== undefined && claims.session_id !== "" && claims.session_id !== bound.sessionId))) {
-      this.clearMobileFallback(); this.authentication?.abort(); this.fence++;
-    }
+    const identity = `${claims.user_id}:${claims.client_id}:${loginKey}`;
+    if (identity !== this.requestedLogin) { this.requestedLogin = identity; this.bindEpoch++; }
+    const epoch = this.bindEpoch;
+    const assertCurrent = () => { if (epoch !== this.bindEpoch || this.closed) throw new Error("登录状态已变化，请重试"); };
+    const sameLogin = (b: LockBinding | undefined) => b !== undefined && b.userId === claims.user_id && b.clientId === claims.client_id && b.loginKey === loginKey;
+    if (!sameLogin(this.state.binding)) { this.clearMobileFallback(); this.authentication?.abort(); this.fence++; }
     return this.serial(async () => {
-      this.token = accessToken;
-      // The response proves the token's identity; decoded JWT fields alone never
-      // authorize a new binding, release a lock or supply authentication proof.
-      const device = await this.post<Device>("register", { platform: this.options.platform, name: this.options.name, capability: "unknown" });
-      if (!/^[A-Za-z0-9_-]{16,128}$/.test(device.session_id) || device.client_id !== claims.client_id) throw new Error("设备会话校验失败");
-      const previous = this.state.binding;
-      const same = previous !== undefined && previous.userId === claims.user_id && previous.sessionId === device.session_id;
+      assertCurrent(); this.token = accessToken;
+      let binding = this.state.binding;
+      let previous = "";
+      if (!sameLogin(binding)) {
+        let pending = this.state.pendingRegistration;
+        if (!sameLogin(pending)) {
+          pending = { userId: claims.user_id!, clientId: claims.client_id!, sessionId: `${claims.client_id}_${randomUUID()}`,
+            loginKey, cleanupToken: randomBytes(32).toString("hex") };
+          this.save({ ...this.state, pendingRegistration: pending });
+        }
+        if (pending!.previousSessionId === undefined) {
+          const result = await this.post<{ session_id: string }>("registration", {}); assertCurrent();
+          if (typeof result.session_id !== "string" || (result.session_id !== "" && !/^[A-Za-z0-9_-]{16,128}$/.test(result.session_id))) throw new Error("设备会话校验失败");
+          pending = { ...pending!, previousSessionId: result.session_id };
+          this.save({ ...this.state, pendingRegistration: pending });
+        }
+        binding = pending!; previous = pending!.previousSessionId!;
+      }
+      const device = await this.post<Device>("register", { platform: this.options.platform, name: this.options.name, capability: "unknown",
+        session_id: binding!.sessionId, previous_session_id: previous });
+      assertCurrent();
+      if (device.session_id !== binding!.sessionId || device.client_id !== claims.client_id) throw new Error("设备会话校验失败");
       this.needsCredentials = false;
-      if (!same) {
-        this.clearMobileFallback();
-        this.authentication?.abort(); this.fence++;
+      if (!sameLogin(this.state.binding)) {
+        this.clearMobileFallback(); this.authentication?.abort(); this.fence++;
         this.save({ schemaVersion: 1, locked: this.state.locked, ended: false, cycle: randomBytes(24).toString("hex"), sequence: 0,
-          binding: { userId: claims.user_id!, clientId: claims.client_id!, sessionId: device.session_id, cleanupToken: randomBytes(32).toString("hex") },
+          binding: { userId: binding!.userId, clientId: binding!.clientId, sessionId: binding!.sessionId, loginKey, cleanupToken: binding!.cleanupToken },
           ...(this.state.pendingCleanup === undefined ? {} : { pendingCleanup: this.state.pendingCleanup }) });
       }
-      const binding = this.state.binding!;
-      await this.post("cleanup-enroll", { token_hash: createHash("sha256").update(Buffer.from(binding.cleanupToken, "hex")).digest("hex") });
+      await this.post("cleanup-enroll", { token_hash: createHash("sha256").update(Buffer.from(binding!.cleanupToken, "hex")).digest("hex") }); assertCurrent();
       if (this.state.pendingReport === undefined && device.actual_lock === "locked" && !this.state.locked) {
-        // Server evidence can strengthen local protection after disk recovery.
         this.save({ ...this.state, locked: true, cycle: device.lock_cycle!, sequence: device.report_sequence });
       }
       if (this.state.pendingReport === undefined) { this.state.sequence = Math.max(this.state.sequence, device.report_sequence); this.report(); }
-      await this.flushReport(); await this.retryCleanup(); this.emit(); return this.snapshot();
+      await this.flushReport(); assertCurrent(); await this.retryCleanup(); this.emit(); return this.snapshot();
     });
   }
 
@@ -327,25 +341,24 @@ export class DesktopDeviceLockOwner {
     if (this.state.pendingReport === pending) { const { pendingReport: _, ...next } = this.state; this.save(next); }
   }
 
-  logout(expectedSessionId?: string): Promise<DeviceLockSnapshot> {
-    this.clearMobileFallback();
-    this.authentication?.abort(); this.fence++;
-    return this.serial(async () => {
-      const binding = this.state.binding;
-      if (expectedSessionId !== undefined && binding?.sessionId !== expectedSessionId) throw new Error("登录会话已变化，请重试");
-      if (binding === undefined || this.state.ended) return this.snapshot();
-      await this.post("command", { client_id: binding.clientId, session_id: binding.sessionId, lock_cycle: this.state.cycle,
-        request_id: randomUUID(), kind: "logout", expires_at: Math.floor(this.serverNow()) + 110_000 });
-      this.save({ ...this.state, ended: true }); return this.snapshot();
-    });
+  logout(expectedSessionId?: string, expectedLoginKey?: string): Promise<DeviceLockSnapshot> {
+    const binding = this.state.binding;
+    const login = this.state.pendingRegistration ?? binding;
+    if (expectedLoginKey !== undefined && login !== undefined && login.loginKey !== expectedLoginKey) return Promise.reject(new Error("登录状态已变化，请重试"));
+    if (expectedSessionId !== undefined && binding?.sessionId !== expectedSessionId) return Promise.reject(new Error("登录会话已变化，请重试"));
+    this.clearMobileFallback(); this.authentication?.abort(); this.fence++; this.bindEpoch++;
+    if (!this.state.ended) this.save({ ...this.state, ended: true });
+    // Existing credential cleanup can proceed offline. Its narrow receipt is
+    // persisted by completeLocalLogout and delivered after connectivity returns.
+    return Promise.resolve(this.snapshot());
   }
   completeLocalLogout(): Promise<DeviceLockSnapshot> {
     return this.serial(async () => {
       if (!this.state.ended && this.state.binding === undefined) return this.snapshot();
-      if (!this.state.ended || this.state.binding === undefined) throw new Error("服务端尚未确认退出登录");
-      const pendingCleanup = this.state.binding;
+      if (!this.state.ended) throw new Error("此实例尚未开始退出登录");
+      const pendingCleanup = this.state.binding ?? this.state.pendingCleanup;
       this.token = "";
-      this.save({ schemaVersion: 1, locked: false, ended: false, cycle: randomBytes(24).toString("hex"), sequence: 0, pendingCleanup });
+      this.save({ schemaVersion: 1, locked: false, ended: false, cycle: randomBytes(24).toString("hex"), sequence: 0, ...(pendingCleanup === undefined ? {} : { pendingCleanup }) });
       this.message = ""; this.operationState = undefined; this.emit();
       await this.retryCleanup(); return this.snapshot();
     });

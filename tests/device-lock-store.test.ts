@@ -56,18 +56,18 @@ describe("durable device lock state", () => {
     const options = {
       store, baseURL: "https://jotmo.senguo.me", platform: "windows" as const, name: "Windows test",
       available: async () => true, authenticate: async () => true, changed: () => undefined,
-      fetch: (async () => {
+      fetch: (async (_input, init) => {
         if (offline) throw new TypeError("offline");
         return new Response(JSON.stringify({ code: 200, data: {
-          client_id: 2, session_id: "canonical_session_000001", actual_lock: "unlocked", report_sequence: 0,
+          client_id: 2, session_id: JSON.parse(String(init?.body)).session_id ?? "", actual_lock: "unlocked", report_sequence: 0,
         } }));
       }) as typeof fetch,
     };
     const owner = new DesktopDeviceLockOwner(options);
     try {
       await owner.initialize();
-      await owner.bind(`e30.${Buffer.from(JSON.stringify({ user_id: 1, client_id: 2 })).toString("base64url")}.signature`);
-      expect(store.read()?.binding?.sessionId).toBe("canonical_session_000001");
+      await owner.bind(`e30.${Buffer.from(JSON.stringify({ user_id: 1, client_id: 2 })).toString("base64url")}.signature`, "cd".repeat(32));
+      expect(store.read()?.binding?.sessionId).toMatch(/^2_[A-Za-z0-9_-]+$/);
       expect(store.read()?.pendingReport).toBeUndefined();
       offline = true;
       const locked = owner.lock();

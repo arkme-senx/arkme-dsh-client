@@ -20,7 +20,7 @@ const owner = new DesktopDeviceLockOwner({
 });
 const phone = async (route, body = {}) => {
   const response = await fetch(new URL(`/api/v1/device-control/${route}`, target), {
-    method: 'POST', headers: { Authorization: `Bearer ${env.DEVICE_LOCK_TEST_PHONE_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    method: 'POST', headers: { Authorization: `Bearer ${env.DEVICE_LOCK_TEST_PHONE_TOKEN}`, 'Content-Type': 'application/json', 'X-Jotmo-Device-Instance': '3_fixture_instance_0001' }, body: JSON.stringify(body),
   });
   if (!response.ok) throw new Error(`phone ${route}: ${response.status}`);
   const envelope = await response.json();
@@ -28,8 +28,8 @@ const phone = async (route, body = {}) => {
   return envelope.data;
 };
 const desktop = async () => (await phone('list')).items.find(d => d.client_id === 2);
-await owner.initialize(); await owner.bind(env.DEVICE_LOCK_TEST_DESKTOP_TOKEN);
-await phone('register', { platform: 'ios', name: 'Contract iPhone', capability: 'supported' });
+await owner.initialize(); await owner.bind(env.DEVICE_LOCK_TEST_DESKTOP_TOKEN, "cd".repeat(32));
+await phone('register', { platform: 'ios', name: 'Contract iPhone', capability: 'supported', session_id: '3_fixture_instance_0001', previous_session_id: '' });
 await owner.lock();
 assert.equal(owner.protected, true);
 // Locking is local and immediate; remote assertions wait for reconciliation.

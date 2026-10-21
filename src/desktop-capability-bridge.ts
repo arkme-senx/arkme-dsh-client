@@ -200,15 +200,18 @@ async function handleRequest(
       const owner = context.deviceLock;
       if (owner === undefined) throw new BridgeHttpError(501, "unsupported");
       if (action.action === "device.lock.bind") {
-        assertExactKeys(action.payload, ["accessToken"]);
-        if (typeof action.payload.accessToken !== "string" || action.payload.accessToken.length > 8192) throw new BridgeHttpError(400, "invalid_request");
-        writeJson(response, 200, { ok: true, value: await owner.bind(action.payload.accessToken) });
+        assertExactKeys(action.payload, ["accessToken", "loginKey"]);
+        if (typeof action.payload.accessToken !== "string" || action.payload.accessToken.length > 8192 || typeof action.payload.loginKey !== "string" || !/^[a-f0-9]{64}$/.test(action.payload.loginKey)) throw new BridgeHttpError(400, "invalid_request");
+        writeJson(response, 200, { ok: true, value: await owner.bind(action.payload.accessToken, action.payload.loginKey) });
         return;
       }
       if (action.action === "device.lock.logout") {
-        assertExactKeys(action.payload, ["sessionId"]);
-        if (typeof action.payload.sessionId !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(action.payload.sessionId)) throw new BridgeHttpError(400, "invalid_request");
-        writeJson(response, 200, { ok: true, value: await owner.logout(action.payload.sessionId) });
+        assertExactKeys(action.payload, ["sessionId", "loginKey"]);
+        const { sessionId, loginKey } = action.payload;
+        if ((sessionId !== undefined && (typeof sessionId !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(sessionId)))
+          || (loginKey !== undefined && (typeof loginKey !== "string" || !/^[a-f0-9]{64}$/.test(loginKey)))
+          || (sessionId === undefined && loginKey === undefined)) throw new BridgeHttpError(400, "invalid_request");
+        writeJson(response, 200, { ok: true, value: await owner.logout(sessionId as string | undefined, loginKey as string | undefined) });
         return;
       }
       assertExactKeys(action.payload, []);
