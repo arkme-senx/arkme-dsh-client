@@ -23,3 +23,13 @@ Text is redacted on-device before disk/network and again on the backend. Home-di
 ## Rollout
 
 Deploy the backend route and Sentry configuration first, then build new signed installers. Existing published installers do not acquire this reporting code. Check the project's attachment quota/access and privacy disclosure before enabling broad release. Alert on new failure codes, regressions in a release and rollback failures; avoid alerts for successful checks or intentional cancellations. This change does not deploy services, create a Sentry project, or publish installers.
+
+## Desktop startup failures
+
+The packaged client reuses `POST /api/public/v1/arkme/installer-reports`, with `stage=runtime-prepare|harness-start|plugin-load`, `error_code=STARTUP_FAILED`, and optional `harness_version`/`plugin_version`. The backend writes these to the same logstore under topic/component `desktop-startup`; existing installer dimensions remain compatible. Deploy the backend extension before releasing this client. Older backends reject these dimensions with 400; the client retains the report without interrupting startup.
+
+Only a failure during an active launch attempt creates an event. Supervisor and failure-page notifications share one event ID. Explicit stopping, successful readiness and quit cancel the attempt; an AbortError alone is not treated as user cancellation. The next explicit launch creates another attempt. Development runs do not upload.
+
+Delivery is never awaited by startup/retry/quit. Each background drain tries at most two records, each request has a 1.5-second abort timeout, rejects redirects and sends no account authentication/cookies. The queue is inside the current website/MAS user-data directory at `startup-reports`, retains at most 20 recognized reports for seven days, and retries on subsequent launches or failures. Only HTTP 202 removes a delivered report. No timer daemon or upload-triggered launch retry is installed.
+
+Error details are scrubbed before persistence and again before sending. Only fixed supervisor lifecycle events and numeric/boolean timing/status fields are selected from a bounded 64 KiB tail, beginning with the latest spawn; arbitrary stdout, renderer console and business logs are not uploaded. The details summary is capped at 4 KiB; the log field contains up to 10,000 bytes of scrubbed error/stack text plus selected lifecycle lines, bounded to 12 KiB. Reports do not include account identifiers, machine names, chat databases, recordings, attachments or environment dumps. Queue failures and transport errors cannot throw into the launch flow. Startup failures before the reporter/version metadata exists, OS launch rejection and abrupt process death are not guaranteed to report.

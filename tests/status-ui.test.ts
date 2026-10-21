@@ -8,6 +8,8 @@ import { createStatusPageUrl } from "../src/status-url.js";
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 interface FakeElement {
+  addEventListener(event: string, listener: () => Promise<void>): void;
+  click?: () => Promise<void>;
   dataset: Record<string, string>;
   hidden: boolean;
   textContent: string;
@@ -17,6 +19,8 @@ interface FakeElement {
 }
 
 interface RenderedStatus {
+  copied: string[];
+  resetFeedback(): void;
   elements: Map<string, FakeElement>;
   emitRuntimeProgress(progress: {
     kind: "runtime-installing";
@@ -33,6 +37,7 @@ function parseInitialElements(html: string): Map<string, FakeElement> {
     const tag = match[0];
     if (id !== undefined && tag !== undefined) {
       elements.set(id, {
+        addEventListener(_event, listener) { this.click = listener; },
         dataset: {},
         hidden: /\shidden(?:\s|>|=)/.test(tag),
         textContent: "",
@@ -44,13 +49,15 @@ function parseInitialElements(html: string): Map<string, FakeElement> {
   return elements;
 }
 
-async function renderStatus(search: string, brand?: { name: string; icon: string }): Promise<RenderedStatus> {
+async function renderStatus(search: string, brand?: { name: string; icon: string }, clipboardFails = false): Promise<RenderedStatus> {
   const [html, script] = await Promise.all([
     readFile(path.join(projectRoot, "src", "ui", "status.html"), "utf8"),
     readFile(path.join(projectRoot, "src", "ui", "status.js"), "utf8")
   ]);
   const elements = parseInitialElements(html);
   const body = { dataset: {} as Record<string, string> };
+  const copied: string[] = [];
+  let feedback: (() => void) | undefined;
   let runtimeProgressListener: ((progress: {
     kind: "runtime-installing";
     phase: "download" | "verify" | "install";
@@ -58,6 +65,12 @@ async function renderStatus(search: string, brand?: { name: string; icon: string
     pluginPercent: number;
   }) => void) | undefined;
   vm.runInNewContext(script, {
+    navigator: { clipboard: { async writeText(text: string) {
+      if (clipboardFails) throw new Error('Clipboard unavailable');
+      copied.push(text);
+    } } },
+    setTimeout(callback: () => void) { feedback = callback; return 1; },
+    clearTimeout() { feedback = undefined; },
     URLSearchParams,
     Number,
     document: {
@@ -78,6 +91,8 @@ async function renderStatus(search: string, brand?: { name: string; icon: string
     }
   });
   return {
+    copied,
+    resetFeedback() { feedback?.(); },
     elements,
     emitRuntimeProgress(progress) {
       runtimeProgressListener?.(progress);
@@ -86,6 +101,26 @@ async function renderStatus(search: string, brand?: { name: string; icon: string
 }
 
 describe("status UI", () => {
+  test("copies complete failure details including long offscreen stack text and resets feedback", async () => {
+    const stack = 'Error: failed\n' + 'very-long-path/'.repeat(1000) + '\nCaused by: original failure';
+    const query = new URLSearchParams({kind:'failed',message:stack,technicalDetails:'原始诊断信息'});
+    const rendered = await renderStatus(`?${query}`);
+    const button = rendered.elements.get('copy-logs-action');
+    await button?.click?.();
+    expect(rendered.copied[0]).toContain(stack);
+    expect(rendered.copied[0]).toContain('技术信息：原始诊断信息');
+    expect(button?.textContent).toBe('已复制');
+    rendered.resetFeedback();
+    expect(button?.textContent).toBe('复制日志');
+  });
+
+  test("reports clipboard failure instead of falsely claiming success", async () => {
+    const rendered = await renderStatus('?kind=failed&message=error', undefined, true);
+    const button = rendered.elements.get('copy-logs-action');
+    await button?.click?.();
+    expect(rendered.copied).toEqual([]);
+    expect(button?.textContent).toBe('复制失败，请重试');
+  });
   test("selects the dedicated network waiting presentation from the runtime failure title", () => {
     const result = new URL(createStatusPageUrl("/app/dist/ui/status.html", {
       kind: "failed",

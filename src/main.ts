@@ -3,6 +3,8 @@ import { FileDeviceLockStore } from "./device-lock-store.js";
 import { DeviceLockSurfaces } from "./device-lock-surfaces.js";
 import { deviceAuthExecutable, runDeviceAuthentication } from "./device-lock-native-auth.js";
 import { hostname } from "node:os";
+import { StartupDiagnostics } from "./startup-diagnostics.js";
+import { release as osRelease } from "node:os";
 import { pluginHostPolicy } from "./plugin-host-policy.js";
 import { revealAfterAccountAcknowledgement } from "./account-scope-navigation.js";
 import { isMasChannel, resolveMasRuntime, MasBookmarks } from "./mas/runtime.js";
@@ -408,6 +410,20 @@ registerAppUpdateNoticeIpc({
   handle(channel, handler) { ipcMain.handle(channel, event => handler(appUpdateSender(event))); }
 }, appUpdateNotices);
 let installedAppVersionCode: number | undefined;
+let startupPluginVersion: string | undefined;
+let startupVersionReadGeneration = 0;
+const startupDiagnostics = new StartupDiagnostics({
+  directory: path.join(app.getPath("userData"), "startup-reports"),
+  serviceOrigin: runtimeServiceConfig.serviceBaseUrl,
+  enabled: app.isPackaged,
+  metadata: () => ({
+    version: app.getVersion(), build: installedAppVersionCode ?? 0,
+    platform: process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "unsupported",
+    osVersion: osRelease(), architecture: process.arch,
+    ...(activeHarnessVersion === undefined ? {} : {harnessVersion: activeHarnessVersion}),
+    ...(startupPluginVersion === undefined ? {} : {pluginVersion: startupPluginVersion})
+  })
+});
 ipcMain.on("arkme-app-update:app-version-code", event => {
   event.returnValue = appUpdateNotices.snapshot(appUpdateSender(event)) === null ? null : installedAppVersionCode ?? null;
 });
@@ -609,10 +625,12 @@ function registerApplicationLifecycle(): void {
 
   app.on("before-quit", (event) => {
     if (longArticleWindows.requestQuit(() => app.quit())) { event.preventDefault(); return; }
+    startupDiagnostics.cancel();
     appQuitGuard?.handleBeforeQuit(event);
   });
   app.on("will-quit", () => {
     desktopDeviceLock?.close();
+    startupDiagnostics.shutdown();
     desktopLocationPermission?.dispose();
     desktopLocationPermission = null;
   });
@@ -688,6 +706,10 @@ async function bootstrap(manualRetry = false): Promise<void> {
     deviceLockSurfaces = new DeviceLockSurfaces(desktopDeviceLock, path.join(moduleDirectory, "device-lock-preload.cjs"), path.join(moduleDirectory, "ui", "device-lock.html"));
     void desktopDeviceLock.initialize();
   }
+  startupDiagnostics.begin();
+  activeHarnessVersion = undefined;
+  startupPluginVersion = undefined;
+  startupVersionReadGeneration++;
   logDiagnostic("bootstrap-start");
   if (desktopBranding.snapshot() === null) desktopBranding.setLocale(resolveBrandLocale(app.getLocale()));
   if (!lifecycleHooksInstalled) {
@@ -1232,6 +1254,16 @@ async function initializeHarnessRuntime(
     throw new Error("Harness fallback changed the DSH account-scope capability");
   }
   activeHarnessVersion = runtime.release?.manifest.artifacts.harness.version ?? dshVersion;
+  startupPluginVersion = runtime.release?.manifest.artifacts.requiredPlugin.version;
+  const versionReadGeneration = ++startupVersionReadGeneration;
+  if (startupPluginVersion === undefined) {
+    void readFile(path.join(runtime.arkmePluginPath, "package.json"), "utf8").then(text => {
+      const metadata = JSON.parse(text);
+      if (versionReadGeneration === startupVersionReadGeneration && typeof metadata.version === "string") {
+        startupPluginVersion = metadata.version;
+      }
+    }).catch(() => undefined); // Optional telemetry metadata never delays launch.
+  }
   const packageManagerEnvironment = withBundledPackageManagerEnvironment(
     startupEnvironment,
     runtime.packageManagerBinPath,
@@ -1810,6 +1842,11 @@ function installNavigationPolicy(window: BrowserWindow): void {
 }
 
 async function renderState(state: HarnessState | RuntimeInstallProgress): Promise<void> {
+  if (state.kind === "starting") startupDiagnostics.starting();
+  if (state.kind === "stopping") startupDiagnostics.cancel();
+  if (state.kind === "failed") startupDiagnostics.fail(
+    [state.message, state.technicalDetails].filter(Boolean).join("\n"), state.logPath
+  );
   const window = mainWindow;
   if (window === null || window.isDestroyed()) return;
   // Every native page replacement must drain the still-live editor first.
@@ -1838,6 +1875,7 @@ async function renderState(state: HarnessState | RuntimeInstallProgress): Promis
     const intent = deepLinks.peek();
     await window.loadURL(intent === undefined ? state.url : createExtensionShareHarnessUrl(state.url, intent));
     if (intent !== undefined) deepLinks.markDelivered(intent);
+    startupDiagnostics.cancel();
   } else if (state.kind === "runtime-installing" && renderRuntimeProgressPage !== null) {
     desktopSessionSelection.invalidate();
     activeHarnessOrigin = null;
@@ -2087,6 +2125,7 @@ async function showFatalBootstrapError(error: unknown): Promise<void> {
 
 async function renderFailure(error: unknown): Promise<void> {
   logDiagnostic("render-failure", error);
+  startupDiagnostics.fail(error instanceof Error ? error.stack ?? error.message : String(error), logPath);
   const message = error instanceof Error ? error.message : String(error);
   const workspacePath = controller?.getCurrentWorkspace();
   const display = error instanceof ElectronRuntimeManifestError || error instanceof BadRuntimeReleaseBlockedError
