@@ -74,7 +74,7 @@ describe("application manifest", () => {
   test("uses the commit-pinned production catalog outside the vendor workspace", async () => {
     const manifest = JSON.parse(
       await readFile(path.join(projectRoot, "package.json"), "utf8")
-    ) as { devDependencies: Record<string, string> };
+    ) as { devDependencies: Record<string, string>; dependencies: Record<string, string> };
     const workspaceManifest = parse(await readFile(
       path.join(projectRoot, "pnpm-workspace.yaml"), "utf8"
     )) as {
@@ -85,10 +85,10 @@ describe("application manifest", () => {
     expect(manifest.devDependencies["@senguoyun/dsh-arkme"]).toBe(
       "catalog:production"
     );
-    expect(manifest.devDependencies.yaml).toBe("2.9.0");
+    expect(manifest.dependencies.yaml).toBe("2.9.0");
     expect(workspaceManifest.packages).toEqual([".", "runtime"]);
     expect(workspaceManifest.catalogs.production["@senguoyun/dsh-arkme"]).toBe(
-      "git+ssh://git@github.com/arkme-senx/arkme-dsh-plugin.git#2838fdceea0e4702b9017a31e0ad6f0893fc823a"
+      "git+ssh://git@github.com/arkme-senx/arkme-dsh-plugin.git#9497ad8f963ca18af9ce8a39664e8fe1faa20a0b"
     );
   });
 
@@ -162,6 +162,8 @@ describe("application manifest", () => {
     const expected = "即我仅在你开启位置记录后，将当前位置写入你发送的快记快照。";
     expect(manifest.build.mac.extendInfo).toEqual({
       CFBundleExecutable: "arkme",
+      CFBundleDevelopmentRegion: "en",
+      CFBundleLocalizations: ["en", "zh-Hans", "zh-Hant"],
       NSLocationUsageDescription: expected,
       NSLocationWhenInUseUsageDescription: expected
     });
@@ -170,6 +172,8 @@ describe("application manifest", () => {
     );
     expect(testConfigModule.default.mac.extendInfo).toEqual({
       CFBundleExecutable: "arkme Test",
+      CFBundleDevelopmentRegion: "en",
+      CFBundleLocalizations: ["en", "zh-Hans", "zh-Hant"],
       NSLocationUsageDescription: "Arkme 仅在你开启位置记录后，将当前位置写入你发送的快记快照。",
       NSLocationWhenInUseUsageDescription: "Arkme 仅在你开启位置记录后，将当前位置写入你发送的快记快照。"
     });

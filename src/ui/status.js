@@ -57,8 +57,13 @@ copyLogsAction.addEventListener("click", async () => {
 });
 
 document.body.dataset.environment = environment;
-document.title = isTestEnvironment ? "arkme Test" : "即我";
-brandName.textContent = isTestEnvironment ? "arkme Test" : "arkme";
+const brand = window.arkmeDesktop?.branding?.current;
+document.title = brand?.name ?? (isTestEnvironment ? "arkme Test" : "即我");
+brandName.textContent = document.title;
+if (brand?.icon === "jiwo.png" || brand?.icon === "arkme.png") {
+  document.querySelector("#brand-logo").src = `./branding/${brand.icon}`;
+}
+document.querySelector("#brand").setAttribute("aria-label", document.title);
 environmentBadge.textContent = "测试环境";
 environmentBadge.hidden = !isTestEnvironment;
 

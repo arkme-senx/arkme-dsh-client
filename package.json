@@ -45,23 +45,23 @@
     "dist:mas": "node scripts/mas/dist.mjs"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.2",
-    "@deepseek-ai/dsh": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-anonymous-user-id": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-attachment": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-locale": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-layout": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-primitives": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-settings": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-sidebar": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-slots": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-theme": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-host-webserver": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-llm": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-llm-deepseek": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-system-prompt": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-tools": "0.1.5-rc.2",
-    "@deepseek-ai/schemastery": "3.18.2",
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-anonymous-user-id": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-attachment": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-locale": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-layout": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-theme": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm-deepseek": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "3.18.5",
     "@electron/asar": "3.4.1",
     "@electron/rebuild": "4.2.0",
     "@senguoyun/dsh-arkme": "catalog:production",
@@ -73,8 +73,7 @@
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "typescript": "6.0.3",
-    "vitest": "4.1.10",
-    "yaml": "2.9.0"
+    "vitest": "4.1.10"
   },
   "build": {
     "extends": "file:electron-builder.cjs",
@@ -107,6 +106,12 @@
       "entitlements": "build/entitlements.mac.plist",
       "extendInfo": {
         "CFBundleExecutable": "arkme",
+        "CFBundleDevelopmentRegion": "en",
+        "CFBundleLocalizations": [
+          "en",
+          "zh-Hans",
+          "zh-Hant"
+        ],
         "NSLocationUsageDescription": "即我仅在你开启位置记录后，将当前位置写入你发送的快记快照。",
         "NSLocationWhenInUseUsageDescription": "即我仅在你开启位置记录后，将当前位置写入你发送的快记快照。"
       },
@@ -166,7 +171,8 @@
     "electron-updater": "^6.8.9",
     "koffi": "3.1.5",
     "semver": "7.8.5",
-    "tar-stream": "3.1.7"
+    "tar-stream": "3.1.7",
+    "yaml": "2.9.0"
   },
   "optionalDependencies": {
     "@arkme/macos-notification-permission": "file:./native/macos-notification-permission"

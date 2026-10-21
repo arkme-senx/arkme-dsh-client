@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const RESOLVER_PATTERN = /^([ \t]*)function resolveBundleDir\(binName, packageName, installAnchor, profileDir\) \{\r?\n([ \t]*)for \(const anchor of \[installAnchor, join\(profileDir, "package\.json"\)\]\) \{/gm;
-const MOUNT_PATTERN = /^([ \t]*)async function mountRootInclude\(ctx, absoluteConfigPath, patches = \[\], bareModuleBaseUrl\) \{\r?\n([ \t]*)ctx\.loader\.builtins\.include = bareModuleBaseUrl === void 0 \? Include : class HostResolvedRootInclude extends Include \{/gm;
+const MOUNT_PATTERN = /^([ \t]*)async function mountRootInclude\(ctx, absoluteConfigPath, patches = \[\], bareModuleBaseUrl(, binName = "dsh")?\) \{\r?\n([ \t]*)ctx\.loader\.builtins\.include = bareModuleBaseUrl === void 0 \? Include : class HostResolvedRootInclude extends Include \{/gm;
 const HOST_IMPORT_PATTERN = /^([ \t]*)return internal\.import\(specifier, bareModuleBaseUrl, \{\}\);$/gm;
 const ROUTER_V1_PATTERN = /^([ \t]*)const moduleBaseUrl = profileFirstModules\.has\(name\)\r?\n[ \t]*\? profileModuleBaseUrl\r?\n[ \t]*: installedModuleBaseUrl;$/gm;
 const SYMLINK_PATTERN = /^([ \t]*)if \((readlinkSync\(link\) === target|symlinkPointsTo\(link, target\))\) return;$/gm;
@@ -11,6 +11,8 @@ const RESOLVER_PATCH_MARKER = "process.env.DSH_PROFILE_FIRST_BUNDLES";
 const MODULE_ROUTER_PATCH_MARKER = "process.env.DSH_INSTALLED_MODULE_BASE_PATH";
 const MODULE_ROUTER_V2_MARKER = "const installedModuleDir = installedModuleBasePath";
 const SYMLINK_PATCH_MARKER = "readlinkSync(link) === target && existsSync(join(link, \"package.json\"))";
+const ELECTRON_INTERNALS_PATTERN = /^([ \t]*)const addon = createRequire\(import\.meta\.url\)\("node-addon-require-builtin"\);$/gm;
+const ELECTRON_INTERNALS_MARKER = "const arkmeInternalRequire = createRequire(import.meta.url);";
 
 function replacement(functionIndentation, bodyIndentation) {
   const nested = `${bodyIndentation}${bodyIndentation.includes("\t") ? "\t" : "  "}`;
@@ -30,10 +32,10 @@ function replacement(functionIndentation, bodyIndentation) {
   ].join("\n");
 }
 
-function mountReplacement(functionIndentation, bodyIndentation) {
+function mountReplacement(functionIndentation, bodyIndentation, binNameParameter = "") {
   const nested = `${bodyIndentation}${bodyIndentation.includes("\t") ? "\t" : "  "}`;
   return [
-    `${functionIndentation}async function mountRootInclude(ctx, absoluteConfigPath, patches = [], bareModuleBaseUrl) {`,
+    `${functionIndentation}async function mountRootInclude(ctx, absoluteConfigPath, patches = [], bareModuleBaseUrl${binNameParameter}) {`,
     `${bodyIndentation}const installedModuleBasePath = process.env.DSH_INSTALLED_MODULE_BASE_PATH;`,
     `${bodyIndentation}const installedModuleBaseUrl = bareModuleBaseUrl ?? (installedModuleBasePath === void 0`,
     `${nested}? void 0`,
@@ -87,10 +89,11 @@ export async function patchDshProfileBundleResolution(appBootRoot) {
       );
     }
     const functionIndentation = mountOccurrences[0][1] ?? "";
-    const bodyIndentation = mountOccurrences[0][2] ?? "\t";
+    const binNameParameter = mountOccurrences[0][2] ?? "";
+    const bodyIndentation = mountOccurrences[0][3] ?? "\t";
     patched = patched.replace(
       MOUNT_PATTERN,
-      mountReplacement(functionIndentation, bodyIndentation)
+      mountReplacement(functionIndentation, bodyIndentation, binNameParameter)
     );
     patched = patched.replace(
       HOST_IMPORT_PATTERN,
@@ -110,7 +113,25 @@ export async function patchDshProfileBundleResolution(appBootRoot) {
     );
   }
 
-  if (!patched.includes(SYMLINK_PATCH_MARKER)
+  // 0.2.1 replaces fallback symlinks with its runtime resolution scope and
+  // removes only owned legacy projections. There is no live-link check to patch.
+  const usesRuntimeResolution = source.includes("async function createRuntimeResolution(options)")
+    && source.includes("function removeLinkProjections(dir)");
+  if (usesRuntimeResolution && !patched.includes(ELECTRON_INTERNALS_MARKER)) {
+    const occurrences = [...patched.matchAll(ELECTRON_INTERNALS_PATTERN)];
+    if (occurrences.length !== 1) throw new Error(`Expected one DSH internal module accessor, found ${occurrences.length}`);
+    // The installed addon supports selected exact Electron fingerprints, but
+    // Arkme already launches its isolated Host with --expose-internals. Use
+    // Node's exposed builtins on the verified shell, preserving upstream's
+    // loader interface validation and native path for every other runtime.
+    patched = patched.replace(ELECTRON_INTERNALS_PATTERN, (_line, indentation) => [
+      `${indentation}${ELECTRON_INTERNALS_MARKER}`,
+      `${indentation}const addon = process.versions.electron === "43.2.0" && process.execArgv.includes("--expose-internals")`,
+      `${indentation}\t? { requireBuiltin: arkmeInternalRequire }`,
+      `${indentation}\t: arkmeInternalRequire("node-addon-require-builtin");`,
+    ].join("\n"));
+  }
+  if (!usesRuntimeResolution && !patched.includes(SYMLINK_PATCH_MARKER)
       && !patched.includes('symlinkPointsTo(link, target) && existsSync(join(link, "package.json"))) return;')) {
     const symlinkOccurrences = [...patched.matchAll(SYMLINK_PATTERN)];
     if (symlinkOccurrences.length !== 1) {
