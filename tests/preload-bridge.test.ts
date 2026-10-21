@@ -787,6 +787,17 @@ it("readiness bridge uses the main-owned document nonce and exposes no nonce arg
   (unauthorized.exposed.arkmeDesktop as {notifyHarnessReady:()=>void}).notifyHarnessReady();
   expect(unauthorized.sendCalls.some(call => call.channel === "arkme-runtime:page-ready")).toBe(false);
 });
+describe("native recording import preload", () => {
+  it("exposes the versioned native picker without accepting renderer paths", async () => {
+    const { exposed, invokeCalls } = await executePreload("0.1.5-rc.2");
+    const desktop = exposed.arkmeDesktop as { recordingImports: { version: number; pick(): Promise<unknown> } };
+    expect(desktop.recordingImports.version).toBe(1);
+    expect(Object.isFrozen(desktop.recordingImports)).toBe(true);
+    await desktop.recordingImports.pick();
+    expect(invokeCalls).toContainEqual({ channel: 'arkme-recording-import:pick', args: [] });
+  });
+});
+
 describe("desktop device preload", () => {
   it("exposes only a versioned language command for branding", async () => {
     const { exposed, invokeCalls, syncCalls } = await executePreload("test");

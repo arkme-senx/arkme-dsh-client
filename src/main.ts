@@ -8,6 +8,7 @@ import { installAttachmentPreviewNative } from "./attachment-preview-native.js";
 import { installLongArticleWindowIpc } from "./long-article-window-ipc.js";
 import { DesktopSessionSelection } from "./session-selection.js";
 import { DesktopRecordingFiles, type RecordingFilesContext } from './recording-import-files.js';
+import { NativeRecordingPicker } from './recording-file-picker.js';
 import { harnessCookieHeader, type HarnessAuthSession } from "./harness-auth-session.js";
 import { HarnessCookieInstaller } from "./harness-cookie-install.js";
 import { HarnessPageReadiness, localHarnessMountFailure, settleHarnessPageRendering } from "./harness-page-ready.js";
@@ -1571,6 +1572,11 @@ ipcMain.handle("arkme-session-selection:save", (event, value: unknown) => {
 
 const readDesktopDevice = createDesktopDeviceReader();
 const recordingFiles = new DesktopRecordingFiles(bookmark => { const stop = app.startAccessingSecurityScopedResource(bookmark); return () => { stop(); }; });
+const recordingPicker = new NativeRecordingPicker(owner => dialog.showOpenDialog(owner, {
+  properties: ['openFile', 'multiSelections'],
+  filters: [{ name: '录音', extensions: ['wav', 'mp3', 'm4a'] }],
+  securityScopedBookmarks: process.mas === true,
+}), details => logDiagnostic('native-recording-file-picker', details));
 function recordingFilesContext(event: Electron.IpcMainInvokeEvent, accountKey?: string): RecordingFilesContext {
   const scope = activeAccountScope;
   const origin = activeHarnessOrigin;
@@ -1590,8 +1596,9 @@ ipcMain.handle('arkme-recording-import:list', (event, accountKey: string) => rec
 ipcMain.handle('arkme-recording-import:change', (event, accountKey: string, upserts, removals) => recordingFiles.change(recordingFilesContext(event, accountKey), accountKey, upserts, removals));
 ipcMain.handle('arkme-recording-import:pick', async event => {
   const context = recordingFilesContext(event);
-  const selected = await dialog.showOpenDialog(mainWindow!, { properties: ['openFile', 'multiSelections'],
-    filters: [{ name: '录音', extensions: ['wav', 'mp3', 'm4a'] }], securityScopedBookmarks: process.platform === 'darwin' });
+  const owner = mainWindow;
+  if (!owner) throw new Error('录音导入窗口已关闭');
+  const selected = await recordingPicker.pick(owner, context.valid);
   if (selected.canceled) return [];
   return await recordingFiles.capture(context, selected.filePaths, selected.bookmarks);
 });
