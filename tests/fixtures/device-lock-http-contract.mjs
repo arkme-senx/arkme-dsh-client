@@ -31,8 +31,10 @@ const desktop = async () => (await phone('list')).items.find(d => d.client_id ==
 await owner.initialize(); await owner.bind(env.DEVICE_LOCK_TEST_DESKTOP_TOKEN);
 await phone('register', { platform: 'ios', name: 'Contract iPhone', capability: 'supported' });
 await owner.lock();
-assert.equal((await desktop()).actual_lock, 'locked');
 assert.equal(owner.protected, true);
+// Locking is local and immediate; remote assertions wait for reconciliation.
+await owner.synchronize();
+assert.equal((await desktop()).actual_lock, 'locked');
 if (env.DEVICE_LOCK_TEST_MODE !== 'supported') {
   await owner.requestUnlock();
   assert.equal(authentications, 1);
@@ -66,6 +68,8 @@ if (env.DEVICE_LOCK_TEST_MODE !== 'supported') {
   assert.equal(authentications, 0);
   const previousCycle = d.lock_cycle;
   await owner.lock();
+  assert.equal(owner.protected, true);
+  await owner.synchronize();
   assert.notEqual((await desktop()).lock_cycle, previousCycle);
   await owner.synchronize();
   assert.equal(owner.protected, true, 'old grant must not unlock the next cycle');
