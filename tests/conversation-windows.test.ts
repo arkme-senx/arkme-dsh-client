@@ -40,9 +40,9 @@ describe('conversation windows', () => {
  });
  it('relays scoped draft snapshots and clears them on account changes', async () => {
   const {manager, notify, windows} = setup(); await manager.open(target);
-  manager.publish(0, {kind:'draft', key:'draft', value:{text:'hello'}});
-  expect(manager.snapshot()).toEqual([{kind:'draft', key:'draft', value:{text:'hello'}}]);
-  expect(windows[0].send).toHaveBeenCalledWith('event', {kind:'draft', key:'draft', value:{text:'hello'}, accountKey:'prod:7'});
+  manager.publish(0, {kind:'draft', key:'draft', value:{text:'hello'}, revision:1});
+  expect(manager.snapshot()).toEqual([{kind:'draft', key:'draft', value:{text:'hello'}, revision:1}]);
+  expect(windows[0].send).toHaveBeenCalledWith('event', {kind:'draft', key:'draft', value:{text:'hello'}, revision:1, accountKey:'prod:7'});
   manager.publish(1, {kind:'changed'}); expect(notify).toHaveBeenCalledWith({kind:'changed',accountKey:'prod:7'});
   manager.setAccount(null); expect(manager.snapshot()).toEqual([]);
  });
