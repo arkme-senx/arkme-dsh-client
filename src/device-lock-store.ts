@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync, fsyncSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync, fsyncSync, unlinkSync } from "node:fs";
 import path from "node:path";
 
 export interface LockReport { sequence: number; actual_lock: "locked" | "unlocked"; lock_cycle: string; operation_id?: string; not_applied?: boolean; unlock_source?: "native" }
@@ -42,9 +42,18 @@ export class FileDeviceLockStore implements DeviceLockStore {
   write(state: PersistedDeviceLock): void {
     mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
     const temporary = `${this.file}.${randomUUID()}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(state)}\n`, { mode: 0o600, flag: "wx" });
-    const descriptor = openSync(temporary, "r");
-    try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
-    renameSync(temporary, this.file);
+    const descriptor = openSync(temporary, "wx", 0o600);
+    try {
+      try {
+        writeFileSync(descriptor, `${JSON.stringify(state)}\n`);
+        // Windows requires a writable handle to flush the file to disk.
+        fsyncSync(descriptor);
+      } finally { closeSync(descriptor); }
+      renameSync(temporary, this.file);
+    } finally {
+      // A failed write/flush/replace preserves the previous state and must not
+      // accumulate credential-bearing temporary files on every sync retry.
+      try { unlinkSync(temporary); } catch { /* Already renamed or unavailable. */ }
+    }
   }
 }
