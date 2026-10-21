@@ -1,5 +1,5 @@
 // Manual, cold-process comparison of the three picker paths. No account, upload or file reads.
-const { app, BrowserWindow, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, systemPreferences } = require('electron');
 const { createServer } = require('node:http');
 const { mkdtemp, readFile, rm } = require('node:fs/promises');
 const { appendFileSync } = require('node:fs');
@@ -12,6 +12,10 @@ const backend = process.argv.find(arg => arg.startsWith('--backend='))?.slice(10
 if (!methods.includes(backend)) throw new Error('Unknown comparison backend');
 const log = process.argv.find(arg => arg.startsWith('--log='))?.slice(6);
 if (!log || !path.isAbsolute(log)) throw new Error('An absolute --log path is required');
+const panelSize = process.argv.find(arg => arg.startsWith('--panel-size='))?.slice(13);
+if (panelSize && !/^\{\d{3,4}, \d{3,4}\}$/.test(panelSize)) throw new Error('Invalid panel size');
+const panelSizeKey = 'NSNavPanelExpandedSizeForOpenMode';
+let previousPanelSize;
 const runId = randomUUID();
 const emit = details => appendFileSync(log, JSON.stringify({ at: new Date().toISOString(), runId, pid: process.pid, backend, ...details }) + '\n');
 // Capture only the Chromium classes relevant to visibility cancellation, in this test process.
@@ -25,10 +29,15 @@ const finish = async (restart = false) => {
   if (restart) {
     const next = methods[(methods.indexOf(backend) + 1) % methods.length];
     emit({ event: 'restart', next });
-    app.relaunch({ args: [__filename, `--backend=${next}`, `--log=${log}`] });
+    app.relaunch({ args: [__filename, `--backend=${next}`, `--log=${log}`, ...(panelSize ? [`--panel-size=${panelSize}`] : [])] });
   }
   if (owner && !owner.isDestroyed()) owner.destroy();
   if (server) await new Promise(resolve => server.close(resolve));
+  if (previousPanelSize !== undefined) {
+    if (previousPanelSize) systemPreferences.setUserDefault(panelSizeKey, 'string', previousPanelSize);
+    else systemPreferences.removeUserDefault(panelSizeKey);
+    emit({ event: 'panel-preference-restored', size: previousPanelSize || '(unset)' });
+  }
   if (temporary) await rm(temporary, { force: true, recursive: true });
   app.exit(0);
 };
@@ -37,6 +46,12 @@ app.on('window-all-closed', () => { void finish(); });
   temporary = await mkdtemp(path.join(tmpdir(), 'arkme-picker-comparison-'));
   app.setPath('userData', path.join(temporary, 'profile'));
   await app.whenReady();
+  if (panelSize) {
+    if (process.platform !== 'darwin') throw new Error('Panel size comparison requires macOS');
+    previousPanelSize = systemPreferences.getUserDefault(panelSizeKey, 'string');
+    systemPreferences.setUserDefault(panelSizeKey, 'string', panelSize);
+    emit({ event: 'panel-preference-test', previousSize: previousPanelSize, size: panelSize });
+  }
   const { NativeRecordingPicker } = await import(pathToFileURL(path.resolve(__dirname, '../../dist/recording-file-picker.js')));
   const html = await readFile(path.join(__dirname, 'recording-picker-comparison.html'));
   const js = await readFile(path.join(__dirname, 'recording-picker-comparison-renderer.js'));
