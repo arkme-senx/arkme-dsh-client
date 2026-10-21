@@ -7,6 +7,8 @@ import { ConversationDraftSaveError, installConversationWindowIpc } from './conv
 import { installAttachmentPreviewNative } from "./attachment-preview-native.js";
 import { installLongArticleWindowIpc } from "./long-article-window-ipc.js";
 import { DesktopSessionSelection } from "./session-selection.js";
+import { DesktopRecordingFiles, type RecordingFilesContext } from './recording-import-files.js';
+import { NativeRecordingPicker } from './recording-file-picker.js';
 import { harnessCookieHeader, type HarnessAuthSession } from "./harness-auth-session.js";
 import { HarnessCookieInstaller } from "./harness-cookie-install.js";
 import { HarnessPageReadiness, localHarnessMountFailure, settleHarnessPageRendering } from "./harness-page-ready.js";
@@ -15,7 +17,7 @@ import { RuntimeDataTransactionStore, type RuntimeDataTransaction } from "./runt
 import { commitRuntimeUpgrade, recoverRuntimeUpgrade, restoreFailedRuntimeTrial } from "./runtime-upgrade.js";
 import { RUNTIME_CACHE_EPOCH, readPreviousRuntimeBaseline, resolveRuntimeCacheRoot } from "./runtime/cache-epoch.js";
 import { createDesktopDeviceReader } from "./desktop-device.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { access, mkdir, readFile } from "node:fs/promises";
 import { RotatingLog } from "./rotating-log.js";
@@ -1569,6 +1571,45 @@ ipcMain.handle("arkme-session-selection:save", (event, value: unknown) => {
 });
 
 const readDesktopDevice = createDesktopDeviceReader();
+const recordingFiles = new DesktopRecordingFiles(bookmark => { const stop = app.startAccessingSecurityScopedResource(bookmark); return () => { stop(); }; });
+const recordingPicker = new NativeRecordingPicker(owner => dialog.showOpenDialog(owner, {
+  properties: ['openFile', 'multiSelections'],
+  filters: [{ name: '录音', extensions: ['wav', 'mp3', 'm4a'] }],
+  securityScopedBookmarks: process.mas === true,
+}), details => logDiagnostic('native-recording-file-picker', details));
+function recordingFilesContext(event: Electron.IpcMainInvokeEvent, accountKey?: string): RecordingFilesContext {
+  const scope = activeAccountScope;
+  const origin = activeHarnessOrigin;
+  const authenticated = harnessAuthSession;
+  const document = event.senderFrame;
+  const valid = () => accountScopeReady && activeAccountScope === scope && activeHarnessOrigin === origin
+    && harnessAuthSession === authenticated && authenticated !== null && !authenticated.signal.aborted
+    && !event.sender.isDestroyed() && event.sender.mainFrame === document && isCurrentAppUpdateSender(event);
+  if (!scope || scope.owner.kind !== 'account' || !origin || !authenticated || !valid()) throw new Error('请在已登录的主窗口导入录音');
+  if (accountKey !== undefined) {
+    const match = /^(prod|test):(\d+)$/.exec(accountKey);
+    if (!match || match[1] !== runtimeEnvironment || createHash('sha256').update(`arkme-dsh-account-scope-v1\n${Number(match[2])}`).digest('hex') !== scope.owner.accountRef) throw new Error('导入队列账号不匹配');
+  }
+  return { directory: path.dirname(scope.settingsPath), origin, cookie: harnessCookieHeader(authenticated), valid };
+}
+ipcMain.handle('arkme-recording-import:list', (event, accountKey: string) => recordingFiles.list(recordingFilesContext(event, accountKey), accountKey));
+ipcMain.handle('arkme-recording-import:change', (event, accountKey: string, upserts, removals) => recordingFiles.change(recordingFilesContext(event, accountKey), accountKey, upserts, removals));
+ipcMain.handle('arkme-recording-import:pick', async event => {
+  const context = recordingFilesContext(event);
+  const owner = mainWindow;
+  if (!owner) throw new Error('录音导入窗口已关闭');
+  const selected = await recordingPicker.pick(owner, context.valid);
+  if (selected.canceled) return [];
+  return await recordingFiles.capture(context, selected.filePaths, selected.bookmarks);
+});
+ipcMain.handle('arkme-recording-import:capture', (event, paths: string[]) => {
+  if (process.mas) throw new Error('请点击选择文件，以保存重启后的文件授权');
+  return recordingFiles.capture(recordingFilesContext(event), paths);
+});
+ipcMain.handle('arkme-recording-import:stat', (event, token: string) => recordingFiles.stat(recordingFilesContext(event), token));
+ipcMain.handle('arkme-recording-import:read', (event, token: string, start: number, end: number) => recordingFiles.read(recordingFilesContext(event), token, start, end));
+ipcMain.handle('arkme-recording-import:upload', (event, token: string, request) => recordingFiles.upload(recordingFilesContext(event), token, request));
+ipcMain.handle('arkme-recording-import:cancel', (event, id: string) => recordingFiles.cancel(recordingFilesContext(event), id));
 ipcMain.handle("arkme-desktop:directory-badge", (event, count: unknown) => (
   isCurrentAppUpdateSender(event) && nativeBadges.applyDirectoryCount(count).accepted
 ));
