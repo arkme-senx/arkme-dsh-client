@@ -88,7 +88,7 @@ describe("application manifest", () => {
     expect(manifest.dependencies.yaml).toBe("2.9.0");
     expect(workspaceManifest.packages).toEqual([".", "runtime"]);
     expect(workspaceManifest.catalogs.production["@senguoyun/dsh-arkme"]).toBe(
-      "git+ssh://git@github.com/arkme-senx/arkme-dsh-plugin.git#2838fdceea0e4702b9017a31e0ad6f0893fc823a"
+      "git+ssh://git@github.com/arkme-senx/arkme-dsh-plugin.git#9497ad8f963ca18af9ce8a39664e8fe1faa20a0b"
     );
   });
 

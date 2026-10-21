@@ -17,7 +17,9 @@ test('reporting runs after Windows recovery and macOS records no login identity'
  expect(win).toContain('$request.Wait(1500)');
  expect(win).toContain('$handler.AllowAutoRedirect=$false');
  const nsis=readFileSync('build/windows-migration.nsh','utf8');
- const nativeFailure=nsis.split('Function .onInstFailed')[1].split('${EndIf}\n  ${If} $JiwoMigrationDestination !=')[0];
+ const failureSection=nsis.split('Function .onInstFailed')[1];
+ if(failureSection===undefined)throw new Error('Missing NSIS installation failure handler');
+ const nativeFailure=failureSection.split('${EndIf}\n  ${If} $JiwoMigrationDestination !=')[0];
  expect(nativeFailure).toContain('-Action Report -FailureContext NSIS');
  expect(nativeFailure).not.toContain('-Action Rollback');
  const mac=readFileSync('build/macos-migration/Diagnostics.swift','utf8');

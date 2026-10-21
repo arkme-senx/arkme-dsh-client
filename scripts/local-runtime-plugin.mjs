@@ -1,10 +1,22 @@
 import { createHash } from "node:crypto";
 import { cp, lstat, readFile, readdir, rm, mkdir } from "node:fs/promises";
 import path from "node:path";
+import semver from "semver";
 
-export function assertRuntimePluginReady(manifest) {
+export function assertRuntimePluginReady(manifest, harnessVersion) {
   if (manifest?.arkme?.desktopHarnessReady?.version !== 1) {
     throw new Error("Runtime seed lacks arkme.desktopHarnessReady.version=1; publish and pin the reviewed readiness plugin before a production build, or use ARKME_RUNTIME_LOCAL_PLUGIN_DIR for a local candidate");
+  }
+  if (harnessVersion !== undefined) {
+    const requirements = typeof manifest.engines?.dsh === "string"
+      ? { "engines.dsh": manifest.engines.dsh }
+      : Object.fromEntries(Object.entries(manifest.peerDependencies ?? {}).filter(([name]) =>
+        name === "@deepseek-ai/dsh" || name.startsWith("@deepseek-ai/dsh-")));
+    const unmet = Object.entries(requirements).filter(([, range]) =>
+      typeof range !== "string" || !semver.satisfies(harnessVersion, range, { includePrerelease: true }));
+    if (unmet.length > 0) {
+      throw new Error(`Runtime plugin ${manifest.name}@${manifest.version} does not declare compatibility with Harness ${harnessVersion}: ${unmet.map(([name]) => name).join(", ")}`);
+    }
   }
 }
 
