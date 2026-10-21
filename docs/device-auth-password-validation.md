@@ -40,7 +40,7 @@ Windows 11 专业工作站版 10.0.26200 x64 上使用现有 C++ Build Tools、W
 
 本程序成功不等于生产验收完成。Electron owner 已接入 helper；Mac universal helper 编译和本地 ad-hoc 签名通过，主进程的认证取消、迟到结果、会话撤销/重锁、重启回执与实际多窗口隐藏/恢复已有测试。锁定使用独立可信原生窗口，业务窗口隐藏，Mac 辅助功能树已现场检查不暴露业务内容。
 
-2026-10-15 合并前复核：192.168.3.114 恢复连接后，在新的临时目录使用普通 SSH 终端调用构建脚本，自动发现 MSVC 并以 /W4 /WX 编译成功；已登录桌面的独立任务再次返回 available。此轮没有再次索取或输入密码。
+合并前复核：在 Windows 测试机的独立临时目录，通过普通远程终端调用构建脚本，自动发现 MSVC 并以 /W4 /WX 编译成功；已登录桌面的独立任务再次返回 available。此轮没有再次输入密码。
 
 同轮 Mac 与 Windows 均执行 `tests/fixtures/device-lock-electron.cjs`：业务窗口隐藏、锁定后新建窗口隐藏、敏感标题保护、可信 preload 调用、解锁恢复，以及原有 content protection 保留全部通过。Windows 使用独立用户数据目录和官方 Electron 43.2.0，下载制品与 npm 包内 checksum 一致；一次性任务结果 0，完成后已注销。此项为源码构建的隔离原生窗口验收，仍不等于正式签名安装包验收。
 
