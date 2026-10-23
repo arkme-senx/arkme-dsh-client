@@ -1312,7 +1312,7 @@ async function initializeHarnessRuntime(
     inheritedEnv: {
       ...packageManagerEnvironment,
       ARKME_APP_VERSION: app.getVersion(),
-      ARKME_HOST_POLICY: pluginHostPolicy(masChannel),
+      ARKME_HOST_POLICY: pluginHostPolicy(masChannel, app.isPackaged ? undefined : paths.userDataPath),
       ...(paths.accountScopeRequired ? {
         ARKME_ACCOUNT_SCOPE_REQUIRED: "1",
         ARKME_DSH_RUNTIME_SCOPE_REF: paths.runtimeScopeRef
