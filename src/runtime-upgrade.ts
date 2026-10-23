@@ -1,4 +1,12 @@
-import type { RuntimeDataTransaction, RuntimeDataTransactionStore } from "./runtime-data-transaction.js";
+import type { RuntimeDataTransaction, RuntimeDataTransactionBeginOptions, RuntimeDataTransactionStore } from "./runtime-data-transaction.js";
+
+/** The runtime manager has selected the target; dormant containers still need a trial after release probation ends. */
+export async function beginRuntimeUpgrade(
+  store: RuntimeDataTransactionStore,
+  options: Omit<RuntimeDataTransactionBeginOptions, "allowHarnessTransition">
+): Promise<RuntimeDataTransaction | undefined> {
+  return await store.begin({...options, allowHarnessTransition: true});
+}
 
 interface RuntimeUpgradeCommitSteps {
   commitProfile: (dshHome: string, releaseId: string) => Promise<void>;

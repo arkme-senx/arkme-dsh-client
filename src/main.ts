@@ -21,7 +21,7 @@ import { HarnessCookieInstaller } from "./harness-cookie-install.js";
 import { HarnessPageReadiness, localHarnessMountFailure, settleHarnessPageRendering } from "./harness-page-ready.js";
 import { assertPreviousHarnessExited } from "./harness-process-lifetime.js";
 import { RuntimeDataTransactionStore, type RuntimeDataTransaction } from "./runtime-data-transaction.js";
-import { commitRuntimeUpgrade, recoverRuntimeUpgrade, restoreFailedRuntimeTrial } from "./runtime-upgrade.js";
+import { beginRuntimeUpgrade, commitRuntimeUpgrade, recoverRuntimeUpgrade, restoreFailedRuntimeTrial } from "./runtime-upgrade.js";
 import { RUNTIME_CACHE_EPOCH, readPreviousRuntimeBaseline, resolveRuntimeCacheRoot } from "./runtime/cache-epoch.js";
 import { createDesktopDeviceReader } from "./desktop-device.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -1018,12 +1018,11 @@ async function launchHarnessRuntime(
     try {
       if (runtime.release !== undefined) {
         if (runtimeDataStore === null) throw new Error("Runtime data transaction store unavailable");
-        dataTransaction = await runtimeDataStore.begin({
+        dataTransaction = await beginRuntimeUpgrade(runtimeDataStore, {
           dshHome: paths.dshHome,
           releaseId: runtime.release.releaseId,
           harnessIdentity: runtime.release.manifest.artifacts.harness.sha256,
-          registry: [path.join(paths.userDataPath, "dsh-account-scopes.json"), paths.settingsPath],
-          allowHarnessTransition: runtime.release.probation
+          registry: [path.join(paths.userDataPath, "dsh-account-scopes.json"), paths.settingsPath]
         });
         holdCandidateNavigation ||= dataTransaction !== undefined;
       }
