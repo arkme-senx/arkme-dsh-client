@@ -9,6 +9,8 @@ import {
 import { deriveElectronRuntimeReleaseId, type ElectronRuntimeManifest } from "../src/runtime/manifest.js";
 import { RuntimeArtifactValidationError } from "../src/runtime/errors.js";
 import { AUTOMATIC_UPDATE_CHECK_INTERVAL_MS } from "../src/update-check-policy.js";
+import { RuntimeDataTransactionStore } from "../src/runtime-data-transaction.js";
+import { beginRuntimeUpgrade, commitRuntimeUpgrade, recoverRuntimeUpgrade, restoreFailedRuntimeTrial } from "../src/runtime-upgrade.js";
 
 const temporaryDirectories: string[] = [];
 const manifestContext = { os: "darwin", arch: "arm64", shellVersion: "0.2.0", electronMajor: 43, modulesAbi: 148 } as const;
@@ -73,6 +75,118 @@ function dshEntry(root: string, releaseId: string): string {
 }
 
 describe("ElectronRuntimeManager", () => {
+  test("migrates dormant guest and account containers after the new runtime is already active", async () => {
+    const userDataPath = await mkdtemp(path.join(os.tmpdir(), "runtime containers with spaces-"));
+    temporaryDirectories.push(userDataPath);
+    const root = path.join(userDataPath, "runtime-manager");
+    const old = release("old", 1, 1);
+    const next = release("new", 2, 2);
+    let latest = old;
+    const manager = createManager(root, async () => latest);
+    const store = new RuntimeDataTransactionStore({userDataPath, environment: "prod"});
+    const homes = ["account-a", "guest", "account-b", "account-b-second-space"]
+      .map(scope => path.join(userDataPath, "dsh-containers", scope, "dsh"));
+    const registry = path.join(userDataPath, "dsh-account-scopes.json");
+    await writeFile(registry, JSON.stringify({active: "account-a", owners: ["account-a", "guest", "account-b"]}));
+    for (const [index, dshHome] of homes.entries()) {
+      await mkdir(path.join(dshHome, "sessions"), {recursive: true});
+      await writeFile(path.join(dshHome, "sessions", "history"), `original history ${index}`);
+      await writeFile(path.join(dshHome, "attachment"), Buffer.from([0, index, 128, 255]));
+      const seed = (await store.begin({dshHome, releaseId: old.releaseId, harnessIdentity: old.artifacts.harness.sha256}))!;
+      await seed.markCommitDecided();
+      await seed.complete();
+    }
+    await manager.prepareForLaunch();
+    await manager.completeCandidate();
+    latest = next;
+    expect(await manager.stageLatest()).toBe("staged");
+    const candidate = await manager.prepareForLaunch();
+    expect(candidate.probation).toBe(true);
+    const first = (await beginRuntimeUpgrade(store, {
+      dshHome: homes[0]!, releaseId: candidate.releaseId, harnessIdentity: candidate.manifest.artifacts.harness.sha256
+    }))!;
+    await commitRuntimeUpgrade(first, {commitProfile: async () => undefined, commitRelease: () => manager.completeCandidate()});
+
+    const committedBefore = JSON.parse(await readFile(path.join(store.transactionsPath, "committed-containers.json"), "utf8"));
+    for (const dshHome of homes.slice(1)) expect(committedBefore.containers[dshHome].harnessIdentity).toBe(old.artifacts.harness.sha256);
+    const registryBefore = await readFile(registry);
+    for (const [index, dshHome] of homes.entries()) {
+      const active = await manager.prepareForLaunch();
+      expect(active.probation).toBe(false);
+      const options = {dshHome, releaseId: active.releaseId, harnessIdentity: active.manifest.artifacts.harness.sha256, registry: [registry]};
+      if (index > 0) await expect(store.begin(options)).rejects.toThrow("explicit harness transition");
+      const transaction = await beginRuntimeUpgrade(store, options);
+      if (index === 0) expect(transaction).toBeUndefined();
+      else {
+        expect(transaction?.record.source.identity?.harnessIdentity).toBe(old.artifacts.harness.sha256);
+        expect(await readFile(path.join(transaction!.record.snapshotPath, "sessions", "history"), "utf8"))
+          .toBe(`original history ${index}`);
+        await commitRuntimeUpgrade(transaction!, {commitProfile: async () => undefined, commitRelease: async () => undefined});
+      }
+      expect(await readFile(path.join(dshHome, "sessions", "history"), "utf8")).toBe(`original history ${index}`);
+      expect(await readFile(path.join(dshHome, "attachment"))).toEqual(Buffer.from([0, index, 128, 255]));
+      expect(await beginRuntimeUpgrade(store, options)).toBeUndefined();
+    }
+    expect(await readFile(registry)).toEqual(registryBefore);
+    const committedAfter = JSON.parse(await readFile(path.join(store.transactionsPath, "committed-containers.json"), "utf8"));
+    for (const dshHome of homes) expect(committedAfter.containers[dshHome]).toEqual({releaseId: next.releaseId, harnessIdentity: next.artifacts.harness.sha256});
+  });
+
+  test.each(["trial", "commit"])("recovers a dormant container interrupted during %s without rolling back the active runtime", async phase => {
+    const userDataPath = await mkdtemp(path.join(os.tmpdir(), "runtime-container-recovery-"));
+    temporaryDirectories.push(userDataPath);
+    const root = path.join(userDataPath, "runtime-manager");
+    const next = release("active", 2, 2);
+    const manager = createManager(root, async () => next);
+    await manager.prepareForLaunch();
+    await manager.completeCandidate();
+    const active = await manager.prepareForLaunch();
+    expect(active.probation).toBe(false);
+    const store = new RuntimeDataTransactionStore({userDataPath, environment: "prod"});
+    const dshHome = path.join(userDataPath, "dsh-containers", "guest", "dsh");
+    const settings = path.join(userDataPath, "guest-settings.json");
+    await mkdir(dshHome, {recursive: true});
+    await writeFile(path.join(dshHome, "history"), "old history");
+    await writeFile(settings, "old settings");
+    const seed = (await store.begin({dshHome, releaseId: "old", harnessIdentity: "old-hash"}))!;
+    await seed.markCommitDecided();
+    await seed.complete();
+    const options = {dshHome, releaseId: active.releaseId, harnessIdentity: active.manifest.artifacts.harness.sha256, registry: [settings]};
+    const transaction = (await beginRuntimeUpgrade(store, options))!;
+    await writeFile(path.join(dshHome, "history"), "migrated history");
+    await writeFile(path.join(dshHome, "trial-only"), "preserved trial data");
+    await writeFile(settings, "migrated settings");
+    if (phase === "trial") {
+      await restoreFailedRuntimeTrial(transaction, {stopHarness: async () => undefined, rollbackProfile: async () => undefined});
+      expect(await readFile(path.join(dshHome, "history"), "utf8")).toBe("old history");
+      expect(await readFile(settings, "utf8")).toBe("old settings");
+      expect(await readFile(path.join(transaction.record.failurePreservationPath!, "trial-only"), "utf8")).toBe("preserved trial data");
+      expect(await readFile(path.join(transaction.record.failurePreservationPath!, "protected", "0-guest-settings.json"), "utf8")).toBe("migrated settings");
+    } else {
+      await expect(commitRuntimeUpgrade(transaction, {
+        commitProfile: async () => undefined,
+        commitRelease: async () => { throw new Error("interrupted before container marker commit"); }
+      })).rejects.toThrow("interrupted");
+    }
+    const restarted = createManager(root, async () => { throw new Error("must use the active local runtime"); });
+    const restartedStore = new RuntimeDataTransactionStore({userDataPath, environment: "prod"});
+    await recoverRuntimeUpgrade(restartedStore, {
+      commitProfile: async () => undefined,
+      commitRelease: id => restarted.recoverCommittedCandidate(id)
+    });
+    const resolved = await restarted.prepareForLaunch();
+    expect([resolved.releaseId, resolved.probation]).toEqual([active.releaseId, false]);
+    if (phase === "trial") {
+      const retry = (await beginRuntimeUpgrade(restartedStore, options))!;
+      await commitRuntimeUpgrade(retry, {commitProfile: async () => undefined, commitRelease: async () => undefined});
+    } else {
+      expect(await readFile(path.join(dshHome, "history"), "utf8")).toBe("migrated history");
+      expect(await readFile(path.join(dshHome, "trial-only"), "utf8")).toBe("preserved trial data");
+      expect(await readFile(settings, "utf8")).toBe("migrated settings");
+    }
+    expect(await beginRuntimeUpgrade(restartedStore, options)).toBeUndefined();
+  });
+
   test("passes the active and pending releases as compatible-feed baselines while staging", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "electron-runtime-compatible-baseline-"));
     temporaryDirectories.push(root);
