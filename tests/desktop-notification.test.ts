@@ -503,3 +503,30 @@ describe("DesktopNotificationCoordinator", () => {
     expect(Buffer.byteLength(truncated, "utf8")).toBe(7);
   });
 });
+
+describe('Team conversation native notification contract', () => {
+  const team:DesktopNotificationSubmission = {...submission,idempotencyKey:'team-event',kind:'team.message',
+    expiresAtMillis:submission.occurredAtMillis+300000,
+    activation:{kind:'team-conversation',sourceRef:'sealed-team-conversation',sourceKey:'viewer-scoped-key'}};
+  it('accepts Team explicitly and rejects a Chat/Team mixed activation or renewed expiry',()=>{
+    expect(parseDesktopNotificationSubmission(team)).toEqual(team);
+    expect(parseDesktopNotificationSubmission({...team,activation:{...team.activation,kind:'chat-source'}})).toBeUndefined();
+    expect(parseDesktopNotificationSubmission({...submission,activation:team.activation})).toBeUndefined();
+    expect(parseDesktopNotificationSubmission({...team,expiresAtMillis:team.expiresAtMillis+1})).toBeUndefined();
+  });
+  it('delivers and acknowledges typed Team activation through the existing native consumer',()=>{
+    const f=fixture({now:()=>team.occurredAtMillis+1000});f.window.sendActivationV2=vi.fn();
+    f.coordinator.markReadyV2('http://127.0.0.1:4173',{consumerId:'team-consumer'});
+    expect(f.coordinator.submit(team)).toEqual({accepted:true,outcome:'accepted'});
+    expect(f.coordinator.submit(team)).toEqual({accepted:false,outcome:'duplicate'});
+    f.clickListeners[0]?.();
+    expect(f.window.sendActivationV2).toHaveBeenCalledWith('arkme:desktop-notification:activated-v2',{activationId:'team-event',...team.activation});
+    expect(f.window.send).not.toHaveBeenCalled();
+  });
+  it('refuses expired Team messages from Host and renderer without renewing their TTL',()=>{
+    const f=fixture({now:()=>team.expiresAtMillis+1});
+    expect(f.coordinator.submit(team)).toEqual({accepted:false,outcome:'expired'});
+    expect(f.coordinator.show('http://127.0.0.1:4173',{...request,eventUid:'team-browser',sourceKind:'team_conversation',expiresAtMillis:team.expiresAtMillis})).toEqual({shown:false});
+    expect(f.createNotification).not.toHaveBeenCalled();
+  });
+});
