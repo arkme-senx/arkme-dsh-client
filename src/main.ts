@@ -466,7 +466,7 @@ registerDesktopLocationIpc({
   handle(channel, handler) {
     ipcMain.handle(channel, (event, value: unknown) => handler({
       sender: { id: event.sender.id },
-      senderFrame: event.senderFrame === null ? null : { url: event.senderFrame.url }
+      senderFrame: event.senderFrame === null || event.senderFrame !== event.sender.mainFrame ? null : { url: event.senderFrame.url }
     }, value));
   }
 }, {
@@ -480,6 +480,12 @@ registerDesktopLocationIpc({
       url: window.webContents.getURL(),
       webContentsId: window.webContents.id
     };
+  },
+  getLocationWindow: id => {
+    if (!longArticleWindows.isActive(id) || longArticleWindows.context(id)?.surface !== "location") return null;
+    const window = BrowserWindow.getAllWindows().find(value => value.webContents.id === id);
+    if (!window || window.isDestroyed()) return null;
+    return { destroyed: false, focused: window.isFocused(), url: window.webContents.getURL(), webContentsId: id };
   },
   getService: () => desktopLocationPermission,
   openSettings: async () => {
@@ -1725,6 +1731,7 @@ function createMainWindow(): void {
     mainWindow.webContents.on("did-start-navigation", () => drag.cancel());
   }
   installHarnessPermissionPolicy(mainWindow.webContents.session, {
+    isLocationWebContents: id => longArticleWindows.isActive(id) && longArticleWindows.context(id)?.surface === "location",
     isDeviceLocked: () => desktopDeviceLock?.protected === true,
     getActiveHarnessOrigin: () => activeHarnessOrigin,
     getMainWebContentsId: () => {

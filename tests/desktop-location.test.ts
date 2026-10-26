@@ -145,6 +145,7 @@ type IpcHandler = (
 ) => unknown | Promise<unknown>;
 
 function ipcFixture(options: {
+  locationWindow?: boolean;
   focused?: boolean;
   frameUrl?: string;
   harnessOrigin?: string | null;
@@ -171,6 +172,7 @@ function ipcFixture(options: {
       url: options.windowUrl ?? "http://127.0.0.1:41234/chat",
       webContentsId: 7
     }),
+    ...(options.locationWindow ? { getLocationWindow: (id: number) => id === 9 ? ({ destroyed: false, focused: options.focused ?? true, url: "http://127.0.0.1:41234/?arkmeLongArticle=1", webContentsId: 9 }) : null } : {}),
     getService: () => service,
     openSettings: options.openSettings ?? vi.fn(async () => true),
     diagnostic
@@ -253,4 +255,14 @@ describe("desktop location IPC policy", () => {
     )).resolves.toBe(false);
     expect(failed.diagnostic).toHaveBeenCalledWith("open-settings-failed", expect.any(Error));
   });
+});
+
+
+test("allows an activated focused registered location window without granting other children", async () => {
+  const allowed = ipcFixture({ senderId: 9, locationWindow: true });
+  expect(await allowed.invoke(DESKTOP_LOCATION_REQUEST_PERMISSION_CHANNEL, { userActivation: true })).toEqual({ schemaVersion: 1, state: "granted" });
+  const inactive = ipcFixture({ senderId: 9 });
+  expect(await inactive.invoke(DESKTOP_LOCATION_REQUEST_PERMISSION_CHANNEL, { userActivation: true })).toEqual({ schemaVersion: 1, state: "unavailable" });
+  const unfocused = ipcFixture({ senderId: 9, locationWindow: true, focused: false });
+  expect(await unfocused.invoke(DESKTOP_LOCATION_REQUEST_PERMISSION_CHANNEL, { userActivation: true })).toEqual({ schemaVersion: 1, state: "unavailable" });
 });

@@ -86,3 +86,43 @@ it("never accepts write receipts from snapshots", async () => {
  await manager.open({ ...target, article: { mode: 'snapshot', item: { itemUid: 'a' } } });
  expect(manager.created(1, { itemUid: 'a' })).toBe(false);
 });
+
+it('keeps location, library and article windows separate and reuses each browser surface', async () => {
+  const { manager, windows } = setup();
+  await manager.open(target);
+  await manager.open({ ...target, surface: 'location' });
+  await manager.open({ ...target, surface: 'library' });
+  await manager.open({ ...target, surface: 'library' });
+  expect(windows).toHaveLength(3);
+  expect(windows[2].focus).toHaveBeenCalledOnce();
+  expect(manager.created(2, { itemUid: 'record' })).toBe(false);
+  expect(manager.created(3, { itemUid: 'record' })).toBe(false);
+});
+it('updates the existing location window with the newly requested day and keeps account invalidation permanent', async () => {
+  const { manager, windows } = setup();
+  const first = { ...target, surface: 'location', location: { initialDate: { bucketDate: '2026-10-25', timezone: 'Asia/Shanghai' } } };
+  await manager.open(first);
+  const next = { ...first, location: { initialDate: { bucketDate: '2026-10-26', timezone: 'Asia/Shanghai' } } };
+  await manager.open(next);
+  expect(windows).toHaveLength(1);
+  expect(windows[0].send).toHaveBeenCalledWith('context-changed', next);
+  expect(manager.context(1)).toEqual(next);
+  manager.setAccount('prod:8'); manager.setAccount(target.accountKey);
+  await manager.open(next);
+  expect(windows).toHaveLength(2);
+  expect(manager.isActive(1)).toBe(false);
+});
+it('rejects unsupported surfaces, mixed article contexts and oversized location payloads', async () => {
+  const { manager, windows } = setup();
+  for (const extra of [ { surface: 'unknown' }, { surface: 'library', article: { mode: 'existing', item: { itemUid: 'x' } } },
+    { surface: 'location', location: { initialDate: { bucketDate: 'bad', timezone: 'UTC' } } },
+    { surface: 'location', location: { initialLocation: { text: 'x'.repeat(70000) } } }, { location: {} } ]) {
+    await expect(manager.open({ ...target, ...extra })).rejects.toThrow();
+  }
+  expect(windows).toHaveLength(0);
+});
+it('does not reuse a chat send draft for an automatically published library draft', async () => {
+  const { manager, windows } = setup();
+  await manager.open(target); await manager.open({ ...target, autoPublish: true });
+  expect(windows).toHaveLength(2);
+});
