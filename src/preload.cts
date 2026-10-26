@@ -23,15 +23,14 @@ interface DesktopNotificationRequest {
   eventUid: string;
   sourceRef: string;
   sourceKey?: string;
-  sourceKind: "private_chat" | "group_chat" | "team_conversation";
-  expiresAtMillis?: number;
+  sourceKind: "private_chat" | "group_chat";
   title: string;
   body: string;
   eventAtMillis: number;
 }
 
 interface DesktopNotificationActivation {
-  kind: "chat-source" | "team-conversation";
+  kind: "chat-source";
   sourceRef: string;
   sourceKey?: string;
 }
@@ -804,7 +803,7 @@ function parseDesktopNotificationActivation(value: unknown): DesktopNotification
   const hasSourceKey = Object.prototype.hasOwnProperty.call(candidate, "sourceKey");
   if (
     (Object.keys(candidate).length !== 2 && Object.keys(candidate).length !== 3)
-    || (candidate.kind !== "chat-source" && candidate.kind !== "team-conversation")
+    || candidate.kind !== "chat-source"
     || typeof candidate.sourceRef !== "string"
     || candidate.sourceRef.length === 0
     || candidate.sourceRef.length > 4_096
@@ -816,7 +815,7 @@ function parseDesktopNotificationActivation(value: unknown): DesktopNotification
     || (!hasSourceKey && Object.keys(candidate).length !== 2)
   ) return undefined;
   return {
-    kind: candidate.kind,
+    kind: "chat-source",
     sourceRef: candidate.sourceRef,
     ...(hasSourceKey ? { sourceKey: candidate.sourceKey as string } : {})
   };
@@ -832,13 +831,13 @@ function parseDesktopNotificationActivationV2(
   if (
     Object.keys(candidate).length !== expectedKeyCount
     || !boundedNonBlankString(candidate.activationId, 128)
-    || (candidate.kind !== "chat-source" && candidate.kind !== "team-conversation")
+    || candidate.kind !== "chat-source"
     || !boundedNonBlankString(candidate.sourceRef, 4_096)
     || (hasSourceKey && !boundedNonBlankString(candidate.sourceKey, 512))
   ) return undefined;
   return {
     activationId: candidate.activationId,
-    kind: candidate.kind,
+    kind: "chat-source",
     sourceRef: candidate.sourceRef,
     ...(hasSourceKey ? { sourceKey: candidate.sourceKey as string } : {})
   };

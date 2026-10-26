@@ -68,15 +68,14 @@ export interface DesktopNotificationRequest {
   eventUid: string;
   sourceRef: string;
   sourceKey?: string;
-  sourceKind: "private_chat" | "group_chat" | "team_conversation";
-  expiresAtMillis?: number;
+  sourceKind: "private_chat" | "group_chat";
   title: string;
   body: string;
   eventAtMillis: number;
 }
 
 export interface DesktopNotificationActivation {
-  kind: "chat-source" | "team-conversation";
+  kind: "chat-source";
   sourceRef: string;
   sourceKey?: string;
 }
@@ -107,7 +106,7 @@ interface PendingDesktopNotificationActivationV2 {
 
 export interface DesktopNotificationSubmission {
   idempotencyKey: string;
-  kind: "chat.message" | "team.message";
+  kind: "chat.message";
   occurredAtMillis: number;
   expiresAtMillis: number;
   presentation: {
@@ -208,14 +207,14 @@ export class DesktopNotificationCoordinator {
     if (!this.isCurrentHarnessPage(senderUrl) || request === undefined) return { shown: false };
     const result = this.submit({
       idempotencyKey: request.eventUid,
-      kind: request.sourceKind === "team_conversation" ? "team.message" : "chat.message",
+      kind: "chat.message",
       occurredAtMillis: request.eventAtMillis,
       // The legacy renderer contract did not carry a TTL. Keep it compatible
       // while all new Host-originated requests use an explicit expiry.
-      expiresAtMillis: request.sourceKind === "team_conversation" ? request.expiresAtMillis! : Number.MAX_SAFE_INTEGER,
+      expiresAtMillis: Number.MAX_SAFE_INTEGER,
       presentation: { title: request.title, body: request.body },
       activation: {
-        kind: request.sourceKind === "team_conversation" ? "team-conversation" : "chat-source",
+        kind: "chat-source",
         sourceRef: request.sourceRef,
         ...(request.sourceKey === undefined ? {} : { sourceKey: request.sourceKey })
       }
@@ -472,9 +471,9 @@ export class DesktopNotificationCoordinator {
   private deliverV1(activation: DesktopNotificationActivation): boolean {
     const window = this.options.getWindow();
     if (window === null || window.isDestroyed()) return false;
-    if (activation.kind === "chat-source") window.send(DESKTOP_NOTIFICATION_ACTIVATED_CHANNEL, activation.sourceRef);
+    window.send(DESKTOP_NOTIFICATION_ACTIVATED_CHANNEL, activation.sourceRef);
     window.sendActivation?.(DESKTOP_NOTIFICATION_ACTIVATED_V1_CHANNEL, {
-      kind: activation.kind,
+      kind: "chat-source",
       sourceRef: activation.sourceRef,
       ...(activation.sourceKey === undefined ? {} : { sourceKey: activation.sourceKey })
     });
@@ -557,7 +556,7 @@ export function parseDesktopNotificationSubmission(candidate: unknown): DesktopN
       "activation"
     ])
     || !boundedNonBlankString(value.idempotencyKey, 128)
-    || (value.kind !== "chat.message" && value.kind !== "team.message")
+    || value.kind !== "chat.message"
     || !positiveSafeInteger(value.occurredAtMillis)
     || !positiveSafeInteger(value.expiresAtMillis)
     || value.expiresAtMillis < value.occurredAtMillis
@@ -570,14 +569,13 @@ export function parseDesktopNotificationSubmission(candidate: unknown): DesktopN
     || activation === undefined
     || (!hasExactKeys(activation, ["kind", "sourceRef"])
       && !hasExactKeys(activation, ["kind", "sourceRef", "sourceKey"]))
-    || activation.kind !== (value.kind === "team.message" ? "team-conversation" : "chat-source")
-    || (value.kind === "team.message" && value.expiresAtMillis - value.occurredAtMillis !== 300000)
+    || activation.kind !== "chat-source"
     || !boundedString(activation.sourceRef, 4_096)
     || (activationHasSourceKey && !boundedNonBlankString(activation.sourceKey, 512))
   ) return undefined;
   return {
     idempotencyKey: value.idempotencyKey,
-    kind: value.kind,
+    kind: "chat.message",
     occurredAtMillis: value.occurredAtMillis,
     expiresAtMillis: value.expiresAtMillis,
     presentation: {
@@ -585,7 +583,7 @@ export function parseDesktopNotificationSubmission(candidate: unknown): DesktopN
       body: presentation.body
     },
     activation: {
-      kind: activation.kind as DesktopNotificationActivation["kind"],
+      kind: "chat-source",
       sourceRef: activation.sourceRef,
       ...(activationHasSourceKey ? { sourceKey: activation.sourceKey as string } : {})
     }
@@ -622,13 +620,12 @@ function notificationRequest(candidate: unknown): DesktopNotificationRequest | u
     !boundedNonBlankString(value.eventUid, 128)
     || !boundedString(value.sourceRef, 4_096)
     || (hasSourceKey && !boundedNonBlankString(value.sourceKey, 512))
-    || (value.sourceKind !== "private_chat" && value.sourceKind !== "group_chat" && value.sourceKind !== "team_conversation")
+    || (value.sourceKind !== "private_chat" && value.sourceKind !== "group_chat")
     || !boundedString(value.title, 128)
     || !boundedString(value.body, 512)
     || typeof value.eventAtMillis !== "number"
     || !Number.isSafeInteger(value.eventAtMillis)
     || value.eventAtMillis <= 0
-    || (value.sourceKind === "team_conversation" && (!positiveSafeInteger(value.expiresAtMillis) || value.expiresAtMillis - value.eventAtMillis !== 300000))
   ) return undefined;
   return {
     eventUid: value.eventUid,
@@ -637,8 +634,7 @@ function notificationRequest(candidate: unknown): DesktopNotificationRequest | u
     sourceKind: value.sourceKind,
     title: value.title,
     body: value.body,
-    eventAtMillis: value.eventAtMillis,
-    ...(value.sourceKind === "team_conversation" ? {expiresAtMillis:value.expiresAtMillis as number} : {})
+    eventAtMillis: value.eventAtMillis
   };
 }
 
