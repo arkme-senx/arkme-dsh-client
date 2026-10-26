@@ -804,9 +804,12 @@ function Assert-ProtectedObject([string]$Path,[bool]$Ancestor) {
   if (!(Test-TrustedOwnerSid ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value))) { throw 'Untrusted owner on elevated migration recovery path.' }
   $dangerous = [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
   if (!$Ancestor) { $dangerous = $dangerous -bor [Security.AccessControl.FileSystemRights]::Write }
-  foreach ($rule in $acl.Access) {
+  # Read the stored SID directly. Access exposes localized NTAccount names;
+  # converting application-package names back to SID can fail on Windows even
+  # for standard read-only ACEs (S-1-15-2-1 / S-1-15-2-2).
+  foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
     if (($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
-    $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+    $sid = $rule.IdentityReference.Value
     if ($rule.AccessControlType -eq 'Allow' -and ($rule.FileSystemRights -band $dangerous) -ne 0 -and !(Test-TrustedOwnerSid $sid)) { throw 'Untrusted write, deletion, or ACL-control permission on elevated recovery path.' }
   }
 }

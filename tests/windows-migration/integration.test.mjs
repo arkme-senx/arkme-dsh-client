@@ -2,12 +2,17 @@ import { test, expect } from 'vitest';
 import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { patchInstallSection, patchShortcutMacros } from '../../scripts/windows-migration-policy.mjs';
 const require = createRequire(import.meta.url);
 const builderRequire = createRequire(require.resolve('electron-builder'));
 const { nsisTemplatesDir } = builderRequire('app-builder-lib/out/targets/nsis/nsisUtil.js');
+const canTestProtectedAcls = process.platform === 'win32' && spawnSync(
+ path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe'),
+ ['-NoProfile','-NonInteractive','-Command','if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { exit 0 }; exit 1'],
+ { stdio: 'ignore' }
+).status === 0;
 test('patch applies to installed builder with preflight before any uninstall and verification after extraction', () => {
  const source = readFileSync(path.join(nsisTemplatesDir,'installSection.nsh'),'utf8');
  const result = patchInstallSection(source);
@@ -58,6 +63,11 @@ test.skipIf(process.platform !== 'win32')('real Windows short paths verify signe
  const shell = path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
  const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/short-path.ps1')],{encoding:'utf8'});
  expect(output).toContain('Windows short-path regression tests passed.');
+}, 60_000);
+test.skipIf(!canTestProtectedAcls)('real Windows ACLs use stored SIDs while rejecting unsafe permissions and owners', () => {
+ const shell = path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
+ const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/acl-sid.ps1')],{encoding:'utf8'});
+ expect(output).toContain('Windows ACL SID regression tests passed.');
 }, 60_000);
 test.skipIf(!process.env.ARKME_TEST_MAKENSIS)('real NSIS compiler accepts production migration macros', () => {
  const output=execFileSync(process.execPath,['scripts/windows-migration-compile-smoke.mjs'],{encoding:'utf8',env:process.env});
