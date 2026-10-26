@@ -64,6 +64,11 @@ test.skipIf(process.platform !== 'win32')('real Windows short paths verify signe
  const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/short-path.ps1')],{encoding:'utf8'});
  expect(output).toContain('Windows short-path regression tests passed.');
 }, 60_000);
+test.skipIf(process.platform !== 'win32')('Windows process inspection recovers missing paths and tolerates verified process exit', () => {
+ const shell = path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
+ const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/process-inspection.ps1')],{encoding:'utf8'});
+ expect(output).toContain('Windows process inspection regression tests passed.');
+}, 60_000);
 test.skipIf(!canTestProtectedAcls)('real Windows ACLs use stored SIDs while rejecting unsafe permissions and owners', () => {
  const shell = path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
  const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/acl-sid.ps1')],{encoding:'utf8'});
