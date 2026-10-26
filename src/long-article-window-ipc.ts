@@ -14,12 +14,12 @@ export function installLongArticleWindowIpc(options: {
   const manager = new LongArticleWindows({
     scope: options.scope,
     notify: value => { options.changed?.(); const main = options.main(); if (main && !main.isDestroyed()) main.webContents.send(prefix + "created", value); },
-    create: () => {
+    create: target => {
       const main = options.main();
       if (!main || main.isDestroyed() || !sameOrigin(main.webContents.getURL())) throw new Error("Arkme is not ready");
       const url = new URL(main.webContents.getURL()); url.search = "?arkmeLongArticle=1"; url.hash = "";
-      const window = new BrowserWindow({ width: 960, height: 800, minWidth: 640, minHeight: 520, show: false,
-        title: "Arkme", backgroundColor: "#ffffff", autoHideMenuBar: true,
+      const window = new BrowserWindow({ width: target.surface ? 1280 : 960, height: 800, minWidth: 640, minHeight: 520, show: false,
+        title: target.surface === "location" ? "Arkme · 位置" : target.surface === "library" ? "Arkme · 长文" : "Arkme", frame: true, titleBarStyle: "default", backgroundColor: "#ffffff", autoHideMenuBar: true,
         webPreferences: { session: main.webContents.session, preload: options.preload(), contextIsolation: true,
           nodeIntegration: false, sandbox: true, webSecurity: true },
       });
@@ -55,8 +55,30 @@ export function installLongArticleWindowIpc(options: {
     manager.setAccount(account as string | null); return true;
   });
   ipcMain.handle(prefix + "open", async (event, value: unknown) => {
-    if (!mainSender(event) && !(trusted(event) && options.conversationSender?.(event.sender.id))) throw new Error("Untrusted article opener");
+    if (!mainSender(event) && !(trusted(event) && options.conversationSender?.(event.sender.id)) && !(childSender(event) && manager.isActive(event.sender.id) && manager.context(event.sender.id)?.surface === "library")) throw new Error("Untrusted article opener");
     await manager.open(value); return true;
+  });
+  ipcMain.handle(prefix + "navigate", (event, value: unknown) => {
+    if (!childSender(event) || !manager.isActive(event.sender.id) || manager.context(event.sender.id)?.surface !== "location") return false;
+    if (!value || typeof value !== "object" || JSON.stringify(value).length > 65536) return false;
+    const target = value as { source?: { sourceRef?: unknown }; recordUid?: unknown; sendAtMillis?: unknown; recordOwnerUserId?: unknown };
+    if (!target.source || typeof target.source.sourceRef !== "string" || !target.source.sourceRef || typeof target.recordUid !== "string" || !target.recordUid || (target.sendAtMillis !== undefined && (typeof target.sendAtMillis !== "number" || !Number.isFinite(target.sendAtMillis)))) return false;
+    const main = options.main();
+    if (!main || main.isDestroyed() || !sameOrigin(main.webContents.getURL())) return false;
+    main.webContents.send(prefix + "navigate", { ...target, accountKey: manager.context(event.sender.id)!.accountKey });
+    if (main.isMinimized()) main.restore();
+    main.show(); main.focus();
+    return true;
+  });
+  ipcMain.handle(prefix + "changed", event => {
+    if (!childSender(event) || !manager.isActive(event.sender.id) || manager.context(event.sender.id)?.surface === "location") return false;
+    options.changed?.();
+    const main = options.main();
+    if (main && !main.isDestroyed()) main.webContents.send(prefix + "changed");
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (manager.isActive(window.webContents.id) && manager.context(window.webContents.id)?.surface === "library") window.webContents.send(prefix + "changed");
+    }
+    return true;
   });
   ipcMain.handle(prefix + "context", event => childSender(event) ? manager.context(event.sender.id) : null);
   ipcMain.handle(prefix + "ready", event => { if (childSender(event)) manager.ready(event.sender.id); });

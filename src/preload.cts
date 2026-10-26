@@ -880,8 +880,24 @@ ipcRenderer.on(articlePrefix + "request-close", () => {
   if (articleCloseListeners.size) { pendingArticleClose = false; for (const listener of articleCloseListeners) listener(); }
 });
 contextBridge.exposeInMainWorld("arkmeLongArticle", Object.freeze({
-  version: 2,
+  version: 3,
   open: (target: unknown) => ipcRenderer.invoke(articlePrefix + "open", target),
+  navigate: (target: unknown) => ipcRenderer.invoke(articlePrefix + "navigate", target),
+  changed: () => ipcRenderer.invoke(articlePrefix + "changed"),
+  onChanged: (listener: () => void) => {
+    const handler = () => listener(); ipcRenderer.on(articlePrefix + "changed", handler);
+    return () => { ipcRenderer.removeListener(articlePrefix + "changed", handler); };
+  },
+  onContextChanged: (listener: (value: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown) => listener(value);
+    ipcRenderer.on(articlePrefix + "context-changed", handler);
+    return () => { ipcRenderer.removeListener(articlePrefix + "context-changed", handler); };
+  },
+  onNavigate: (listener: (value: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown) => listener(value);
+    ipcRenderer.on(articlePrefix + "navigate", handler);
+    return () => { ipcRenderer.removeListener(articlePrefix + "navigate", handler); };
+  },
   account: (account: string | null) => ipcRenderer.invoke(articlePrefix + "account", account),
   context: () => ipcRenderer.invoke(articlePrefix + "context"),
   active: () => ipcRenderer.invoke(articlePrefix + "active"),

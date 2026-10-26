@@ -3,6 +3,9 @@ export interface LongArticleTarget {
   sourceKey: string;
   sourceRef: string;
   displayName: string;
+  surface?: "location" | "library";
+  location?: { initialDate?: { bucketDate: string; timezone: string }; initialLocation?: Record<string, unknown> };
+  autoPublish?: boolean;
   article?: { mode: "existing" | "snapshot"; item: { itemUid: string; [key: string]: unknown } };
 }
 export interface ArticleWindow {
@@ -54,13 +57,32 @@ export class LongArticleWindows {
     if (raw.accountKey !== this.account) throw new Error("Article account changed");
     const target: LongArticleTarget = { accountKey: raw.accountKey as string, sourceKey: raw.sourceKey as string,
       sourceRef: raw.sourceRef as string, displayName: raw.displayName as string };
+    if (raw.surface !== undefined) {
+      if (raw.surface !== "location" && raw.surface !== "library") throw new Error("Invalid window surface");
+      if (raw.article !== undefined || raw.autoPublish !== undefined) throw new Error("Invalid surface context");
+      target.surface = raw.surface;
+    }
+    if (raw.autoPublish !== undefined) {
+      if (typeof raw.autoPublish !== "boolean") throw new Error("Invalid compose mode");
+      target.autoPublish = raw.autoPublish;
+    }
+    if (raw.location !== undefined) {
+      if (target.surface !== "location" || !raw.location || typeof raw.location !== "object" || JSON.stringify(raw.location).length > 65536) throw new Error("Invalid location context");
+      const location = raw.location as NonNullable<LongArticleTarget["location"]>;
+      if (location.initialDate && (!/^\d{4}-\d{2}-\d{2}$/.test(location.initialDate.bucketDate) || typeof location.initialDate.timezone !== "string" || location.initialDate.timezone.length > 128)) throw new Error("Invalid location date");
+      target.location = structuredClone(location);
+    }
     if (raw.article !== undefined) {
       const article = raw.article as NonNullable<LongArticleTarget["article"]>;
       if (!article || !["existing", "snapshot"].includes(article.mode) || !article.item || typeof article.item.itemUid !== "string" || !article.item.itemUid.trim() || JSON.stringify(article).length > 2_000_000) throw new Error("Invalid article context");
       target.article = structuredClone(article);
     }
     for (const entry of this.entries.values()) {
-      if (entry.target.article?.mode === target.article?.mode && entry.target.article?.item.itemUid === target.article?.item.itemUid && this.isActive(entry.window.id) && entry.target.sourceKey === target.sourceKey) {
+      if (entry.target.surface === target.surface && entry.target.autoPublish === target.autoPublish && entry.target.article?.mode === target.article?.mode && entry.target.article?.item.itemUid === target.article?.item.itemUid && this.isActive(entry.window.id) && entry.target.sourceKey === target.sourceKey) {
+        if (target.surface === "location") {
+          entry.target = target;
+          entry.window.send("context-changed", target);
+        }
         if (entry.window.isMinimized()) entry.window.restore();
         entry.window.show(); entry.window.focus(); return;
       }
@@ -87,7 +109,7 @@ export class LongArticleWindows {
   }
   created(id: number, item: unknown): boolean {
     const entry = this.entries.get(id);
-    if (!entry || !this.isActive(id) || entry.published || !item || typeof item !== "object"
+    if (!entry || entry.target.surface || !this.isActive(id) || entry.published || !item || typeof item !== "object"
       || typeof (item as { itemUid?: unknown }).itemUid !== "string") return false;
     if (entry.target.article && (entry.target.article.mode === "snapshot" || (item as { itemUid: string }).itemUid !== entry.target.article.item.itemUid)) return false;
     entry.published = true;

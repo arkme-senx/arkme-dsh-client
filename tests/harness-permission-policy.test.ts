@@ -97,6 +97,7 @@ type RequestHandler = Exclude<Parameters<Session["setPermissionRequestHandler"]>
 function installedPolicy(options: {
   activeHarnessOrigin?: string | null;
   locked?: () => boolean;
+  locationWindow?: (id: number) => boolean;
   currentUrl?: string;
   diagnostic?: Parameters<typeof installHarnessPermissionPolicy>[1]["diagnostic"];
 } = {}): {
@@ -124,6 +125,7 @@ function installedPolicy(options: {
       ? harnessOrigin
       : options.activeHarnessOrigin,
     getMainWebContentsId: () => 7,
+    ...(options.locationWindow ? { isLocationWebContents: options.locationWindow } : {}),
     ...(options.locked === undefined ? {} : { isDeviceLocked: options.locked }),
     ...(options.diagnostic === undefined ? {} : { diagnostic: options.diagnostic })
   });
@@ -274,4 +276,16 @@ describe("installHarnessPermissionPolicy", () => {
       requestingUrl: `${harnessOrigin}/chat/private/1`
     })).toBe(true);
   });
+});
+
+
+test("grants geolocation to a registered location top frame and rejects stale windows and subframes", () => {
+  let active = true;
+  const { check, webContents } = installedPolicy({ locationWindow: id => active && id === 9 });
+  const child = { ...webContents, id: 9 } as WebContents;
+  expect(check(child, "geolocation", harnessOrigin, { isMainFrame: true, requestingUrl: harnessOrigin })).toBe(true);
+  expect(check(child, "geolocation", harnessOrigin, { isMainFrame: false, requestingUrl: harnessOrigin })).toBe(false);
+  expect(check(child, "geolocation", "https://example.com", { isMainFrame: true })).toBe(false);
+  active = false;
+  expect(check(child, "geolocation", harnessOrigin, { isMainFrame: true, requestingUrl: harnessOrigin })).toBe(false);
 });

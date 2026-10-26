@@ -156,6 +156,7 @@ export interface DesktopLocationIpcContext {
     url: string;
     webContentsId: number;
   } | null;
+  getLocationWindow?(id: number): ReturnType<DesktopLocationIpcContext["getMainWindow"]>;
   getService(): DesktopLocationPermissionService | null;
   openSettings(): Promise<boolean>;
   diagnostic?(event: "ipc-denied" | "open-settings-failed", details?: unknown): void;
@@ -206,7 +207,7 @@ function isCurrentHarnessSender(
   requireFocus: boolean
 ): boolean {
   const harnessOrigin = localHarnessOrigin(context.getActiveHarnessOrigin());
-  const window = context.getMainWindow();
+  const window = context.getLocationWindow?.(event.sender.id) ?? context.getMainWindow();
   const allowed = harnessOrigin !== null
     && window !== null
     && !window.destroyed

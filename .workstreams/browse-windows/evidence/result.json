@@ -1,0 +1,20 @@
+{
+  "checks": [
+    "library native window, full-size surface, repeat opens focus the same window",
+    "library opens a dedicated article editor with directory and outline",
+    "existing article automatically publishes changes",
+    "failed close save retains article window and a later retry closes safely",
+    "library creation retains automatic publication mode",
+    "location window is independent and a calendar request reuses it with the new day",
+    "location record navigation reaches and focuses the main window",
+    "account invalidation closes both browser surfaces"
+  ],
+  "screenshots": [
+    "/Users/zhou/Desktop/project/jotmo/worktree/location-article-windows-20261026/arkme-dsh-client/.workstreams/browse-windows/evidence/library-light.png",
+    "/Users/zhou/Desktop/project/jotmo/worktree/location-article-windows-20261026/arkme-dsh-client/.workstreams/browse-windows/evidence/library-dark.png",
+    "/Users/zhou/Desktop/project/jotmo/worktree/location-article-windows-20261026/arkme-dsh-client/.workstreams/browse-windows/evidence/library-article.png",
+    "/Users/zhou/Desktop/project/jotmo/worktree/location-article-windows-20261026/arkme-dsh-client/.workstreams/browse-windows/evidence/location-light.png",
+    "/Users/zhou/Desktop/project/jotmo/worktree/location-article-windows-20261026/arkme-dsh-client/.workstreams/browse-windows/evidence/location-dark.png"
+  ],
+  "errors": []
+}
