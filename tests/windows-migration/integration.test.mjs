@@ -54,6 +54,11 @@ test.skipIf(process.platform !== 'win32' && !process.env.ARKME_TEST_PWSH)('Windo
  const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/transaction.ps1')],{encoding:'utf8'});
  expect(output).toContain('transaction tests passed');
 });
+test.skipIf(process.platform !== 'win32')('real Windows short paths verify signed payloads without weakening path safety', () => {
+ const shell = path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
+ const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/short-path.ps1')],{encoding:'utf8'});
+ expect(output).toContain('Windows short-path regression tests passed.');
+}, 60_000);
 test.skipIf(!process.env.ARKME_TEST_MAKENSIS)('real NSIS compiler accepts production migration macros', () => {
  const output=execFileSync(process.execPath,['scripts/windows-migration-compile-smoke.mjs'],{encoding:'utf8',env:process.env});
  expect(output).toContain('Processed 1 file');
