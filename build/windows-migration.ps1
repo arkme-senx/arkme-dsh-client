@@ -373,18 +373,78 @@ function Invoke-MigrationExit([scriptblock]$GetProcesses,[scriptblock]$Confirm,[
     $retry=$true
   }
 }
+function Initialize-MigrationProcessNative {
+  if ('JiwoMigrationProcess' -as [type]) { return }
+  Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+using System.Text;
+public sealed class JiwoMigrationProcess : IDisposable {
+  IntPtr handle;
+  public string Path { get; private set; }
+  public long CreationTicks { get; private set; }
+  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,int pid);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool QueryFullProcessImageName(IntPtr p,uint flags,StringBuilder path,ref int size);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetProcessTimes(IntPtr p,out long created,out long exited,out long kernel,out long user);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr p);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr p,uint access,out IntPtr token);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetTokenInformation(IntPtr token,int kind,IntPtr data,int size,out int needed);
+  public bool HasExited {
+    get { long c,e,k,u; if(!GetProcessTimes(handle,out c,out e,out k,out u))throw new Win32Exception();return e!=0; }
+  }
+  public static JiwoMigrationProcess Open(int pid) {
+    var h=OpenProcess(0x1000,false,pid);
+    if(h==IntPtr.Zero) { int error=Marshal.GetLastWin32Error();if(error==87 && pid>0)return null;throw new Win32Exception(error,"Cannot verify a running app/kernel process."); }
+    var result=new JiwoMigrationProcess();result.handle=h;
+    try {
+      long c,e,k,u;
+      if(!GetProcessTimes(h,out c,out e,out k,out u))throw new Win32Exception();
+      if(e!=0){result.Dispose();return null;}
+      result.CreationTicks=DateTime.FromFileTimeUtc(c).Ticks;
+      var path=new StringBuilder(32768);int size=path.Capacity;
+      if(!QueryFullProcessImageName(h,0,path,ref size))throw new Win32Exception();
+      result.Path=path.ToString();return result;
+    } catch { bool exited=false;try{exited=result.HasExited;}finally{result.Dispose();}if(exited)return null;throw; }
+  }
+  public string OwnerSid() {
+    IntPtr token=IntPtr.Zero, data=IntPtr.Zero;
+    try {
+      if(!OpenProcessToken(handle,8,out token))throw new Win32Exception();
+      int needed;GetTokenInformation(token,1,IntPtr.Zero,0,out needed);
+      if(needed<=0)throw new Win32Exception();
+      data=Marshal.AllocHGlobal(needed);
+      if(!GetTokenInformation(token,1,data,needed,out needed))throw new Win32Exception();
+      return new SecurityIdentifier(Marshal.ReadIntPtr(data)).Value;
+    } finally {if(data!=IntPtr.Zero)Marshal.FreeHGlobal(data);if(token!=IntPtr.Zero)CloseHandle(token);}
+  }
+  public void Dispose() {if(handle!=IntPtr.Zero){CloseHandle(handle);handle=IntPtr.Zero;}}
+}
+'@
+}
 function Get-MigrationProcesses([string[]]$Roots) {
+  Initialize-MigrationProcessNative
+  $currentSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
   foreach($item in @(Get-CimInstance Win32_Process -Filter "Name = 'jotmo.exe' OR Name = 'Jotmo-Kernel.exe' OR Name = 'arkme.exe' OR Name = 'node.exe'")) {
     if($item.Name -ieq 'node.exe' -and !(Test-ArkmeNode $item.ExecutablePath $item.CommandLine $Roots)){continue}
-    if(!$item.ExecutablePath){throw 'Cannot identify a running app/kernel. Exit it before installing.'}
-    $belongs=$item.Name -ieq 'node.exe' -and (Test-ArkmeNode $item.ExecutablePath $item.CommandLine $Roots)
-    foreach($root in $Roots){if($item.ExecutablePath.StartsWith($root.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)){$belongs=$true}}
-    if($belongs){
-      $owner=Invoke-CimMethod -InputObject $item -MethodName GetOwnerSid -ErrorAction Stop
-      $currentSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-      if($owner.ReturnValue -ne 0 -or $owner.Sid -ne $currentSid){throw 'A verified app is running for another Windows user, or its owner cannot be verified. Exit that session normally before migration.'}
-      $item
-    } elseif($item.Name -ieq 'Jotmo-Kernel.exe'){throw 'A kernel is running outside verified install directories. Exit it normally before migration.'}
+    # Hold one handle across image/token reads: an exited PID must never resolve
+    # to a replacement process. Only proven termination may be ignored.
+    $process=[JiwoMigrationProcess]::Open([int]$item.ProcessId)
+    if(!$process){continue}
+    try {
+      if(!$item.CreationDate -or [Math]::Abs($process.CreationTicks-$item.CreationDate.ToUniversalTime().Ticks) -ge 10){throw 'A running process changed during verification. Retry installation after exiting the application normally.'}
+      $processPath=$process.Path
+      $belongs=$item.Name -ieq 'node.exe' -and (Test-ArkmeNode $processPath $item.CommandLine $Roots)
+      foreach($root in $Roots){if($processPath.StartsWith($root.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)){$belongs=$true}}
+      if($belongs){
+        try { $ownerSid=$process.OwnerSid() }
+        catch { if($process.HasExited){continue};throw }
+        if($process.HasExited){continue}
+        if($ownerSid -ne $currentSid){throw 'A verified app is running for another Windows user, or its owner cannot be verified. Exit that session normally before migration.'}
+        [pscustomobject]@{Name=$item.Name;ProcessId=$item.ProcessId;ExecutablePath=$processPath}
+      } elseif($item.Name -ieq 'Jotmo-Kernel.exe'){throw 'A kernel is running outside verified install directories. Exit it normally before migration.'}
+    } finally { $process.Dispose() }
   }
 }
 function Stop-Normally([string[]]$Roots) {
@@ -804,9 +864,12 @@ function Assert-ProtectedObject([string]$Path,[bool]$Ancestor) {
   if (!(Test-TrustedOwnerSid ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value))) { throw 'Untrusted owner on elevated migration recovery path.' }
   $dangerous = [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
   if (!$Ancestor) { $dangerous = $dangerous -bor [Security.AccessControl.FileSystemRights]::Write }
-  foreach ($rule in $acl.Access) {
+  # Read the stored SID directly. Access exposes localized NTAccount names;
+  # converting application-package names back to SID can fail on Windows even
+  # for standard read-only ACEs (S-1-15-2-1 / S-1-15-2-2).
+  foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
     if (($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) { continue }
-    $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+    $sid = $rule.IdentityReference.Value
     if ($rule.AccessControlType -eq 'Allow' -and ($rule.FileSystemRights -band $dangerous) -ne 0 -and !(Test-TrustedOwnerSid $sid)) { throw 'Untrusted write, deletion, or ACL-control permission on elevated recovery path.' }
   }
 }
