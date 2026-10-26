@@ -329,6 +329,168 @@ describe("ElectronRuntimeManager", () => {
     expect(manifestFetches).toBe(0);
   });
 
+  test("keeps an existing candidate when the feed publishes another newer Release Set", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-pending-newer-"));
+    temporaryDirectories.push(root);
+    const active = release("active", 1, 1);
+    const pending = release("pending", 1, 2);
+    const newer = release("newer", 1, 3);
+    let latest = active;
+    const installed: string[] = [];
+    const manager = createManager(root, async () => latest, installed);
+    await manager.prepareForLaunch();
+    await manager.completeCandidate();
+    latest = pending;
+    await manager.stageLatest();
+    const before = await readFile(path.join(root, "state.json"), "utf8");
+
+    latest = newer;
+    await expect(manager.stageLatest()).resolves.toBe("staged");
+    expect(await readFile(path.join(root, "state.json"), "utf8")).toBe(before);
+    expect(installed).toEqual([active.releaseId, pending.releaseId]);
+
+    await manager.prepareForLaunch();
+    await manager.completeCandidate();
+    await expect(manager.stageLatest()).resolves.toBe("staged");
+    expect(JSON.parse(await readFile(path.join(root, "state.json"), "utf8"))).toMatchObject({
+      activeReleaseId: pending.releaseId,
+      previousReleaseId: active.releaseId,
+      candidateReleaseId: newer.releaseId
+    });
+  });
+
+  test("does not check for updates during health validation after launch preparation returns", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-health-validation-"));
+    temporaryDirectories.push(root);
+    const active = release("active", 1, 1);
+    const pending = release("pending", 1, 2);
+    const newer = release("newer", 1, 3);
+    let latest = active;
+    const fetchManifest = vi.fn(async () => latest);
+    const manager = createManager(root, fetchManifest);
+    await manager.prepareForLaunch();
+    await manager.completeCandidate();
+    latest = pending;
+    await manager.stageLatest();
+    await expect(manager.prepareForLaunch()).resolves.toMatchObject({ probation: true });
+    const before = await readFile(path.join(root, "state.json"), "utf8");
+    fetchManifest.mockClear();
+    latest = newer;
+
+    await expect(manager.stageLatestIfStale(0)).resolves.toBe("staged");
+    await expect(manager.stageLatest()).resolves.toBe("staged");
+    expect(fetchManifest).not.toHaveBeenCalled();
+    expect(await readFile(path.join(root, "state.json"), "utf8")).toBe(before);
+  });
+
+  test.each(["complete", "rollback"] as const)("checks immediately after candidate %s when health validation skipped the previous check", async outcome => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-health-skip-cooldown-"));
+    temporaryDirectories.push(root);
+    const active = release("active", 1, 1);
+    const pending = release("pending", 1, 2);
+    const newer = release("newer", 1, 3);
+    let latest = active;
+    let nowMillis = Date.parse("2026-10-26T00:00:00Z");
+    const fetchManifest = vi.fn(async () => latest);
+    const manager = new ElectronRuntimeManager({
+      root, environment: "prod", manifestContext, fetchManifest,
+      installRelease: installFixture, validateRelease: async () => undefined,
+      now: () => new Date(nowMillis)
+    });
+    await manager.prepareForLaunch();
+    await manager.completeCandidate();
+    latest = pending;
+    await manager.stageLatest();
+    await manager.prepareForLaunch();
+    nowMillis += AUTOMATIC_UPDATE_CHECK_INTERVAL_MS;
+    latest = newer;
+    fetchManifest.mockClear();
+
+    await expect(manager.stageLatestIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS)).resolves.toBe("staged");
+    nowMillis += 1000;
+    await expect(manager.stageLatestIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS)).resolves.toBe("staged");
+    expect(fetchManifest).not.toHaveBeenCalled();
+    if (outcome === "complete") await manager.completeCandidate();
+    else await manager.rollbackCandidate({ phase: "plugin-health", scope: "unknown", code: "HEALTH_FAILED", reason: "health check failed" });
+
+    nowMillis += 1000;
+    await expect(manager.stageLatestIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS)).resolves.toBe("staged");
+    expect(fetchManifest).toHaveBeenCalledOnce();
+    expect(JSON.parse(await readFile(path.join(root, "state.json"), "utf8"))).toMatchObject({
+      activeReleaseId: outcome === "complete" ? pending.releaseId : active.releaseId,
+      candidateReleaseId: newer.releaseId
+    });
+    // A real request still starts the normal cooldown.
+    await expect(manager.stageLatestIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS)).resolves.toBe("throttled");
+    expect(fetchManifest).toHaveBeenCalledOnce();
+  });
+
+  test.each(["interrupted", "corrupt"] as const)("can update after recovering a candidate whose launch was %s", async outcome => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-candidate-recovery-update-"));
+    temporaryDirectories.push(root);
+    const active = release("active", 1, 1);
+    const pending = release("pending", 1, 2);
+    const newer = release("newer", 1, 3);
+    let latest = active;
+    const manager = createManager(root, async () => latest);
+    await manager.prepareForLaunch();
+    await manager.completeCandidate();
+    latest = pending;
+    await manager.stageLatest();
+    await manager.prepareForLaunch();
+    if (outcome === "corrupt") await rm(dshEntry(root, pending.releaseId));
+
+    const restarted = createManager(root, async () => latest);
+    await expect(restarted.prepareForLaunch()).resolves.toMatchObject({ releaseId: active.releaseId, probation: false });
+    latest = newer;
+    await expect(restarted.stageLatestIfStale(AUTOMATIC_UPDATE_CHECK_INTERVAL_MS)).resolves.toBe("staged");
+    await expect(restarted.prepareForLaunch()).resolves.toMatchObject({ releaseId: newer.releaseId, probation: true });
+    await restarted.completeCandidate();
+    expect(JSON.parse(await readFile(path.join(root, "state.json"), "utf8"))).toMatchObject({
+      activeReleaseId: newer.releaseId, previousReleaseId: active.releaseId
+    });
+  });
+
+  test.each(["complete", "rollback"] as const)("does not overwrite candidate %s with an update check's older snapshot", async outcome => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-candidate-stale-snapshot-"));
+    temporaryDirectories.push(root);
+    const active = release("active", 1, 1);
+    const pending = release("pending", 1, 2);
+    const newer = release("newer", 1, 3);
+    let latest = active;
+    let finishFetch: ((manifest: ElectronRuntimeManifest) => void) | undefined;
+    let pauseFetch = false;
+    const installed: string[] = [];
+    const manager = createManager(root, async () => {
+      if (pauseFetch) return await new Promise<ElectronRuntimeManifest>(resolve => { finishFetch = resolve; });
+      return latest;
+    }, installed);
+    await manager.prepareForLaunch();
+    await manager.completeCandidate();
+    latest = pending;
+    await manager.stageLatest();
+
+    pauseFetch = true;
+    const checking = manager.stageLatest();
+    await vi.waitFor(() => expect(finishFetch).toBeDefined());
+    await manager.prepareForLaunch();
+    if (outcome === "complete") await manager.completeCandidate();
+    else await manager.rollbackCandidate({ phase: "plugin-health", scope: "unknown", code: "HEALTH_FAILED", reason: "health check failed" });
+    const settled = await readFile(path.join(root, "state.json"), "utf8");
+    finishFetch?.(newer);
+
+    await expect(checking).resolves.toBe("staged");
+    expect(await readFile(path.join(root, "state.json"), "utf8")).toBe(settled);
+    expect(installed).toEqual([active.releaseId, pending.releaseId]);
+    pauseFetch = false;
+    latest = newer;
+    await expect(manager.stageLatest()).resolves.toBe("staged");
+    expect(JSON.parse(await readFile(path.join(root, "state.json"), "utf8"))).toMatchObject({
+      activeReleaseId: outcome === "complete" ? pending.releaseId : active.releaseId,
+      candidateReleaseId: newer.releaseId
+    });
+  });
+
   test("counts a failed Release Set request toward the cooldown", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "electron-runtime-failed-cooldown-"));
     temporaryDirectories.push(root);
