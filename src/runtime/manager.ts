@@ -280,8 +280,15 @@ export class ElectronRuntimeManager {
         return Promise.resolve("throttled");
       }
     }
-    this.lastManifestCheckStartedAtMillis = nowMillis;
-    return this.stageLatest(progress);
+    const previousCheckStartedAtMillis = this.lastManifestCheckStartedAtMillis;
+    return this.stageLatest(progress).catch(error => {
+      // Failed local preparation must still be throttled. Successful skips,
+      // however, are not requests and must not postpone the next real check.
+      if (this.lastManifestCheckStartedAtMillis === previousCheckStartedAtMillis) {
+        this.lastManifestCheckStartedAtMillis = nowMillis;
+      }
+      throw error;
+    });
   }
 
   private async performStageLatest(
@@ -291,6 +298,9 @@ export class ElectronRuntimeManager {
     const state = await this.readState();
     await this.persistMigratedStateIfNeeded(state);
     if (state.activeReleaseId === undefined) return "no-active";
+    // Launch preparation ends before Harness/plugin health validation. Until
+    // that trial settles, background checks must not validate or mutate it.
+    if (state.candidateAttemptedAt !== undefined) return "staged";
     let baseline = await this.resolveRelease(state.activeReleaseId, false);
     if (state.candidateReleaseId !== undefined) {
       try {
@@ -306,7 +316,10 @@ export class ElectronRuntimeManager {
     if (decision !== "newer") return decision;
     if (state.badReleases.some(item => item.releaseId === candidate.releaseId)) return "bad";
     if (state.deferredReleases.some(item => item.releaseId === candidate.releaseId)) return "deferred";
-    if (state.candidateReleaseId === candidate.releaseId) return "staged";
+    // Preserve an existing candidate even if the feed has advanced. This state
+    // snapshot may also predate a concurrent commit/rollback; never write it
+    // back or install a second candidate. A later check uses the settled state.
+    if (state.candidateReleaseId !== undefined) return "staged";
     await this.install(candidate, progress);
     beginRuntimeCandidate(state, candidate.releaseId);
     await this.writeState(state);
