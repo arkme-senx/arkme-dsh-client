@@ -80,8 +80,42 @@ function Test-ArkmeNode([string]$ExecutablePath,[string]$CommandLine,[string[]]$
   foreach ($root in $Roots) { if ($ExecutablePath.StartsWith($root.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) { return $true } }
   return ($ExecutablePath -match '(?i)\\Arkme Harness\\' -or $CommandLine -match '(?i)\\Arkme Harness\\')
 }
+function Expand-LocalShortPath([string]$Path) {
+  # NSIS may supply an 8.3 TEMP/profile path. Expand the existing ancestor first,
+  # including when the installation/report directory has not been created yet.
+  if (!('JiwoMigration.NativePath' -as [type])) {
+    Add-Type -TypeDefinition @'
+namespace JiwoMigration {
+  public static class NativePath {
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    public static extern uint GetLongPathNameW(string path, System.Text.StringBuilder result, uint capacity);
+  }
+}
+'@
+  }
+  $existing=$Path
+  $suffix=New-Object 'System.Collections.Generic.List[string]'
+  while (!(Test-Path -LiteralPath $existing)) {
+    $parent=[IO.Path]::GetDirectoryName($existing)
+    if (!$parent -or $parent -eq $existing) { throw 'Cannot resolve short install path.' }
+    $suffix.Insert(0,[IO.Path]::GetFileName($existing))
+    $existing=$parent
+  }
+  $buffer=New-Object Text.StringBuilder 32768
+  $length=[JiwoMigration.NativePath]::GetLongPathNameW($existing,$buffer,[uint32]$buffer.Capacity)
+  if ($length -eq 0 -or $length -ge $buffer.Capacity) { throw 'Cannot resolve short install path.' }
+  $expanded=$buffer.ToString()
+  foreach ($part in $suffix) { $expanded=Join-Path $expanded $part }
+  return $expanded
+}
 function Assert-LocalPath([string]$Path) {
-  if ($Path -notmatch '^[A-Za-z]:\\' -or $Path.Contains('..') -or $Path.Substring(2).Contains(':') -or $Path -match '(^|\\)[^\\]*~[0-9]+(\\|$)' -or $Path -match '(^|\\)[^\\]*[. ](\\|$)') { throw 'Unsupported install path.' }
+  if ($Path -notmatch '^[A-Za-z]:\\' -or $Path.Contains('..') -or $Path.Substring(2).Contains(':') -or $Path -match '(^|\\)[^\\]*[. ](\\|$)') { throw 'Unsupported install path.' }
+  if ($Path -match '(^|\\)[^\\]*~[0-9]+(\\|$)') {
+    $Path=Expand-LocalShortPath $Path
+    # An unresolved/literal short-looking name is still unsupported. Do not turn
+    # normalization into permission to bypass the path or reparse-point checks.
+    if ($Path -match '(^|\\)[^\\]*~[0-9]+(\\|$)' -or $Path -notmatch '^[A-Za-z]:\\' -or $Path.Contains('..') -or $Path.Substring(2).Contains(':') -or $Path -match '(^|\\)[^\\]*[. ](\\|$)') { throw 'Unsupported install path.' }
+  }
   $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
   if ($full.Length -lt 4) { throw 'A drive root cannot be an install directory.' }
   $cursor = $full
@@ -96,7 +130,7 @@ function Assert-LocalPath([string]$Path) {
   return $full
 }
 function Assert-Publisher([string]$File) {
-  $null = Assert-LocalPath $File
+  $File = Assert-LocalPath $File
   $signature = Get-AuthenticodeSignature -LiteralPath $File
   if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or
       $signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) -cne $Publisher) {
