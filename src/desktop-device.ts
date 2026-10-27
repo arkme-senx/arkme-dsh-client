@@ -21,6 +21,24 @@ async function readSystemText(file: string, args: string[]): Promise<string> {
   } catch { return ""; }
 }
 
+export async function readDesktopComputerName(
+  platform = process.platform,
+  readText = readSystemText,
+  fallbackName = hostname,
+): Promise<string> {
+  const systemName = platform === "darwin"
+    ? await readText("/usr/sbin/scutil", ["--get", "ComputerName"]).catch(() => "")
+    : "";
+  const name = systemName.trim() || fallbackName().trim();
+  let result = "";
+  for (const character of name) {
+    // Device registration accepts 120 UTF-8 bytes; do not split Chinese or emoji.
+    if (result.length + character.length > 80 || Buffer.byteLength(result + character, "utf8") > 120) break;
+    result += character;
+  }
+  return result;
+}
+
 export function macNetworkType(route: string, ports: string): DesktopNetworkType {
   const device = /^\s*interface:\s*(\S+)\s*$/m.exec(route)?.[1];
   if (!device) return "unknown";
@@ -46,10 +64,10 @@ export function createDesktopDeviceReader(
   let computerName: Promise<string> | undefined;
   return () => pending ??= (async (): Promise<DesktopDeviceSnapshot> => {
     if (platform !== "darwin") return {
-      schemaVersion: 1, computerName: fallbackName().slice(0, 80), networkType: "unknown",
+      schemaVersion: 1, computerName: await readDesktopComputerName(platform, readText, fallbackName), networkType: "unknown",
     };
     const [name, route, ports] = await Promise.all([
-      computerName ??= readText("/usr/sbin/scutil", ["--get", "ComputerName"]),
+      computerName ??= readDesktopComputerName(platform, readText, fallbackName),
       readText("/sbin/route", ["-n", "get", "default"]),
       readText("/usr/sbin/networksetup", ["-listallhardwareports"]),
     ]);
@@ -59,7 +77,7 @@ export function createDesktopDeviceReader(
     return {
       schemaVersion: 1,
       ...(wifiSsid === undefined ? {} : { wifiSsid }),
-      computerName: (name.trim() || fallbackName()).slice(0, 80),
+      computerName: name,
       networkType,
     };
   })().finally(() => { pending = undefined; });

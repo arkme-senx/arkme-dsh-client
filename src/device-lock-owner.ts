@@ -12,7 +12,7 @@ interface Options {
   store: DeviceLockStore;
   baseURL: string;
   platform: "macos" | "windows";
-  name: string;
+  name: string | Promise<string>;
   authenticate(signal: AbortSignal): Promise<boolean>;
   available(): Promise<boolean>;
   changed(snapshot: DeviceLockSnapshot): void;
@@ -154,7 +154,9 @@ export class DesktopDeviceLockOwner {
         }
         binding = pending!; previous = pending!.previousSessionId!;
       }
-      const device = await this.post<Device>("register", { platform: this.options.platform, name: this.options.name, capability: "unknown",
+      const name = await this.options.name;
+      assertCurrent();
+      const device = await this.post<Device>("register", { platform: this.options.platform, name, capability: "unknown",
         session_id: binding!.sessionId, previous_session_id: previous });
       assertCurrent();
       if (device.session_id !== binding!.sessionId || device.client_id !== claims.client_id) throw new Error("设备会话校验失败");

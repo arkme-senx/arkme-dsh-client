@@ -319,6 +319,28 @@ describe("device instance registration without bearer session claims", () => {
       }) as typeof fetch };
     return { options, calls, disk: () => disk, loseRegister: () => { failAfterRegister = true; }, replace: () => { current = "2_newer_instance_00001"; } };
   }
+  it("registers the resolved computer name without converting Chinese or spaces", async () => {
+    const f = registrationFixture();
+    const owner = new DesktopDeviceLockOwner({ ...f.options, name: Promise.resolve("张三的 MacBook Pro") });
+    await owner.initialize();
+    await owner.bind(token, loginKey);
+    expect(f.calls.find(call => call.route === "register")?.body.name).toBe("张三的 MacBook Pro");
+    owner.close();
+  });
+  it("does not register after closing while the computer name is still loading", async () => {
+    const f = registrationFixture();
+    let resolveName!: (name: string) => void;
+    let readingName = false;
+    const name = new Promise<string>(resolve => { resolveName = resolve; });
+    const owner = new DesktopDeviceLockOwner({ ...f.options, get name() { readingName = true; return name; } });
+    await owner.initialize();
+    const binding = owner.bind(token, loginKey);
+    await vi.waitFor(() => expect(readingName).toBe(true));
+    owner.close();
+    resolveName("张三的 MacBook Pro");
+    await expect(binding).rejects.toThrow("登录状态已变化");
+    expect(f.calls.filter(call => call.route === "register")).toHaveLength(0);
+  });
   it("clears local protection and pending registration when logout precedes registration success", async () => {
     const f = registrationFixture(); f.loseRegister();
     const owner = new DesktopDeviceLockOwner(f.options);
