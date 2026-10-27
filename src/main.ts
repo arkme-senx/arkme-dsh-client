@@ -1,3 +1,5 @@
+import { isOptionalExtensionProfileFailure } from "./optional-extension-recovery.js";
+import { profileCoreRecoveryKey } from "./profile-core-compatibility.js";
 import { DesktopDeviceLockOwner } from "./device-lock-owner.js";
 import { FileDeviceLockStore } from "./device-lock-store.js";
 import { DeviceLockSurfaces } from "./device-lock-surfaces.js";
@@ -1097,15 +1099,17 @@ async function launchHarnessRuntime(
       const failedReleaseId = runtime.release.releaseId;
       const reason = error instanceof Error ? error.message : String(error);
       const artifactFailure = isDeterministicRuntimeArtifactError(error);
+      const profileFailure = !artifactFailure && !(error instanceof RuntimePluginReadinessError)
+        && await isOptionalExtensionProfileFailure(paths.dshHome, error);
       const fallback = artifactFailure
         ? await runtimeManager.quarantineCandidate({
           code: runtimeArtifactFailureCode(error),
           reason
         })
         : await runtimeManager.rollbackCandidate({
-          phase: error instanceof RuntimePluginReadinessError ? "plugin-health" : "unknown",
-          scope: error instanceof RuntimePluginReadinessError ? "artifact" : "unknown",
-          code: error instanceof RuntimePluginReadinessError ? error.code : "RUNTIME_START_FAILED",
+          phase: error instanceof RuntimePluginReadinessError ? "plugin-health" : "harness-start",
+          scope: error instanceof RuntimePluginReadinessError ? "artifact" : profileFailure ? "profile" : "unknown",
+          code: error instanceof RuntimePluginReadinessError ? error.code : profileFailure ? "PROFILE_EXTENSION_START_FAILED" : "RUNTIME_START_FAILED",
           reason
         });
       if (fallback === undefined) {
@@ -1173,6 +1177,7 @@ async function resolveLaunchRuntime(userDataPath: string, shellVersionCode: numb
   runtimeManager = new ElectronRuntimeManager({
     root,
     cacheEpoch: RUNTIME_CACHE_EPOCH,
+    profileRecoveryKey: () => profileCoreRecoveryKey(userDataPath),
     environment: runtimeEnvironment,
     manifestContext: {
       os: process.platform === "win32" ? "windows" : process.platform,
@@ -1293,6 +1298,11 @@ async function initializeHarnessRuntime(
   onProfileTransaction(provisionedProfile.runtimeTransaction);
   logDiagnostic("profile-ready", { dshHome: paths.dshHome, source: runtime.runtimeManaged ? "release-set" : "development" });
   const supervisor = new HarnessProcessSupervisor({
+    ...(runtime.runtimeManaged ? {coreDependencyPolicy: {
+      modulePath: path.join(path.dirname(resolveArkmePreloadPath(
+        moduleDirectory, app.isPackaged, process.resourcesPath
+      )), "harness-core-dependencies.js")
+    }} : {}),
     processGuard: {
       modulePath: path.join(path.dirname(resolveArkmePreloadPath(
         moduleDirectory, app.isPackaged, process.resourcesPath
