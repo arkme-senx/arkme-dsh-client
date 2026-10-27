@@ -178,7 +178,7 @@ describe("application manifest", () => {
       NSLocationWhenInUseUsageDescription: "Arkme 仅在你开启位置记录后，将当前位置写入你发送的快记快照。"
     });
     expect(manifest.build.mac.entitlements).toBe("build/entitlements.mac.plist");
-    expect(manifest.build.mac.entitlementsInherit).toBeUndefined();
+    expect(manifest.build.mac.entitlementsInherit).toBe("build/entitlements.mac.inherit.plist");
     const entitlements = await readFile(
       path.join(projectRoot, "build", "entitlements.mac.plist"),
       "utf8"
@@ -187,10 +187,16 @@ describe("application manifest", () => {
       "com.apple.security.cs.allow-jit",
       "com.apple.security.cs.allow-unsigned-executable-memory",
       "com.apple.security.cs.disable-library-validation",
+      "com.apple.security.device.audio-input",
       "com.apple.security.personal-information.location"
     ]) {
       expect(entitlements).toContain(`<key>${key}</key>\n  <true/>`);
     }
+    const inherited = await readFile(path.join(projectRoot, manifest.build.mac.entitlementsInherit!), "utf8");
+    for (const key of ["com.apple.security.cs.allow-jit", "com.apple.security.cs.allow-unsigned-executable-memory", "com.apple.security.cs.disable-library-validation", "com.apple.security.device.audio-input"]) {
+      expect(inherited).toContain(`<key>${key}</key>\n  <true/>`);
+    }
+    expect(inherited).not.toContain("com.apple.security.personal-information.location");
   });
 
   test("pins the browser-process CoreLocation FFI as a production dependency", async () => {
