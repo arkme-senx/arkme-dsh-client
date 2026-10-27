@@ -2,7 +2,6 @@ import { DesktopDeviceLockOwner } from "./device-lock-owner.js";
 import { FileDeviceLockStore } from "./device-lock-store.js";
 import { DeviceLockSurfaces } from "./device-lock-surfaces.js";
 import { deviceAuthExecutable, runDeviceAuthentication } from "./device-lock-native-auth.js";
-import { hostname } from "node:os";
 import { StartupDiagnostics } from "./startup-diagnostics.js";
 import { release as osRelease } from "node:os";
 import { pluginHostPolicy } from "./plugin-host-policy.js";
@@ -23,7 +22,7 @@ import { assertPreviousHarnessExited } from "./harness-process-lifetime.js";
 import { RuntimeDataTransactionStore, type RuntimeDataTransaction } from "./runtime-data-transaction.js";
 import { beginRuntimeUpgrade, commitRuntimeUpgrade, recoverRuntimeUpgrade, restoreFailedRuntimeTrial } from "./runtime-upgrade.js";
 import { RUNTIME_CACHE_EPOCH, readPreviousRuntimeBaseline, resolveRuntimeCacheRoot } from "./runtime/cache-epoch.js";
-import { createDesktopDeviceReader } from "./desktop-device.js";
+import { createDesktopDeviceReader, readDesktopComputerName } from "./desktop-device.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { access, mkdir, readFile } from "node:fs/promises";
@@ -350,7 +349,7 @@ const desktopDeviceLock = process.platform === "darwin" || process.platform === 
   store: new FileDeviceLockStore(path.join(app.getPath("userData"), "device-lock.json")),
   baseURL: runtimeServiceConfig.serviceBaseUrl,
   platform: process.platform === "darwin" ? "macos" : "windows",
-  name: hostname().slice(0, 80),
+  name: readDesktopComputerName(),
   available: () => runDeviceAuthentication(deviceAuthExecutable(app.isPackaged ? process.resourcesPath : moduleDirectory), "--check"),
   authenticate: signal => runDeviceAuthentication(deviceAuthExecutable(app.isPackaged ? process.resourcesPath : moduleDirectory), "--authenticate", signal),
   changed: snapshot => {
