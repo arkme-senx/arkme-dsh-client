@@ -46,6 +46,7 @@ assertRuntimeFreePaths([...packagedFiles]);
 const requiredPackagedFiles = [
   "/dist/main.js",
   "/dist/harness-process-lifetime.js",
+  "/dist/harness-core-dependencies.js",
   "/dist/macos-notification-permission.js",
   "/dist/preload.cjs",
   "/dist/desktop-capabilities.js",
@@ -62,6 +63,10 @@ for (const requiredFile of requiredPackagedFiles) {
   if (!packagedFiles.has(requiredFile)) throw new Error(`Packaged app is missing ${requiredFile}`);
 }
 await assertRuntimeFreeResources(layout.resources);
+const coreGuard = await lstat(path.join(layout.resources, "dist", "harness-core-dependencies.js"));
+if (!coreGuard.isFile() || coreGuard.isSymbolicLink()) {
+  throw new Error("Packaged Harness core policy --import guard must be a real unpacked file");
+}
 const lifetimeGuard = await lstat(path.join(layout.resources, "dist", "harness-process-lifetime.js"));
 if (!lifetimeGuard.isFile() || lifetimeGuard.isSymbolicLink()) {
   throw new Error("Packaged Harness lifetime --import guard must be a real unpacked file");

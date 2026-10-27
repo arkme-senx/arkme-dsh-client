@@ -39,6 +39,8 @@ app.whenReady().then(async () => {
     // must be present but must not receive a main-owned document nonce.
     ipcMain.on("arkme-session-selection:bootstrap", event => { event.returnValue = null; });
     ipcMain.on("arkme-runtime:page-ready-nonce", event => { event.returnValue = null; });
+    ipcMain.on("arkme-desktop:branding-snapshot", event => { event.returnValue = null; });
+    ipcMain.on("arkme-device-lock:available", event => { event.returnValue = false; });
     ipcMain.on("arkme-runtime:harness-version", event => {
       event.returnValue = "preload-smoke";
     });

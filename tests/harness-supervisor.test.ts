@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
+import { pathToFileURL } from "node:url";
 import { describe, expect, test, vi } from "vitest";
 import {
   buildProcessTerminationPlan,
@@ -43,6 +44,8 @@ class FakeChild extends EventEmitter implements ManagedChild {
 }
 
 async function createHarness(overrides: {
+  coreDependencyPolicy?: {modulePath: string};
+  dshBinPath?: string;
   realAuthentication?: boolean;
   onAuthenticated?: (session: import("../src/harness-auth-session.js").HarnessAuthSession) => Promise<void>;
   health?: (context: { spawnCount: number; children: FakeChild[] }) => Promise<boolean>;
@@ -88,8 +91,9 @@ async function createHarness(overrides: {
   const supervisor = new HarnessProcessSupervisor(
     {
       ...(overrides.onAuthenticated === undefined ? {} : {onAuthenticated: overrides.onAuthenticated}),
+      ...(overrides.coreDependencyPolicy === undefined ? {} : {coreDependencyPolicy: overrides.coreDependencyPolicy}),
       execPath: "/Applications/arkme.app/Contents/MacOS/arkme",
-      dshBinPath: "/runtime/@deepseek-ai/dsh/lib/bin.js",
+      dshBinPath: overrides.dshBinPath ?? "/runtime/@deepseek-ai/dsh/lib/bin.js",
       dshHome,
       logPath: path.join(root, "logs", "harness.log"),
       packageManagerBinPath: "/runtime/node_modules/.bin",
@@ -1144,4 +1148,100 @@ test('child exit revokes an authenticated session even while browser installatio
   release();
   await rejected;
   expect(revokedAtExit).toBe(true);
+});
+
+
+test.each([true, false])("preflights legacy core conflicts before spawning and restores on startup failure (healthy=%s)", async healthy => {
+  const runtime = await mkdtemp(path.join(tmpdir(), "supervisor core runtime-"));
+  const modules = path.join(runtime, "node_modules/@deepseek-ai");
+  for (const name of ["dsh", "dsh-llm"]) {
+    await mkdir(path.join(modules, name), {recursive: true});
+    await writeFile(path.join(modules, name, "package.json"), JSON.stringify({name: `@deepseek-ai/${name}`, version: "0.2.1-rc.2"}));
+  }
+  const harness = await createHarness({
+    dshBinPath: path.join(modules, "dsh/lib/bin.js"), coreDependencyPolicy: {modulePath: "/app/dist/harness-core-dependencies.js"},
+    optionalExtensionRecovery: {environment: "test"},
+    health: async ({children}) => {
+      if (!healthy) { children.at(-1)!.exit(1); return false; }
+      return true;
+    }
+  });
+  const profile = path.join(harness.dshHome, "profiles/web");
+  await mkdir(path.join(profile, "node_modules/dsh-llm-codex"), {recursive: true});
+  const original = JSON.stringify({dependencies: {"dsh-llm-codex": "0.1.2"}, dsh: {profile: {bundles: ["dsh-llm-codex"]}}});
+  await writeFile(path.join(profile, "package.json"), original);
+  await writeFile(path.join(profile, "node_modules/dsh-llm-codex/package.json"), JSON.stringify({name: "dsh-llm-codex", version: "0.1.2", dependencies: {"@deepseek-ai/dsh-llm": "0.1.0-rc.6"}}));
+  if (healthy) {
+    await harness.supervisor.start("/tmp/workspace");
+    expect(JSON.parse(await readFile(path.join(profile, "package.json"), "utf8")).dsh.profile.bundles).toEqual([]);
+    expect(harness.states.at(-1)).toMatchObject({kind: "ready"});
+    const [, args, options] = harness.spawn.mock.calls[0]!;
+    expect(args).toContain(pathToFileURL("/app/dist/harness-core-dependencies.js").href);
+    expect(options.env?.ARKME_CORE_POLICY_BIN).toBe(path.join(modules, "dsh/lib/bin.js"));
+    await harness.supervisor.stop("restart");
+  } else {
+    await expect(harness.supervisor.start("/tmp/workspace")).rejects.toThrow();
+    expect(await readFile(path.join(profile, "package.json"), "utf8")).toBe(original);
+  }
+  expect(harness.spawn).toHaveBeenCalledTimes(1);
+});
+
+
+async function preflightHarness(overrides: Parameters<typeof createHarness>[0] = {}) {
+  const runtime = await mkdtemp(path.join(tmpdir(), "supervisor preflight review-"));
+  const modules = path.join(runtime, "node_modules/@deepseek-ai");
+  for (const name of ["dsh", "dsh-llm"]) {
+    await mkdir(path.join(modules, name), {recursive: true});
+    await writeFile(path.join(modules, name, "package.json"), JSON.stringify({name: `@deepseek-ai/${name}`, version: "0.2.1-rc.2"}));
+  }
+  const harness = await createHarness({...overrides, dshBinPath: path.join(modules, "dsh/lib/bin.js"),
+    coreDependencyPolicy: {modulePath:"/app/dist/harness-core-dependencies.js"}, optionalExtensionRecovery:{environment:"test"}});
+  const profile = await writeBrokenOptionalExtensionProfile(harness.dshHome);
+  const manifest = JSON.parse(profile.originalText);
+  manifest.dependencies["dsh-llm-codex"] = "0.1.2";
+  manifest.dsh.profile.bundles.push("dsh-llm-codex");
+  const original = JSON.stringify(manifest);
+  await writeFile(profile.profilePath, original);
+  // A real compatible manifest keeps the other optional extension out of preflight.
+  const other = path.join(harness.dshHome, "profiles/web/node_modules/@senguoyun/dsh-arkme-peer-portrait");
+  await mkdir(other, {recursive:true});
+  await writeFile(path.join(other,"package.json"), JSON.stringify({name:"@senguoyun/dsh-arkme-peer-portrait",version:"1.0.0"}));
+  const codex = path.join(harness.dshHome,"profiles/web/node_modules/dsh-llm-codex");
+  await mkdir(codex,{recursive:true});
+  await writeFile(path.join(codex,"package.json"),JSON.stringify({name:"dsh-llm-codex",version:"0.1.2",dependencies:{"@deepseek-ai/dsh-llm":"0.1.0-rc.6"}}));
+  return {...harness, profilePath:profile.profilePath, sourcePath:profile.sourcePath, original};
+}
+
+test.each([true,false])("preflight quarantine leaves one loader recovery for another optional extension (retry healthy=%s)", async healthy => {
+  let sourcePath = "";
+  const harness = await preflightHarness({health:async ({spawnCount,children}) => {
+    if (spawnCount === 1 || !healthy) {
+      children.at(-1)!.stderr.emit("data",Buffer.from(`Cordis bundle loader failed importing ${path.join(sourcePath,"lib/index.js")}\n`));
+      children.at(-1)!.exit(1); return false;
+    }
+    return true;
+  }});
+  sourcePath=harness.sourcePath;
+  if (healthy) {
+    await harness.supervisor.start("/tmp/workspace");
+    expect(JSON.parse(await readFile(harness.profilePath,"utf8")).dsh.profile.bundles).toEqual(["@deepseek-ai/dsh-base","@senguoyun/dsh-arkme"]);
+    const receiptDir=path.join(harness.dshHome,"arkme-self/desktop-extension-quarantine");
+    const receipts=await readdir(receiptDir);
+    expect(receipts).toHaveLength(1);
+    expect(JSON.parse(await readFile(path.join(receiptDir,receipts[0]!,"receipt.json"),"utf8"))).toMatchObject({phase:"active",runtimeRetryAttempted:true,entries:expect.arrayContaining([
+      expect.objectContaining({packageName:"dsh-llm-codex"}),expect.objectContaining({packageName:"@senguoyun/dsh-arkme-peer-portrait"})])});
+    await harness.supervisor.stop("restart");
+  } else {
+    await expect(harness.supervisor.start("/tmp/workspace")).rejects.toThrow();
+    expect(await readFile(harness.profilePath,"utf8")).toBe(harness.original);
+  }
+  expect(harness.spawn).toHaveBeenCalledTimes(2);
+});
+
+test("restores preflight Profile when workspace registration fails after launch", async () => {
+  const harness = await preflightHarness({registerWorkspace:async()=>{throw new Error("workspace rejected");}});
+  await expect(harness.supervisor.start("/tmp/workspace")).rejects.toThrow("workspace rejected");
+  expect(await readFile(harness.profilePath,"utf8")).toBe(harness.original);
+  const receiptDir=path.join(harness.dshHome,"arkme-self/desktop-extension-quarantine");
+  for (const name of await readdir(receiptDir)) expect(JSON.parse(await readFile(path.join(receiptDir,name,"receipt.json"),"utf8")).phase).toBe("restored");
 });

@@ -4,6 +4,9 @@ import path from "node:path";
 import { describe, expect, test } from "vitest";
 import {
   activateOptionalExtensionRecovery,
+  isOptionalExtensionProfileFailure,
+  OptionalExtensionRecoveryFailure,
+  extendPreflightOptionalExtensionRecovery,
   enforceActiveOptionalExtensionRecoveries,
   loadPendingOptionalExtensionRecovery,
   prepareOptionalExtensionRecovery,
@@ -99,7 +102,11 @@ describe("optional extension startup recovery", () => {
       phase: "pending",
       runtimeReleaseId: RUNTIME_RELEASE_ID
     });
-    expect((await stat(transaction!.receiptPath)).mode & 0o777).toBe(0o600);
+    // Windows does not implement POSIX permission bits; receipt contents above
+    // remain verified on every platform.
+    if (process.platform !== "win32") {
+      expect((await stat(transaction!.receiptPath)).mode & 0o777).toBe(0o600);
+    }
   });
 
   test("uses local safe mode when a Bundle loader failure cannot identify one extension", async () => {
@@ -260,4 +267,28 @@ describe("optional extension startup recovery", () => {
 
     expect(await readFile(fixture.profilePath, "utf8")).toBe(fixture.originalText);
   });
+});
+
+
+test("retry classification uses the final failure even when the original optional import error is retained", async () => {
+  const fixture = await createProfileFixture();
+  const loader = `Cordis bundle loader failed importing ${path.join(fixture.peerSource,"index.js")}`;
+  expect(await isOptionalExtensionProfileFailure(fixture.dshHome, loader)).toBe(true);
+  const timeout = new OptionalExtensionRecoveryFailure(loader, new Error("Harness startup timed out"));
+  expect(await isOptionalExtensionProfileFailure(fixture.dshHome, new Error(loader,{cause:timeout}))).toBe(false);
+  const secondPlugin = new OptionalExtensionRecoveryFailure("initial failure",new Error(loader));
+  expect(await isOptionalExtensionProfileFailure(fixture.dshHome,new Error("wrapper",{cause:secondPlugin}))).toBe(true);
+  expect(await isOptionalExtensionProfileFailure(fixture.dshHome,"Cannot find package '@deepseek-ai/dsh-llm' imported from /runtime/dsh/lib.js")).toBe(false);
+});
+
+test("an interrupted combined preflight/runtime recovery cannot acquire a second loader retry", async () => {
+  const fixture = await createProfileFixture();
+  const transaction = await prepareOptionalExtensionRecovery({dshHome:fixture.dshHome,environment:"prod",source:"core-preflight",incompatiblePackages:["@example/registry-extension"],failureText:"core preflight"});
+  const failure = `Cordis bundle loader failed importing ${path.join(fixture.peerSource,"index.js")}`;
+  await extendPreflightOptionalExtensionRecovery(transaction!,failure);
+  const resumed = await loadPendingOptionalExtensionRecovery({dshHome:fixture.dshHome,environment:"prod"});
+  expect(resumed?.receipt.runtimeRetryAttempted).toBe(true);
+  expect(await extendPreflightOptionalExtensionRecovery(resumed!,failure)).toBeUndefined();
+  await restoreOptionalExtensionRecovery(resumed!);
+  expect(await readFile(fixture.profilePath,"utf8")).toBe(fixture.originalText);
 });

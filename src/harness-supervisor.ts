@@ -1,3 +1,4 @@
+import { incompatibleProfileCorePackages } from "./profile-core-compatibility.js";
 import { clearExitedHarnessProcessReceipt, writeHarnessProcessReceipt } from "./harness-process-lifetime.js";
 import { pathToFileURL } from "node:url";
 import { authenticateHarness, HarnessLaunchOutput, harnessCookieHeader, redactHarnessSecrets, type HarnessAuthSession } from "./harness-auth-session.js";
@@ -15,6 +16,8 @@ import { prepareManagedRestartPlan } from "./managed-restart-plan.js";
 import {
   activateOptionalExtensionRecovery,
   enforceActiveOptionalExtensionRecoveries,
+  extendPreflightOptionalExtensionRecovery,
+  OptionalExtensionRecoveryFailure,
   loadPendingOptionalExtensionRecovery,
   prepareOptionalExtensionRecovery,
   restoreOptionalExtensionRecovery,
@@ -75,6 +78,7 @@ export interface ManagedChild extends EventEmitter {
 }
 
 interface SupervisorConfig {
+  coreDependencyPolicy?: {modulePath: string};
   processGuard?: {modulePath: string; receiptPath: string};
   onAuthenticated?: (session: HarnessAuthSession) => Promise<void>;
   execPath: string;
@@ -225,6 +229,7 @@ export class HarnessProcessSupervisor {
     options: StartOptions,
     signal = new AbortController().signal
   ): Promise<void> {
+    let optionalRecovery: OptionalExtensionRecoveryTransaction | undefined;
     try {
       if (this.config.managedRestart?.releaseId !== undefined) {
         await prepareManagedRestartPlan(
@@ -243,9 +248,29 @@ export class HarnessProcessSupervisor {
           });
         }
       }
-      let optionalRecovery = this.config.optionalExtensionRecovery === undefined
+      optionalRecovery = this.config.optionalExtensionRecovery === undefined
         ? undefined
         : await loadPendingOptionalExtensionRecovery(this.config.optionalExtensionRecovery);
+      if (optionalRecovery === undefined && this.config.optionalExtensionRecovery !== undefined
+        && this.config.coreDependencyPolicy !== undefined) {
+        const packages = await incompatibleProfileCorePackages(this.config.dshHome, this.config.dshBinPath);
+        if (packages.length > 0) {
+          optionalRecovery = await prepareOptionalExtensionRecovery({
+            ...this.config.optionalExtensionRecovery,
+            incompatiblePackages: packages,
+            source: "core-preflight",
+            failureText: `ARKME_CORE_DEPENDENCY_CONFLICT: ${packages.join(", ")}`
+          });
+          if (optionalRecovery !== undefined) {
+            await this.recordSupervisorLifecycle("optional-extension-recovery-detected", {
+              reason: "installed-core-preflight", packages
+            });
+            await this.recordSupervisorLifecycle("optional-extension-recovery-quarantined", {
+              quarantineId: optionalRecovery.receipt.quarantineId, packages
+            });
+          }
+        }
+      }
       let launched: { running: RunningHarness; url: string };
       try {
         launched = await this.launch(workspacePath, options, signal);
@@ -253,7 +278,7 @@ export class HarnessProcessSupervisor {
         if (signal.aborted) throw error;
         if (await this.hasPendingManagedRestartPlan()) {
           await this.runManagedRestartHelper("rollback", undefined, signal);
-          await this.reapplyActiveOptionalExtensionQuarantine();
+          await this.reapplyActiveOptionalExtensionQuarantine(optionalRecovery);
           try {
             launched = await this.launch(workspacePath, options, signal);
           } catch (rollbackLaunchError) {
@@ -291,7 +316,7 @@ export class HarnessProcessSupervisor {
           await this.stopRunningProcess(launched.running, true);
           if (signal.aborted) throw error;
           await this.runManagedRestartHelper("rollback", undefined, signal);
-          await this.reapplyActiveOptionalExtensionQuarantine();
+          await this.reapplyActiveOptionalExtensionQuarantine(optionalRecovery);
           try {
             launched = await this.launch(workspacePath, options, signal);
           } catch (rollbackLaunchError) {
@@ -346,6 +371,15 @@ export class HarnessProcessSupervisor {
         if (running !== null) await this.stopRunningProcess(running, true);
         throw error;
       }
+      // Registration/finalization can fail after launch succeeded. Stop its
+      // writer before restoring a preflight transaction, just as for loader errors.
+      if (optionalRecovery?.receipt.phase === "pending") {
+        if (this.current !== null) await this.stopRunningProcess(this.current, false);
+        await restoreOptionalExtensionRecovery(optionalRecovery);
+        await this.recordSupervisorLifecycle("optional-extension-recovery-profile-restored", {
+          quarantineId: optionalRecovery.receipt.quarantineId
+        });
+      }
       const message = this.failureMessage(error, "");
       this.emit({ kind: "failed", workspacePath, message, logPath: this.config.logPath });
       throw new Error(message, { cause: error });
@@ -364,22 +398,26 @@ export class HarnessProcessSupervisor {
   }> {
     const config = this.config.optionalExtensionRecovery;
     if (config === undefined) throw error;
+    let transaction: OptionalExtensionRecoveryTransaction | undefined;
     if (pending !== undefined) {
-      await this.recordSupervisorLifecycle("optional-extension-recovery-retry-failed", {
-        quarantineId: pending.receipt.quarantineId,
-        packages: pending.receipt.entries.map((entry) => entry.packageName)
+      transaction = await extendPreflightOptionalExtensionRecovery(pending, error instanceof Error ? error.message : String(error));
+      if (transaction === undefined) {
+        await this.recordSupervisorLifecycle("optional-extension-recovery-retry-failed", {
+          quarantineId: pending.receipt.quarantineId,
+          packages: pending.receipt.entries.map((entry) => entry.packageName)
+        });
+        await restoreOptionalExtensionRecovery(pending);
+        await this.recordSupervisorLifecycle("optional-extension-recovery-profile-restored", {
+          quarantineId: pending.receipt.quarantineId
+        });
+        throw error;
+      }
+    } else {
+      transaction = await prepareOptionalExtensionRecovery({
+        ...config,
+        failureText: error instanceof Error ? error.message : String(error)
       });
-      await restoreOptionalExtensionRecovery(pending);
-      await this.recordSupervisorLifecycle("optional-extension-recovery-profile-restored", {
-        quarantineId: pending.receipt.quarantineId
-      });
-      throw error;
     }
-
-    const transaction = await prepareOptionalExtensionRecovery({
-      ...config,
-      failureText: error instanceof Error ? error.message : String(error)
-    });
     if (transaction === undefined) throw error;
     await this.recordSupervisorLifecycle("optional-extension-recovery-detected", {
       quarantineId: transaction.receipt.quarantineId,
@@ -407,14 +445,14 @@ export class HarnessProcessSupervisor {
           quarantineId: transaction.receipt.quarantineId
         });
       } catch (restoreError) {
-        throw new Error(
+        throw new OptionalExtensionRecoveryFailure(
           `${this.failureMessage(error, "")}\n\n自动停用扩展后仍无法启动，并且无法恢复扩展配置：${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
-          { cause: retryError }
+          retryError
         );
       }
-      throw new Error(
+      throw new OptionalExtensionRecoveryFailure(
         `${this.failureMessage(error, "")}\n\n自动停用扩展后仍无法启动，已恢复原扩展配置。`,
-        { cause: retryError }
+        retryError
       );
     }
   }
@@ -426,10 +464,11 @@ export class HarnessProcessSupervisor {
     await this.dependencies.appendLifecycle(this.config.logPath, event, details);
   }
 
-  private async reapplyActiveOptionalExtensionQuarantine(): Promise<void> {
+  private async reapplyActiveOptionalExtensionQuarantine(pending?: OptionalExtensionRecoveryTransaction): Promise<void> {
     if (this.config.optionalExtensionRecovery === undefined) return;
     const packages = await enforceActiveOptionalExtensionRecoveries(
-      this.config.optionalExtensionRecovery
+      this.config.optionalExtensionRecovery,
+      pending === undefined ? undefined : {pendingQuarantineId: pending.receipt.quarantineId}
     );
     if (packages.length === 0) return;
     await this.recordSupervisorLifecycle("optional-extension-recovery-quarantined", {
@@ -479,6 +518,7 @@ export class HarnessProcessSupervisor {
         this.config.execPath,
         [
           "--expose-internals",
+          ...(this.config.coreDependencyPolicy === undefined ? [] : ["--import", pathToFileURL(this.config.coreDependencyPolicy.modulePath).href]),
           ...(this.config.processGuard === undefined ? [] : ["--import", pathToFileURL(this.config.processGuard.modulePath).href]),
           this.config.dshBinPath,
           "web",
@@ -494,6 +534,8 @@ export class HarnessProcessSupervisor {
           env: {
             ...inheritedEnv,
             ...(processGeneration === undefined ? {} : {ARKME_PROCESS_GUARD_GENERATION:processGeneration}),
+            // Clear an inherited activation flag unless this verified launch owns it.
+            ARKME_CORE_POLICY_BIN: this.config.coreDependencyPolicy === undefined ? undefined : this.config.dshBinPath,
             DSH_HOME: this.config.dshHome,
             DSH_PROFILE_FIRST_BUNDLES: "@senguoyun/dsh-arkme",
             DSH_INSTALLED_MODULE_BASE_PATH: this.config.dshBinPath,

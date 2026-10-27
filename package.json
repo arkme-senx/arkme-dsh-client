@@ -1,7 +1,7 @@
 {
   "name": "arkme",
-  "version": "3.0.13",
-  "versionCode": 291,
+  "version": "3.0.22",
+  "versionCode": 300,
   "private": true,
   "author": "Jotmo",
   "description": "即我",
@@ -92,6 +92,7 @@
     "asarUnpack": [
       "dist/preload.cjs",
       "dist/harness-process-lifetime.js",
+      "dist/harness-core-dependencies.js",
       "node_modules/@arkme/macos-notification-permission/build/Release/*.node",
       "dist/device-lock-preload.cjs"
     ],
@@ -128,7 +129,7 @@
           ]
         }
       ],
-      "bundleVersion": "291",
+      "bundleVersion": "300",
       "minimumSystemVersion": "12.0",
       "appId": "com.senqisi.Jotmo"
     },

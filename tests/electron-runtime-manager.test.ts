@@ -54,12 +54,14 @@ async function installFixture(manifest: ElectronRuntimeManifest, stagingPath: st
 function createManager(
   root: string,
   fetchManifest: (baseline?: ElectronRuntimeManifest) => Promise<ElectronRuntimeManifest>,
-  installed: string[] = []
+  installed: string[] = [],
+  profileRecoveryKey?: () => Promise<string>
 ): ElectronRuntimeManager {
   return new ElectronRuntimeManager({
     root,
     environment: "prod",
     manifestContext,
+    ...(profileRecoveryKey === undefined ? {} : {profileRecoveryKey}),
     fetchManifest,
     installRelease: async (manifest, stagingPath) => {
       installed.push(manifest.releaseId);
@@ -1293,4 +1295,70 @@ describe('manual recovery from a failed acquisition', () => {
     await expect(createManager(root, fetch).prepareForLaunch(undefined, {manualRetry: true})).resolves.toMatchObject({releaseId: old.releaseId});
     expect(fetch).not.toHaveBeenCalled();
   });
+});
+
+
+describe("Profile core isolation recovery", () => {
+  const reason = 'dsh: disabling profile plugin row "llm": Plugin @deepseek-ai/dsh-llm@0.1.0-rc.6 is incompatible with dsh 0.2.1-rc.2';
+  test("retries a historically deferred pair once per policy/Profile key, preserves history and persists the limit across restart", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-profile-core-retry-")); temporaryDirectories.push(root);
+    const old = release("old", 1, 1); const next = release("next", 2, 2);
+    let latest = old;
+    const legacy = createManager(root, async () => latest);
+    await legacy.prepareForLaunch(); await legacy.completeCandidate();
+    latest = next;
+    await legacy.stageLatest(); await legacy.prepareForLaunch();
+    await legacy.rollbackCandidate({phase: "unknown", scope: "unknown", code: "RUNTIME_START_FAILED", reason});
+    let key = "a".repeat(64);
+    const fixed = createManager(root, async () => latest, [], async () => key);
+    expect(await fixed.stageLatest()).toBe("staged");
+    expect((await fixed.prepareForLaunch()).releaseId).toBe(next.releaseId);
+    await fixed.rollbackCandidate({phase: "unknown", scope: "unknown", code: "RUNTIME_START_FAILED", reason});
+    expect(await createManager(root, async () => latest, [], async () => key).stageLatest()).toBe("deferred");
+    const state = JSON.parse(await readFile(path.join(root, "state.json"), "utf8"));
+    expect(state.launchFailures.filter((x: {releaseId: string}) => x.releaseId === next.releaseId)).toHaveLength(2);
+    expect(state.activeReleaseId).toBe(old.releaseId);
+    key = "b".repeat(64); // A repaired/upgraded third-party plugin changes the Profile key.
+    const repaired = createManager(root, async () => latest, [], async () => key);
+    expect(await repaired.stageLatest()).toBe("staged");
+    await repaired.prepareForLaunch(); await repaired.completeCandidate();
+    expect(await repaired.stageLatest()).toBe("current");
+  });
+
+  test.each(["insufficient disk capacity for runtime data snapshot", "Required plugin does not support desktop Harness readiness v1"])("does not clear unrelated deferred failures: %s", async reason => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-unrelated-retry-")); temporaryDirectories.push(root);
+    const old = release("old", 1, 1); const next = release("next", 2, 2); let latest = old;
+    const manager = createManager(root, async () => latest, [], async () => "a".repeat(64));
+    await manager.prepareForLaunch(); await manager.completeCandidate(); latest = next;
+    await manager.stageLatest(); await manager.prepareForLaunch();
+    await manager.rollbackCandidate({phase: "unknown", scope: "unknown", code: "RUNTIME_START_FAILED", reason});
+    expect(await manager.stageLatest()).toBe("deferred");
+  });
+});
+
+
+test("records the Profile key on the first real trial and reopens only changed Profile failures", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "runtime-first-profile-trial-")); temporaryDirectories.push(root);
+  const old = release("old", 1, 1), next = release("next", 2, 2); let latest = old;
+  let key = "a".repeat(64);
+  const manager = createManager(root, async () => latest, [], async () => key);
+  await manager.prepareForLaunch(); await manager.completeCandidate(); latest = next;
+  await manager.stageLatest(); await manager.prepareForLaunch();
+  const coreReason = 'dsh: disabling profile plugin row "llm": Plugin @deepseek-ai/dsh-llm@0.1.0-rc.6 is incompatible with dsh 0.2.1-rc.2';
+  await manager.rollbackCandidate({phase:"unknown",scope:"unknown",code:"RUNTIME_START_FAILED",reason:coreReason});
+  expect(await manager.stageLatest()).toBe("deferred");
+  key = "b".repeat(64);
+  expect(await manager.stageLatest()).toBe("staged");
+  // The Profile can change between staging and actual launch. Reserve the actual trial key.
+  key = "c".repeat(64);
+  await manager.prepareForLaunch();
+  await manager.rollbackCandidate({phase:"harness-start",scope:"profile",code:"PROFILE_EXTENSION_START_FAILED",reason:"failed to import loader entry other-extension"});
+  const resumed = createManager(root, async () => latest, [], async () => key);
+  expect(await resumed.stageLatest()).toBe("deferred");
+  key = "b".repeat(64); // It was staged but never trialled with this Profile.
+  expect(await resumed.stageLatest()).toBe("staged");
+  await resumed.prepareForLaunch();
+  await resumed.rollbackCandidate({phase:"unknown",scope:"environment",code:"RUNTIME_START_FAILED",reason:"insufficient disk capacity for runtime data snapshot"});
+  key = "d".repeat(64);
+  expect(await resumed.stageLatest()).toBe("deferred");
 });
