@@ -1,5 +1,5 @@
 import {
-  chmod, cp, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, statfs, writeFile,
+  chmod, cp, lstat, mkdir, open, readdir, readFile, readlink, realpath, rename, rm, stat, statfs, symlink, writeFile,
 } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -76,6 +76,29 @@ async function dataSize(path: string): Promise<number> {
   return total
 }
 
+async function copySnapshot(source: string, target: string): Promise<void> {
+  await cp(source, target, {
+    recursive: true, dereference: false, verbatimSymlinks: true, preserveTimestamps: true,
+    // fs.cp recreates junctions as symlinks, which require Windows Developer
+    // Mode or elevation. Keep directory links as junctions instead, without
+    // traversing their targets (which can live outside the data container).
+    ...(process.platform === 'win32' ? {
+      filter: async (from: string, to: string): Promise<boolean> => {
+        if (!(await lstat(from)).isSymbolicLink()) return true
+        let directory: boolean
+        try { directory = (await stat(from)).isDirectory() } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true
+          throw error
+        }
+        if (!directory) return true
+        const destination = resolve(dirname(from), await readlink(from))
+        await symlink(destination, to, 'junction')
+        return false
+      },
+    } : {}),
+  })
+}
+
 async function atomicJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
   const temporary = `${path}.${randomUUID()}.tmp`
@@ -148,7 +171,7 @@ export class RuntimeDataTransactionStore {
     if (available < requiredBytes + 1024 * 1024) throw new Error('insufficient disk capacity for runtime data snapshot')
 
     await mkdir(dirname(snapshotPath), { recursive: true, mode: 0o700 })
-    await cp(dshHome, snapshotPath, { recursive: true, dereference: false, verbatimSymlinks: true, preserveTimestamps: true })
+    await copySnapshot(dshHome, snapshotPath)
     await chmod(snapshotPath, 0o700)
     const protectedSnapshots: ProtectedSnapshot[] = []
     for (const [index, sourcePath] of registry.entries()) {
@@ -156,7 +179,7 @@ export class RuntimeDataTransactionStore {
       const existed = existingRegistry.includes(sourcePath)
       if (existed) {
         await mkdir(dirname(protectedPath), { recursive: true, mode: 0o700 })
-        await cp(sourcePath, protectedPath, { recursive: true, dereference: false, verbatimSymlinks: true, preserveTimestamps: true })
+        await copySnapshot(sourcePath, protectedPath)
       }
       protectedSnapshots.push({ sourcePath, snapshotPath: protectedPath, existed })
     }
@@ -255,7 +278,7 @@ export class RuntimeDataTransactionStore {
     if (await pathExists(target) && !(await pathExists(staging))) return
     if (await pathExists(staging)) await rm(staging, { recursive: true, force: true })
     await mkdir(dirname(staging), { recursive: true, mode: 0o700 })
-    await cp(snapshot, staging, { recursive: true, dereference: false, verbatimSymlinks: true, preserveTimestamps: true })
+    await copySnapshot(snapshot, staging)
     await mkdir(dirname(target), { recursive: true, mode: 0o700 })
     await rename(staging, target)
   }
