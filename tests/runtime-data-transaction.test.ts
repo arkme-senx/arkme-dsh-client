@@ -1,4 +1,4 @@
-import { access, chmod, cp, mkdir, mkdtemp, readFile, readlink, rename, stat, symlink, writeFile } from 'node:fs/promises'
+import { access, chmod, cp, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rename, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -58,6 +58,40 @@ describe('runtime data transactions', () => {
     const transaction = await store.begin({ dshHome, releaseId: 'r2', harnessIdentity: 'h2' })
     await transaction!.restorePrecommitFailure()
     expect((await stat(join(dshHome, 'tool'))).mode & 0o777).toBe(0o755)
+  })
+
+  it('preserves directory junctions in profile and registry snapshots and rollback without copying their targets', async () => {
+    const { root, dshHome, userDataPath, store } = await fixture()
+    const external = join(root, 'runtime-sdk')
+    await mkdir(external)
+    await writeFile(join(external, 'index.js'), 'original-runtime')
+    const profileLink = join(dshHome, 'profiles', 'node_modules', '@agentclientprotocol', 'sdk')
+    await mkdir(join(profileLink, '..'), { recursive: true })
+    await symlink(external, profileLink, 'junction')
+    const registryPath = join(userDataPath, 'protected-registry')
+    await mkdir(registryPath)
+    const registryLink = join(registryPath, 'sdk')
+    await symlink(external, registryLink, 'junction')
+
+    const transaction = await store.begin({
+      dshHome, releaseId: 'r2', harnessIdentity: 'h2', registry: [registryPath],
+    })
+    const snapshotLink = join(transaction!.record.snapshotPath, 'profiles', 'node_modules', '@agentclientprotocol', 'sdk')
+    const registrySnapshot = join(transaction!.record.protectedSnapshots[0]!.snapshotPath, 'sdk')
+    for (const link of [snapshotLink, registrySnapshot]) {
+      expect((await lstat(link)).isSymbolicLink()).toBe(true)
+      expect(await realpath(link)).toBe(await realpath(external))
+    }
+    await writeFile(join(external, 'index.js'), 'updated-runtime')
+    await writeFile(join(dshHome, 'sessions', 'older.jsonl'), 'trial-write')
+    await transaction!.restorePrecommitFailure()
+
+    expect(await readFile(join(dshHome, 'sessions', 'older.jsonl'), 'utf8')).toBe('old-session')
+    for (const link of [profileLink, registryLink]) {
+      expect((await lstat(link)).isSymbolicLink()).toBe(true)
+      expect(await realpath(link)).toBe(await realpath(external))
+      expect(await readFile(join(link, 'index.js'), 'utf8')).toBe('updated-runtime')
+    }
   })
 
   it('never restores after the durable commit decision and reports roll-forward on recovery', async () => {
