@@ -10,11 +10,11 @@ export function validateMacHelperIdentifiers(identifiers: readonly string[]): vo
   }
 }
 
-const requiredMainProcessEntitlements = [
+const requiredRuntimeEntitlements = [
   "com.apple.security.cs.allow-jit",
   "com.apple.security.cs.allow-unsigned-executable-memory",
   "com.apple.security.cs.disable-library-validation",
-  "com.apple.security.personal-information.location"
+  "com.apple.security.device.audio-input"
 ] as const;
 
 export function validateMacCodeSigningDetails(output: string): MacCodeSigningDetails {
@@ -38,10 +38,18 @@ export function validateMacCodeSigningDetails(output: string): MacCodeSigningDet
 }
 
 export function validateMacMainProcessEntitlements(output: string): void {
-  for (const entitlement of requiredMainProcessEntitlements) {
+  validateEntitlements(output, [...requiredRuntimeEntitlements, "com.apple.security.personal-information.location"], "main process");
+}
+
+export function validateMacHelperProcessEntitlements(output: string): void {
+  validateEntitlements(output, requiredRuntimeEntitlements, "Helper process");
+}
+
+function validateEntitlements(output: string, required: readonly string[], processName: string): void {
+  for (const entitlement of required) {
     const escaped = entitlement.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     if (!new RegExp(`<key>\\s*${escaped}\\s*</key>\\s*<true\\s*/>`).test(output)) {
-      throw new Error(`Signed Harness main process is missing entitlement ${entitlement}`);
+      throw new Error(`Signed Harness ${processName} is missing entitlement ${entitlement}`);
     }
   }
 }
