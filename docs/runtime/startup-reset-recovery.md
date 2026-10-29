@@ -2,7 +2,7 @@
 
 ## 来源与根因
 
-当前基线为 2026-10-27 的 `origin/master`（`8002bb0`，PR #52）；初次恢复基于 `c6605f2`，随后按用户要求快进合并最新 master。从 Windows 测试机保留的 `arkme-runtime-reset-20261017` 源码找回 10 月 17–18 日的最终重置实现；其 `source-manifest.json` 记录原分支为 `zp-codex/reset-runtime-on-startup-failure`、基线为 `71541e8`。保留当前主干的设备认证、启动诊断、会话窗口和核心依赖隔离逻辑。
+当前提交基线为 2026-10-29 的 `origin/master`（`54536b8`，PR #53）；初次恢复基于 `c6605f2`，签名包验收基于 `8002bb0`（PR #52），提交前再次合并最新 master。从 Windows 测试机保留的 `arkme-runtime-reset-20261017` 源码找回 10 月 17–18 日的最终重置实现；其 `source-manifest.json` 记录原分支为 `zp-codex/reset-runtime-on-startup-failure`、基线为 `71541e8`。保留当前主干的设备认证、启动诊断、会话窗口和核心依赖隔离逻辑。
 
 原故障是核心插件导入 `ali-oss` 时无法解析包入口，继而使插件树加载失败。截图本身无法确定包损坏发生于发布、解压还是后续本地操作。恢复机制不依赖猜测损坏来源，而是重新获取兼容的完整运行组件。
 
@@ -61,3 +61,9 @@
 已交付 Windows x64 签名 EXE、`latest.yml` 和 blockmap，位于忽略目录 `release/runtime-reset-master-8002bb0-vc300/`。安装器、主程序、设备认证辅助程序和 elevate 辅助程序四项签名有效；包内 11 个关键编译模块、unpacked 核心策略模块、53 个迁移清单文件、更新文件大小及 SHA-512 均核对通过。回传 EXE 的 SHA-256 为 `b80916ff11f70a5e449356dbf9ab74903c2d0c96274820474fbe29eb6d2dbf1d`，与测试机一致。开发者模式恢复原值 1，测试应用进程为 0。
 
 验收只使用带所有权标记的隔离 appData，禁止对客户真实数据注入故障。安装器覆盖升级和客户全量数据迁移不属于该 smoke 的结论。
+
+### 提交前同步 master 的回归
+
+2026-10-29 合并 master `54536b8`，保留 MAS Universal 商店包启动与资源校验改动；与本次重置修改无文本冲突。全量 Vitest：138 文件通过、3 文件跳过，1186 项通过、18 项跳过；`pnpm run typecheck`、`tsc -p tsconfig.build.json --noEmit`、两份 smoke 脚本语法检查和 `git diff --check` 通过。
+
+原依赖目录指向已失效的 worktree 链接，改为当前 worktree 独立按锁文件安装。首次跳过依赖构建导致一项开发插件入口测试失败；完整安装构建依赖后全量复验通过，未改测试断言或依赖版本。此次同步未重新构建原交付签名包，Windows 包级证据对应前述 `8002bb0`，本次 `54536b8` 的新增验证范围为源码回归和类型检查。
