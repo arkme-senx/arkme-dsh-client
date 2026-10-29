@@ -5,9 +5,11 @@ import { fileURLToPath } from 'node:url';
 import {pluginCodeDigests} from './stage-runtime.mjs';
 import {statFile} from '@electron/asar';
 import {verifyBundlePermissions} from './permissions.mjs';
+import {verifyNestedApplications,verifyOfficeResourceBundle} from './resource-bundles.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
 const [app,output]=process.argv.slice(2);
 if(!app||!output)throw new Error('Usage: verify:mas <app> <report.json>');
+const nestedApplicationsVerified=await verifyNestedApplications(app);
 await verifyBundlePermissions(app);
 execFileSync(process.execPath,[path.join(root,'scripts/mas/verify-probe.mjs'),app,output],{stdio:'inherit'});
 const resources=path.resolve(app,'Contents/Resources');
@@ -36,8 +38,10 @@ for(const arch of ['arm64','x64']){
  if(policy.revision!==2||policy.pluginCodeUnmodified!==true)throw new Error('MAS host policy metadata invalid');
  const pluginRoot=path.join(dir,frozen.manifests[arch].artifacts.requiredPlugin.target);
  if(JSON.stringify(await pluginCodeDigests(pluginRoot))!==JSON.stringify(policy.files))throw new Error('MAS plugin code hashes changed');
- report.restrictions.push({arch,pluginCodeHashesVerified:true,pluginCodeUnmodified:true});
+ const officeResources=await verifyOfficeResourceBundle(dir,arch,policy.resourceBundleNormalization);
+ report.restrictions.push({arch,officeResources,pluginCodeHashesVerified:true,pluginCodeUnmodified:true});
 }
+report.nestedApplicationsVerified=nestedApplicationsVerified;
 report.websiteBuildModified=false;
 await writeFile(output,JSON.stringify(report,null,2));
 console.log('MAS full client signature and embedded host policy contract verified');

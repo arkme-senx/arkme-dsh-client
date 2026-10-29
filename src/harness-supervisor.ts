@@ -75,6 +75,7 @@ export interface ManagedChild extends EventEmitter {
 }
 
 interface SupervisorConfig {
+  startupTimeoutMs?: number;
   processGuard?: {modulePath: string; receiptPath: string};
   onAuthenticated?: (session: HarnessAuthSession) => Promise<void>;
   execPath: string;
@@ -225,6 +226,7 @@ export class HarnessProcessSupervisor {
     options: StartOptions,
     signal = new AbortController().signal
   ): Promise<void> {
+    options = { ...options, timeoutMs: options.timeoutMs ?? this.config.startupTimeoutMs ?? DEFAULT_START_TIMEOUT_MS };
     try {
       if (this.config.managedRestart?.releaseId !== undefined) {
         await prepareManagedRestartPlan(

@@ -43,6 +43,7 @@ class FakeChild extends EventEmitter implements ManagedChild {
 }
 
 async function createHarness(overrides: {
+  startupTimeoutMs?: number;
   realAuthentication?: boolean;
   onAuthenticated?: (session: import("../src/harness-auth-session.js").HarnessAuthSession) => Promise<void>;
   health?: (context: { spawnCount: number; children: FakeChild[] }) => Promise<boolean>;
@@ -87,6 +88,7 @@ async function createHarness(overrides: {
 
   const supervisor = new HarnessProcessSupervisor(
     {
+      ...(overrides.startupTimeoutMs === undefined ? {} : {startupTimeoutMs: overrides.startupTimeoutMs}),
       ...(overrides.onAuthenticated === undefined ? {} : {onAuthenticated: overrides.onAuthenticated}),
       execPath: "/Applications/arkme.app/Contents/MacOS/arkme",
       dshBinPath: "/runtime/@deepseek-ai/dsh/lib/bin.js",
@@ -1044,6 +1046,20 @@ describe("HarnessProcessSupervisor", () => {
       kind: "failed",
       message: expect.stringContaining("did not become ready within 500ms")
     });
+  });
+
+  test("allows slow startup within the configured budget and preserves explicit timeout overrides", async () => {
+    let checks = 0;
+    const { supervisor, states } = await createHarness({
+      startupTimeoutMs: 120_000,
+      health: async () => ++checks > 400
+    });
+    await supervisor.start("/Users/test/project", {pollIntervalMs: 250});
+    expect(states.at(-1)?.kind).toBe("ready");
+    await supervisor.stop("quit");
+    checks = 0;
+    await expect(supervisor.start("/Users/test/project", {timeoutMs: 500, pollIntervalMs: 250}))
+      .rejects.toThrow("did not become ready within 500ms");
   });
 
   test("escalates from SIGTERM to SIGKILL after the shutdown timeout", async () => {

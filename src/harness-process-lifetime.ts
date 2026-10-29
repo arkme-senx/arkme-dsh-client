@@ -2,6 +2,53 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
+import { getEnvironmentData, setEnvironmentData, isMainThread, type WorkerOptions } from 'node:worker_threads';
+
+const builtinCompatibilityKey = '@arkme/mas-electron-builtin-compatibility';
+
+/** Preserve explicit Worker isolation while carrying the host's verified internal-module adapter. */
+export function harnessWorkerExecArgv(requested: string[] | undefined, inherited: string[], preload: string): string[] {
+  const result = [...(requested ?? inherited)];
+  if (!result.includes('--expose-internals')) result.push('--expose-internals');
+  if (!result.some((value, index) => value === `--import=${preload}` || value === '--import' && result[index + 1] === preload)) {
+    result.push('--import', preload);
+  }
+  return result;
+}
+
+function installMasBuiltinCompatibility(): void {
+  // Electron's Worker process.versions may omit electron; inherit the verified host version.
+  const inherited = getEnvironmentData(builtinCompatibilityKey) as {electronVersion?: string} | undefined;
+  if ((process.versions.electron ?? inherited?.electronVersion) !== '43.2.0' || !process.execArgv.includes('--expose-internals')
+    || process.env.NARB_DISABLE_NATIVE_CACHE !== '1') return;
+  const policy = JSON.parse(process.env.ARKME_HOST_POLICY ?? '{}') as {schemaVersion?: number; distribution?: string};
+  if (policy.schemaVersion !== 1 || policy.distribution !== 'mas') return;
+  const entry = process.env.DSH_INSTALLED_MODULE_BASE_PATH;
+  if (entry === undefined) throw new Error('MAS builtin compatibility requires the embedded Harness entry');
+  setEnvironmentData(builtinCompatibilityKey, {electronVersion: '43.2.0'});
+  const hostRequire = createRequire(import.meta.url);
+  // Match the existing Electron 43.2.0 adapter in dsh-app-boot's main thread.
+  // Keep the signed native module's other exports and its fallback for unknown IDs.
+  const addon = createRequire(entry)('node-addon-require-builtin') as {requireBuiltin(id: string): unknown; default?: {requireBuiltin(id: string): unknown}};
+  const fallback = addon.requireBuiltin.bind(addon);
+  const requireBuiltin = (id: string): unknown => {
+    try { return hostRequire(id); }
+    catch { return fallback(id); }
+  };
+  addon.requireBuiltin = requireBuiltin;
+  if (addon.default !== undefined) addon.default.requireBuiltin = requireBuiltin;
+  const threads = hostRequire('node:worker_threads') as typeof import('node:worker_threads');
+  const NativeWorker = threads.Worker;
+  threads.Worker = class HarnessWorker extends NativeWorker {
+    constructor(filename: string | URL, options: WorkerOptions = {}) {
+      super(filename, {...options, execArgv: harnessWorkerExecArgv(options.execArgv, process.execArgv, import.meta.url)});
+    }
+  };
+  syncBuiltinESMExports();
+}
+
+installMasBuiltinCompatibility();
 
 export interface HarnessProcessReceipt { schemaVersion: 1; pid: number; generation: string; }
 const mutations = new Map<string, Promise<void>>();
@@ -86,7 +133,7 @@ function terminateOrphanGroup(): void {
 }
 
 const generation = process.env.ARKME_PROCESS_GUARD_GENERATION;
-if (generation !== undefined && typeof process.send === 'function') {
+if (isMainThread && generation !== undefined && typeof process.send === 'function') {
   // Installed by --import: the application entry point cannot execute until the
   // parent has durably registered this PID and explicitly grants startup.
   let terminating = false;
