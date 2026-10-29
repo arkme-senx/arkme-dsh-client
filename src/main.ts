@@ -22,7 +22,7 @@ import { HarnessCookieInstaller } from "./harness-cookie-install.js";
 import { HarnessPageReadiness, localHarnessMountFailure, settleHarnessPageRendering } from "./harness-page-ready.js";
 import { assertPreviousHarnessExited } from "./harness-process-lifetime.js";
 import { RuntimeDataTransactionStore, type RuntimeDataTransaction } from "./runtime-data-transaction.js";
-import { beginRuntimeUpgrade, commitRuntimeUpgrade, recoverRuntimeUpgrade, restoreFailedRuntimeTrial } from "./runtime-upgrade.js";
+import { beginRuntimeUpgrade, commitRuntimeUpgrade, recoverRuntimeUpgrade, restoreFailedRuntimeTrial, resetRuntimeAfterFailure } from "./runtime-upgrade.js";
 import { RUNTIME_CACHE_EPOCH, readPreviousRuntimeBaseline, resolveRuntimeCacheRoot } from "./runtime/cache-epoch.js";
 import { createDesktopDeviceReader, readDesktopComputerName } from "./desktop-device.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -262,6 +262,8 @@ const harnessPageReadiness = new HarnessPageReadiness();
 let holdCandidateNavigation = false;
 let deferredAccountScopeRelaunch = false;
 let runtimeDataStore: RuntimeDataTransactionStore | null = null;
+let runtimeResetInProgress = false;
+let runtimeFailureVisible = false;
 let runtimeRecoveryRequired = false;
 let bufferedHarnessReadyState: Extract<HarnessState, {kind: "ready"}> | null = null;
 let controller: DesktopController | null = null;
@@ -582,7 +584,9 @@ if (!hasSingleInstanceLock) {
   app.quit();
 } else {
   registerApplicationLifecycle();
-  void app.whenReady().then(() => bootstrap()).catch(showFatalBootstrapError);
+  // The supervisor can show a failure page before bootstrap finishes restoring
+  // user data. Queue clicks behind that restore, including the final error page.
+  actionQueue = app.whenReady().then(() => bootstrap()).catch(showFatalBootstrapError);
 }
 
 function registerApplicationLifecycle(): void {
@@ -1558,6 +1562,7 @@ function checkAppUpdateIfStale(source: AutomaticUpdateCheckSource): void {
 }
 
 function checkRuntimeUpdateIfStale(source: AutomaticUpdateCheckSource): void {
+  if (runtimeResetInProgress) return;
   if (!automaticUpdateChecksEnabled) {
     logDiagnostic("runtime-background-check-disabled", { source });
     return;
@@ -1837,7 +1842,7 @@ function installNavigationPolicy(window: BrowserWindow): void {
     if (decision.kind === "allow") return;
 
     event.preventDefault();
-    if (decision.kind === "action") enqueueAction(() => handleAppAction(decision.action));
+    if (decision.kind === "action") enqueueAppAction(decision.action);
     if (decision.kind === "external") void shell.openExternal(decision.url);
   };
 
@@ -1852,7 +1857,7 @@ function installNavigationPolicy(window: BrowserWindow): void {
       statusPageUrl,
       harnessOrigin: activeHarnessOrigin
     });
-    if (decision.kind === "action") enqueueAction(() => handleAppAction(decision.action));
+    if (decision.kind === "action") enqueueAppAction(decision.action);
     if (decision.kind === "external") void shell.openExternal(decision.url);
     return { action: "deny" };
   });
@@ -1864,6 +1869,8 @@ async function renderState(state: HarnessState | RuntimeInstallProgress): Promis
   if (state.kind === "failed") startupDiagnostics.fail(
     [state.message, state.technicalDetails].filter(Boolean).join("\n"), state.logPath
   );
+  runtimeFailureVisible = state.kind === "failed";
+  if (state.kind === "failed") state = { ...state, canResetRuntime: app.isPackaged && !masChannel && runtimeManager !== null };
   const window = mainWindow;
   if (window === null || window.isDestroyed()) return;
   // Every native page replacement must drain the still-live editor first.
@@ -2061,6 +2068,21 @@ async function activateDesktopAccountContainer(containerRef: string): Promise<vo
   scheduleAccountScopeRelaunch();
 }
 
+function enqueueAppAction(action: AppAction): void {
+  // Reserve before queueing so rapid clicks cannot enqueue multiple rebuilds.
+  if (runtimeResetInProgress) return;
+  if (action !== "reload-runtime") {
+    enqueueAction(() => handleAppAction(action));
+    return;
+  }
+  if (!runtimeFailureVisible || masChannel) return;
+  runtimeResetInProgress = true;
+  enqueueAction(async () => {
+    try { await handleAppAction(action); }
+    finally { runtimeResetInProgress = false; }
+  });
+}
+
 function enqueueAction(action: () => Promise<void>): void {
   actionQueue = actionQueue.then(action, action).catch(showActionError);
 }
@@ -2102,29 +2124,51 @@ async function handleAppAction(action: AppAction): Promise<void> {
 
 async function reloadCurrentRuntimeEnvironment(): Promise<void> {
   await conversationWindows.prepareToClose();
-  if (!app.isPackaged || runtimeManager === null) {
-    throw new Error("当前客户端没有可重新加载的运行环境");
+  const manager = runtimeManager;
+  if (!app.isPackaged || masChannel || manager === null) {
+    throw new Error("当前客户端没有可重置的运行环境");
   }
   const userDataPath = app.getPath("userData");
-  let release: ResolvedElectronRuntime;
+  await renderState({kind: "runtime-installing", phase: "download", harnessPercent: 0, pluginPercent: 0});
   try {
-    release = await runtimeManager.reloadCurrentEnvironment(state => runtimeProgressRenderer.schedule(state));
+    await resetRuntimeAfterFailure({
+      stopHarness: async () => {
+        runtimeRecoveryRequired = true;
+        await controller?.stop("failure");
+        await assertPreviousHarnessExited(path.join(userDataPath, "runtime-process.json"));
+        controller = null;
+        lastHarnessReadyState = null;
+      },
+      recoverData: async () => {
+        await manager.waitForIdle();
+        if (runtimeDataStore === null) throw new Error("Runtime data recovery unavailable");
+        await recoverRuntimeUpgrade(runtimeDataStore, {
+          commitProfile: async (dshHome, releaseId) => {
+            await recoverRuntimeManagedProfileTransaction(dshHome, runtimeEnvironment, {commitReleaseId: releaseId});
+          },
+          commitRelease: releaseId => manager.recoverCommittedCandidate(releaseId)
+        });
+        if (activeAccountScope !== null) {
+          const paths = accountScopeLaunchPaths(userDataPath, activeAccountScope);
+          await recoverRuntimeManagedProfileTransaction(paths.dshHome, runtimeEnvironment);
+        }
+      },
+      resetRuntime: () => manager.resetCurrentEnvironment(state => runtimeProgressRenderer.schedule(state)),
+      launchRuntime: async release => {
+        await runtimeProgressRenderer.flush();
+        const runtime = launchRuntimeFromRelease(release);
+        await configureAccountScopeForRuntime(userDataPath, runtime);
+        const accountScope = activeAccountScope;
+        if (accountScope === null) throw new Error("DSH account scope is unavailable");
+        const paths = accountScopeLaunchPaths(userDataPath, accountScope);
+        await recoverRuntimeManagedProfileTransaction(paths.dshHome, runtimeEnvironment);
+        logDiagnostic("runtime-manual-reload", {environment: runtimeEnvironment, releaseId: release.releaseId});
+        activeLaunchRuntime = await launchHarnessRuntime(runtime, paths, true);
+      }
+    });
   } finally {
     await runtimeProgressRenderer.flush();
   }
-  const runtime = launchRuntimeFromRelease(release);
-  await configureAccountScopeForRuntime(userDataPath, runtime);
-  const accountScope = activeAccountScope;
-  if (accountScope === null) throw new Error("DSH account scope is unavailable");
-  lastHarnessReadyState = null;
-  const paths = accountScopeLaunchPaths(userDataPath, accountScope);
-  await recoverRuntimeManagedProfileTransaction(paths.dshHome, runtimeEnvironment);
-  logDiagnostic("runtime-manual-reload", {
-    environment: runtimeEnvironment,
-    releaseId: release.releaseId,
-    serviceBaseUrl: runtimeServiceConfig.serviceBaseUrl
-  });
-  activeLaunchRuntime = await launchHarnessRuntime(runtime, paths, true);
 }
 
 async function showActionError(error: unknown): Promise<void> {

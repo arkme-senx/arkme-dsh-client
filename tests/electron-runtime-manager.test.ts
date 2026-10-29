@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -1062,6 +1062,155 @@ describe("ElectronRuntimeManager", () => {
     })));
     expect(after).toEqual(before);
     await expect(access(path.join(productionUserData, "runtime-manager"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+
+describe("manual runtime reset", () => {
+  test("records the current Profile recovery key for the reset candidate", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-reset-profile-key-")); temporaryDirectories.push(root);
+    const latest = release("unused", 1, 1);
+    let key = "a".repeat(64);
+    const manager = new ElectronRuntimeManager({
+      root, environment: "prod", manifestContext, fetchManifest: async () => latest,
+      installRelease: installFixture, validateRelease: async () => undefined,
+      profileRecoveryKey: async () => key
+    });
+    await manager.prepareForLaunch(); await manager.completeCandidate();
+    key = "b".repeat(64);
+    await manager.resetCurrentEnvironment();
+    const state = JSON.parse(await readFile(path.join(root, "state.json"), "utf8"));
+    expect(state.profileRecoveryAttempts).toEqual([{releaseId: latest.releaseId, key}]);
+    expect(state.candidateAttemptedAt).toEqual(expect.any(String));
+  });
+
+  test.each(["prod", "test"] as const)("rebuilds an active %s release and preserves all user data and the other environment", async environment => {
+    const home = await mkdtemp(path.join(os.tmpdir(), "runtime-reset-data-"));
+    temporaryDirectories.push(home);
+    const userData = path.join(home, environment === "prod" ? "Arkme Harness" : "Arkme Harness Test");
+    const root = path.join(userData, "runtime-manager", "electron-v1", "cache-epoch-1");
+    const latest = release("unused", 3, 3);
+    let installs = 0;
+    const manager = new ElectronRuntimeManager({
+      root, environment, manifestContext, fetchManifest: async () => latest,
+      installRelease: async (manifest, staging) => { installs++; await installFixture(manifest, staging); },
+      validateRelease: async () => undefined
+    });
+    const active = await manager.prepareForLaunch();
+    await manager.completeCandidate();
+    await writeFile(dshEntry(root, active.releaseId), "damaged runtime");
+    const sentinels = [
+      "dsh-containers/account/dsh/arkme-self/conversation.db",
+      "dsh-containers/account/dsh/arkme-self/files/attachment.bin",
+      "dsh-containers/account/dsh/profiles/web/node_modules/custom-plugin/index.js",
+      "workspace/document.txt", "settings.json", "dsh-account-scopes.json",
+      "runtime-data-transactions/journal.json", "runtime-data-identities.json", "logs/desktop-startup.log",
+      "runtime-manager/electron-v1/cache-epoch-0/keep"
+    ].map(file => path.join(userData, file));
+    sentinels.push(path.join(home, environment === "prod" ? "Arkme Harness Test" : "Arkme Harness", "runtime-manager/electron-v1/cache-epoch-1/keep"));
+    for (const file of sentinels) { await mkdir(path.dirname(file), {recursive: true}); await writeFile(file, "user-owned bytes"); }
+    const before = await Promise.all(sentinels.map(async file => ({ bytes: await readFile(file), mtime: (await stat(file)).mtimeMs })));
+    await mkdir(path.join(root, "downloads"), {recursive: true});
+    await writeFile(path.join(root, "downloads", "obsolete.tar.zst"), "cached");
+    await mkdir(path.join(root, "releases", "obsolete"), {recursive: true});
+
+    const reset = await manager.resetCurrentEnvironment();
+
+    expect(reset.probation).toBe(true);
+    expect(installs).toBe(2);
+    expect(await readFile(dshEntry(root, active.releaseId), "utf8")).toBe("dsh");
+    await expect(access(path.join(root, "downloads", "obsolete.tar.zst"))).rejects.toMatchObject({code: "ENOENT"});
+    await expect(access(path.join(root, "releases", "obsolete"))).rejects.toMatchObject({code: "ENOENT"});
+    expect(JSON.parse(await readFile(path.join(root, "state.json"), "utf8"))).toMatchObject({candidateReleaseId: latest.releaseId, badReleases: [], deferredReleases: []});
+    expect(JSON.parse(await readFile(path.join(root, "state.json"), "utf8")).activeReleaseId).toBeUndefined();
+    expect(await Promise.all(sentinels.map(async file => ({ bytes: await readFile(file), mtime: (await stat(file)).mtimeMs })))).toEqual(before);
+  });
+
+  test("waits for a background install, coalesces resets and blocks new staging until reset finishes", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-reset-concurrent-")); temporaryDirectories.push(root);
+    let next = release("unused", 1, 1);
+    let unblock!: () => void;
+    let started!: () => void;
+    const installing = new Promise<void>(resolve => { started = resolve; });
+    const blocked = new Promise<void>(resolve => { unblock = resolve; });
+    let installs = 0;
+    const manager = new ElectronRuntimeManager({
+      root, environment: "prod", manifestContext, fetchManifest: async () => next,
+      installRelease: async (manifest, staging) => {
+        installs++;
+        if (installs === 2) { started(); await blocked; }
+        await installFixture(manifest, staging);
+      }, validateRelease: async () => undefined
+    });
+    await manager.prepareForLaunch(); await manager.completeCandidate();
+    next = release("unused", 2, 2);
+    const background = manager.stageLatest(); await installing;
+    const reset = manager.resetCurrentEnvironment();
+    expect(manager.resetCurrentEnvironment()).toBe(reset);
+    const duringReset = manager.stageLatest();
+    unblock();
+    await background; await reset;
+    expect(await duringReset).toBe("deferred");
+    expect(installs).toBe(3);
+    expect(await manager.prepareForLaunch()).toMatchObject({probation: true, releaseId: next.releaseId});
+  });
+
+  test("rejects a downgrade before changing the active runtime", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-reset-baseline-")); temporaryDirectories.push(root);
+    let latest = release("unused", 2, 2);
+    const manager = createManager(root, async () => latest);
+    await manager.prepareForLaunch(); await manager.completeCandidate();
+    const before = await readFile(path.join(root, "state.json"), "utf8");
+    latest = release("unused", 1, 1);
+    await expect(manager.resetCurrentEnvironment()).rejects.toMatchObject({code: "RECOVERY_BASELINE_CODE_REGRESSION"});
+    expect(await readFile(path.join(root, "state.json"), "utf8")).toBe(before);
+  });
+
+  test("removes cache links without following them into user data", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-reset-links-")); temporaryDirectories.push(root);
+    const manager = createManager(path.join(root, "cache"), async () => release("unused", 1, 1));
+    await manager.prepareForLaunch(); await manager.completeCandidate();
+    const data = path.join(root, "data"); await mkdir(data);
+    await writeFile(path.join(data, "session.db"), "keep");
+    await symlink(data, path.join(root, "cache", "releases", "linked-data"), "junction");
+    await manager.resetCurrentEnvironment();
+    expect(await readFile(path.join(data, "session.db"), "utf8")).toBe("keep");
+  });
+
+  test("refuses a linked cache root without changing its target", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-reset-root-link-")); temporaryDirectories.push(root);
+    const target = path.join(root, "user-owned"); await mkdir(target);
+    await writeFile(path.join(target, "session.db"), "keep");
+    const linked = path.join(root, "cache"); await symlink(target, linked, "junction");
+    const manager = createManager(linked, async () => release("unused", 1, 1));
+    await expect(manager.resetCurrentEnvironment()).rejects.toThrow("linked runtime cache root");
+    expect(await readFile(path.join(target, "session.db"), "utf8")).toBe("keep");
+  });
+
+  test("a manifest failure leaves the old release and cache state intact", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-reset-offline-")); temporaryDirectories.push(root);
+    let offline = false;
+    const manager = createManager(root, async () => { if (offline) throw new Error("offline"); return release("unused", 1, 1); });
+    const active = await manager.prepareForLaunch(); await manager.completeCandidate();
+    const before = await readFile(path.join(root, "state.json")); offline = true;
+    await expect(manager.resetCurrentEnvironment()).rejects.toThrow("offline");
+    expect(await readFile(path.join(root, "state.json"))).toEqual(before);
+    expect(await readFile(dshEntry(root, active.releaseId), "utf8")).toBe("dsh");
+  });
+
+  test("allows another reset after download failure without restoring the damaged active release", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-reset-retry-")); temporaryDirectories.push(root);
+    const latest = release("unused", 1, 1); let fail = false;
+    const manager = new ElectronRuntimeManager({
+      root, environment: "prod", manifestContext, fetchManifest: async () => latest,
+      installRelease: async (manifest, staging) => { if (fail) throw new Error("network unavailable"); await installFixture(manifest, staging); },
+      validateRelease: async () => undefined
+    });
+    await manager.prepareForLaunch(); await manager.completeCandidate(); fail = true;
+    await expect(manager.resetCurrentEnvironment()).rejects.toThrow("network unavailable");
+    expect(JSON.parse(await readFile(path.join(root, "state.json"), "utf8")).activeReleaseId).toBeUndefined();
+    fail = false;
+    expect(await manager.resetCurrentEnvironment()).toMatchObject({releaseId: latest.releaseId, probation: true});
   });
 });
 

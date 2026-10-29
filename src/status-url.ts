@@ -32,6 +32,7 @@ export function createStatusPageUrl(
     if (state.suggestion !== undefined) url.searchParams.set("suggestion", state.suggestion);
     if (state.technicalDetails !== undefined) url.searchParams.set("technicalDetails", state.technicalDetails);
     if (state.showWorkspaceAction === false) url.searchParams.set("showWorkspaceAction", "0");
+    if (state.canResetRuntime === true) url.searchParams.set("canResetRuntime", "1");
     if (state.showReloadRuntimeAction === true) url.searchParams.set("showReloadRuntimeAction", "1");
   }
   return url.href;

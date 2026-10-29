@@ -46,3 +46,16 @@ export async function restoreFailedRuntimeTrial(
   await transaction?.restorePrecommitFailure();
   return true;
 }
+
+/** Stop writers and finish journal recovery before deleting disposable runtime files. */
+export async function resetRuntimeAfterFailure<T>(steps: {
+  stopHarness: () => Promise<void>;
+  recoverData: () => Promise<void>;
+  resetRuntime: () => Promise<T>;
+  launchRuntime: (runtime: T) => Promise<void>;
+}): Promise<void> {
+  await steps.stopHarness();
+  await steps.recoverData();
+  const runtime = await steps.resetRuntime();
+  await steps.launchRuntime(runtime);
+}

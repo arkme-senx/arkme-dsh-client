@@ -3,6 +3,7 @@ import {
 } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { isWindowsDirectoryLink } from './windows-directory-link.js'
 
 export type RuntimeDataTransactionPhase = 'prepared' | 'commit-decided' | 'completed'
 
@@ -87,8 +88,10 @@ async function copySnapshot(source: string, target: string): Promise<void> {
         if (!(await lstat(from)).isSymbolicLink()) return true
         let directory: boolean
         try { directory = (await stat(from)).isDirectory() } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true
-          throw error
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          // An old release may already be gone. Inspect the link itself instead
+          // of falling back to fs.cp, which recreates a privileged file symlink.
+          directory = isWindowsDirectoryLink(from)
         }
         if (!directory) return true
         const destination = resolve(dirname(from), await readlink(from))

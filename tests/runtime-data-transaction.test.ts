@@ -1,4 +1,4 @@
-import { access, chmod, cp, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rename, stat, symlink, writeFile } from 'node:fs/promises'
+import { access, chmod, cp, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -14,6 +14,32 @@ async function fixture(environment = 'test') {
 }
 
 describe('runtime data transactions', () => {
+  it.runIf(process.platform === 'win32')('backs up and restores historical junctions without elevation, including dangling targets', async () => {
+    const { root, dshHome, store } = await fixture()
+    const external = join(root, 'old-release', 'node_modules', '@agentclientprotocol', 'sdk')
+    await mkdir(external, { recursive: true })
+    await writeFile(join(external, 'keep.txt'), 'external-data')
+    const links = join(dshHome, 'profiles', 'node_modules')
+    await mkdir(links, { recursive: true })
+    await symlink(external, join(links, 'sdk'), 'junction')
+    const missing = join(root, 'removed-release')
+    await mkdir(missing)
+    await symlink(missing, join(links, 'missing-sdk'), 'junction')
+    await rm(missing, { recursive: true })
+    const before = await Promise.all(['sdk', 'missing-sdk'].map(name => readlink(join(links, name))))
+    const transaction = await store.begin({ dshHome, releaseId: 'new-release', harnessIdentity: 'new-harness' })
+    for (const [index, name] of ['sdk', 'missing-sdk'].entries()) {
+      const snapshotLink = join(transaction!.record.snapshotPath, 'profiles', 'node_modules', name)
+      expect((await lstat(snapshotLink)).isSymbolicLink()).toBe(true)
+      expect(await readlink(snapshotLink)).toBe(before[index])
+    }
+    await writeFile(join(dshHome, 'sessions', 'older.jsonl'), 'trial-write')
+    await transaction!.restorePrecommitFailure()
+    expect(await readFile(join(dshHome, 'sessions', 'older.jsonl'), 'utf8')).toBe('old-session')
+    for (const [index, name] of ['sdk', 'missing-sdk'].entries()) expect(await readlink(join(links, name))).toBe(before[index])
+    expect(await readFile(join(external, 'keep.txt'), 'utf8')).toBe('external-data')
+  })
+
   it('restores older sessions and preserves the failed trial directory', async () => {
     const { dshHome, userDataPath, store } = await fixture()
     const registryPath = join(userDataPath, 'dsh-account-scopes.json')
@@ -33,7 +59,7 @@ describe('runtime data transactions', () => {
     expect(await readFile(registryPath, 'utf8')).toBe('original-registry')
   })
 
-  it('copies symlinks without following or changing their external targets', async () => {
+  it.skipIf(process.platform === 'win32')('copies symlinks without following or changing their external targets', async () => {
     const { root, dshHome, store } = await fixture()
     const external = join(root, 'external-project')
     await mkdir(external)
@@ -50,7 +76,7 @@ describe('runtime data transactions', () => {
     expect(await readFile(join(external, 'keep.txt'), 'utf8')).toBe('untouched')
   })
 
-  it('retains executable modes when restored', async () => {
+  it.skipIf(process.platform === 'win32')('retains executable modes when restored', async () => {
     const { dshHome, store } = await fixture()
     const binary = join(dshHome, 'tool')
     await writeFile(binary, '#!/bin/sh\n')
@@ -178,7 +204,7 @@ describe('runtime data transactions', () => {
     const metadataRoot = join(userDataPath, 'runtime-data-transactions', 'test')
     await mkdir(metadataRoot, { recursive: true })
     await writeFile(join(metadataRoot, 'temporary.json.tmp'), 'ignored')
-    await symlink(root, join(metadataRoot, '123-11111111-1111-4111-8111-111111111111'))
+    await symlink(root, join(metadataRoot, '123-11111111-1111-4111-8111-111111111111'), 'junction')
     await expect(store.recover()).rejects.toThrow(/symbolic link/i)
   })
 
@@ -229,7 +255,7 @@ describe('runtime data transactions', () => {
     const external = join(root, 'external-journal-target')
     await mkdir(external)
     const transactionRoot = join(transaction!.record.journalPath, '..')
-    await symlink(external, join(transactionRoot, 'escape'))
+    await symlink(external, join(transactionRoot, 'escape'), 'junction')
     malicious.snapshotPath = transaction!.record.snapshotPath
     malicious.failurePreservationPath = join(transactionRoot, 'escape', 'failed')
     await writeFile(transaction!.record.journalPath, JSON.stringify(malicious))
@@ -251,7 +277,9 @@ describe('runtime data transactions', () => {
     const dshHome = join(userDataPath, 'dsh')
     await mkdir(dshHome)
     const transaction = await store.begin({ dshHome, releaseId: 'r', harnessIdentity: 'h' })
-    expect((await stat(transaction!.record.snapshotPath)).mode & 0o777).toBe(0o700)
-    expect((await stat(transaction!.record.journalPath)).mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32') {
+      expect((await stat(transaction!.record.snapshotPath)).mode & 0o777).toBe(0o700)
+      expect((await stat(transaction!.record.journalPath)).mode & 0o777).toBe(0o600)
+    }
   })
 })

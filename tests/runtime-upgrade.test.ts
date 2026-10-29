@@ -1,10 +1,10 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { RuntimeDataTransactionStore } from "../src/runtime-data-transaction.js";
 import { DshAccountScopeStore } from "../src/dsh-account-scope.js";
-import { commitRuntimeUpgrade, recoverRuntimeUpgrade, restoreFailedRuntimeTrial } from "../src/runtime-upgrade.js";
+import { commitRuntimeUpgrade, recoverRuntimeUpgrade, restoreFailedRuntimeTrial, resetRuntimeAfterFailure } from "../src/runtime-upgrade.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {recursive: true, force: true}))); });
@@ -115,4 +115,18 @@ test("a committed legacy container restarted before relocation defers attestatio
   expect(await readFile(path.join(migrated.dshHome, "session"), "utf8")).toBe("writer resumed");
   await expect(store.begin({dshHome: migrated.dshHome, releaseId: "older", harnessIdentity: "old"}))
     .rejects.toThrow("explicit harness transition");
+});
+
+
+test.each(["stop", "recover"])("a %s failure blocks runtime deletion and relaunch", async failure => {
+  const {dshHome} = await fixture();
+  const runtime = path.join(dshHome, "runtime-marker"); await writeFile(runtime, "existing runtime");
+  await expect(resetRuntimeAfterFailure({
+    stopHarness: async () => { if (failure === "stop") throw new Error("writer alive"); },
+    recoverData: async () => { throw new Error("recovery pending"); },
+    resetRuntime: async () => { await rm(runtime); return "new runtime"; },
+    launchRuntime: async () => { await writeFile(path.join(dshHome, "launched"), "yes"); }
+  })).rejects.toThrow(failure === "stop" ? "writer alive" : "recovery pending");
+  expect(await readFile(runtime, "utf8")).toBe("existing runtime");
+  await expect(access(path.join(dshHome, "launched"))).rejects.toMatchObject({code: "ENOENT"});
 });
