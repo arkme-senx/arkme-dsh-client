@@ -6,7 +6,7 @@ import { DeviceLockSurfaces } from "./device-lock-surfaces.js";
 import { deviceAuthExecutable, runDeviceAuthentication } from "./device-lock-native-auth.js";
 import { StartupDiagnostics } from "./startup-diagnostics.js";
 import { release as osRelease } from "node:os";
-import { pluginHostPolicy } from "./plugin-host-policy.js";
+import { pluginHostEnvironment } from "./plugin-host-policy.js";
 import { revealAfterAccountAcknowledgement } from "./account-scope-navigation.js";
 import { isMasChannel, resolveMasRuntime, MasBookmarks } from "./mas/runtime.js";
 import {installScreenshotShortcut} from './screenshot-shortcut-ipc.js';
@@ -1298,6 +1298,8 @@ async function initializeHarnessRuntime(
   onProfileTransaction(provisionedProfile.runtimeTransaction);
   logDiagnostic("profile-ready", { dshHome: paths.dshHome, source: runtime.runtimeManaged ? "release-set" : "development" });
   const supervisor = new HarnessProcessSupervisor({
+    // MAS x64 under Rosetta needs additional time to initialize the embedded runtime.
+    ...(masChannel && process.arch === "x64" ? { startupTimeoutMs: 300_000 } : {}),
     ...(runtime.runtimeManaged ? {coreDependencyPolicy: {
       modulePath: path.join(path.dirname(resolveArkmePreloadPath(
         moduleDirectory, app.isPackaged, process.resourcesPath
@@ -1327,7 +1329,7 @@ async function initializeHarnessRuntime(
     inheritedEnv: {
       ...packageManagerEnvironment,
       ARKME_APP_VERSION: app.getVersion(),
-      ARKME_HOST_POLICY: pluginHostPolicy(masChannel, app.isPackaged ? undefined : paths.userDataPath),
+      ...pluginHostEnvironment(masChannel, app.isPackaged ? undefined : paths.userDataPath),
       ...(paths.accountScopeRequired ? {
         ARKME_ACCOUNT_SCOPE_REQUIRED: "1",
         ARKME_DSH_RUNTIME_SCOPE_REF: paths.runtimeScopeRef

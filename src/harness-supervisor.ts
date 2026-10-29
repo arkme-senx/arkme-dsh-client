@@ -78,6 +78,7 @@ export interface ManagedChild extends EventEmitter {
 }
 
 interface SupervisorConfig {
+  startupTimeoutMs?: number;
   coreDependencyPolicy?: {modulePath: string};
   processGuard?: {modulePath: string; receiptPath: string};
   onAuthenticated?: (session: HarnessAuthSession) => Promise<void>;
@@ -229,6 +230,7 @@ export class HarnessProcessSupervisor {
     options: StartOptions,
     signal = new AbortController().signal
   ): Promise<void> {
+    options = { ...options, timeoutMs: options.timeoutMs ?? this.config.startupTimeoutMs ?? DEFAULT_START_TIMEOUT_MS };
     let optionalRecovery: OptionalExtensionRecoveryTransaction | undefined;
     try {
       if (this.config.managedRestart?.releaseId !== undefined) {

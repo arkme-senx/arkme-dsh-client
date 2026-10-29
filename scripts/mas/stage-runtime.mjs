@@ -2,6 +2,7 @@ import {cp, readFile, writeFile, mkdir, readdir, rm, chmod} from 'node:fs/promis
 import {createHash} from 'node:crypto';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {normalizeOfficeResourceBundle} from './resource-bundles.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
 export async function pluginCodeDigests(pluginRoot) {
   const files=[];
@@ -27,8 +28,9 @@ export async function stageRuntime(id) {
     await rm(dest,{recursive:true,force:true});await mkdir(dest,{recursive:true});
     await cp(source,dest,{recursive:true});
     await chmod(path.join(dest,'install-receipt.json'),0o644);
+    const resourceBundleNormalization=await normalizeOfficeResourceBundle(dest,arch);
     if(JSON.stringify(files)!==JSON.stringify(await pluginCodeDigests(path.join(dest,relative))))throw new Error('MAS_PLUGIN_COPY_MISMATCH');
-    const report={revision:2,credentialServicePrefix:'com.senqisi.dsh-arkme.mas',releaseId:frozen.manifests[arch].releaseId,combinationSha256:frozen.combinationSha256,arch,pluginTarget:relative,pluginCodeUnmodified:true,files};
+    const report={revision:2,credentialServicePrefix:'com.senqisi.dsh-arkme.mas',releaseId:frozen.manifests[arch].releaseId,combinationSha256:frozen.combinationSha256,arch,pluginTarget:relative,pluginCodeUnmodified:true,resourceBundleNormalization,files};
     await writeFile(path.join(dest,'mas-policy.json'),JSON.stringify(report,null,2));reports.push(report);
   }
   await writeFile(path.join(work,'staging-report.json'),JSON.stringify(reports,null,2));
