@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   validateMacCodeSigningDetails,
   validateMacHelperIdentifiers,
+  validateMacHelperProcessEntitlements,
   validateMacLocationUsageDescriptions,
   validateMacMainProcessEntitlements
 } from "../src/macos-signature.js";
@@ -51,11 +52,25 @@ describe("validateMacMainProcessEntitlements", () => {
   <key>com.apple.security.cs.allow-jit</key><true/>
   <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
   <key>com.apple.security.cs.disable-library-validation</key><true/>
+  <key>com.apple.security.device.audio-input</key><true/>
   <key>com.apple.security.personal-information.location</key><true/>
 </dict></plist>`;
 
   it("accepts Electron runtime and main-process location entitlements", () => {
     expect(() => validateMacMainProcessEntitlements(complete)).not.toThrow();
+  });
+
+  it("rejects the shipped signature that omits hardened-runtime microphone access", () => {
+    expect(() => validateMacMainProcessEntitlements(
+      complete.replace("com.apple.security.device.audio-input", "missing-audio-input")
+    )).toThrow(/device\.audio-input/);
+  });
+
+  it("requires microphone access in Helpers without granting main-process location access", () => {
+    const helper = complete.replace("<key>com.apple.security.personal-information.location</key><true/>", "");
+    expect(() => validateMacHelperProcessEntitlements(helper)).not.toThrow();
+    expect(() => validateMacHelperProcessEntitlements(helper.replace("com.apple.security.device.audio-input", "missing-audio-input")))
+      .toThrow(/Helper process.*device\.audio-input/);
   });
 
   it("rejects a signature that cannot own the CoreLocation permission", () => {

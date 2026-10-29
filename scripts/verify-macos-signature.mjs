@@ -6,6 +6,7 @@ import { parse } from "yaml";
 import {
   validateMacCodeSigningDetails,
   validateMacHelperIdentifiers,
+  validateMacHelperProcessEntitlements,
   validateMacLocationUsageDescriptions,
   validateMacMainProcessEntitlements
 } from "../dist/macos-signature.js";
@@ -58,13 +59,14 @@ const helperIdentifiers = [];
 for (const entry of await readdir(frameworks, { withFileTypes: true })) {
   if (!entry.isDirectory() || !entry.name.endsWith(".app")) continue;
   const helper = path.join(frameworks, entry.name);
-  const result = spawnSync("/usr/bin/codesign", ["-dv", "--verbose=4", helper], { encoding: "utf8" });
+  const result = spawnSync("/usr/bin/codesign", ["-dv", "--verbose=4", "--entitlements", ":-", helper], { encoding: "utf8" });
   const identifier = /^Identifier=(.+)$/m.exec(`${result.stdout ?? ""}${result.stderr ?? ""}`)?.[1]?.trim();
   if (result.error || result.status !== 0 || !identifier
     || identifier !== readPlistString(path.join(helper, "Contents/Info.plist"), "CFBundleIdentifier").trim()) {
     throw new Error(`Invalid signed Helper identity: ${entry.name}`);
   }
   helperIdentifiers.push(identifier);
+  validateMacHelperProcessEntitlements(`${result.stdout ?? ""}${result.stderr ?? ""}`);
 }
 validateMacHelperIdentifiers(helperIdentifiers);
 const entitlementInspection = spawnSync(
@@ -81,6 +83,9 @@ validateMacMainProcessEntitlements(
 );
 
 const infoPlist = path.join(appPath, "Contents", "Info.plist");
+if (readPlistString(infoPlist, "NSMicrophoneUsageDescription").trim() === "") {
+  throw new Error("Signed Harness requires a non-empty macOS microphone usage description");
+}
 validateMacLocationUsageDescriptions({
   location: readPlistString(infoPlist, "NSLocationUsageDescription"),
   whenInUse: readPlistString(infoPlist, "NSLocationWhenInUseUsageDescription")
@@ -98,7 +103,7 @@ for (const [tool, args] of [
 }
 console.log(
   `Verified signed Harness ${details.identifier} `
-  + `(TeamIdentifier=${details.teamIdentifier}, CoreLocation=enabled, notification-permission=enabled)`
+  + `(TeamIdentifier=${details.teamIdentifier}, CoreLocation=enabled, Microphone=enabled, notification-permission=enabled)`
 );
 
 function readPlistString(plistPath, key) {

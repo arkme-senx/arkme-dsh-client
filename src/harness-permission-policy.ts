@@ -24,6 +24,7 @@ export interface HarnessPermissionDiagnostic {
 export interface HarnessPermissionPolicyContext {
   getActiveHarnessOrigin: () => string | null;
   getMainWebContentsId: () => number | null;
+  isLocationWebContents?: (id: number) => boolean;
   isDeviceLocked?: () => boolean;
   diagnostic?: (details: HarnessPermissionDiagnostic) => void;
 }
@@ -116,8 +117,9 @@ export function installHarnessPermissionPolicy(
     if (permission === "notifications" && context.isDeviceLocked?.()) return false;
     if (permission !== "geolocation") return permission !== "deprecated-sync-clipboard-read";
 
-    const mainWebContentsId = context.getMainWebContentsId();
     const requestingWebContentsId = webContents?.id ?? null;
+    const mainWebContentsId = requestingWebContentsId !== null && details.isMainFrame && context.isLocationWebContents?.(requestingWebContentsId)
+      ? requestingWebContentsId : context.getMainWebContentsId();
     const input: HarnessGeolocationPermissionInput = {
       activeHarnessOrigin: context.getActiveHarnessOrigin(),
       embeddingOrigin: details.embeddingOrigin,
@@ -150,8 +152,9 @@ export function installHarnessPermissionPolicy(
       return;
     }
 
-    const mainWebContentsId = context.getMainWebContentsId();
     const requestingWebContentsId = webContents.id;
+    const mainWebContentsId = details.isMainFrame && context.isLocationWebContents?.(requestingWebContentsId)
+      ? requestingWebContentsId : context.getMainWebContentsId();
     const input: HarnessGeolocationPermissionInput = {
       activeHarnessOrigin: context.getActiveHarnessOrigin(),
       embeddingOrigin: undefined,

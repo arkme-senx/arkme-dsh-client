@@ -94,6 +94,7 @@ interface RuntimeManagerOptions extends RuntimeManagerDependencies {
   cacheEpoch?: number;
   initialBaseline?: ElectronRuntimeManifest;
   readInitialBaseline?: () => Promise<ElectronRuntimeManifest | undefined>;
+  profileRecoveryKey?: () => Promise<string>;
 }
 
 const RELEASE_ENVIRONMENT_RECEIPT = "runtime-environment.json";
@@ -152,7 +153,7 @@ export class ElectronRuntimeManager {
           if (state.activeReleaseId === undefined) {
             // A fresh epoch has no verified fallback. Give a fully local candidate
             // one trial per explicit bootstrap after the data transaction recovered.
-            markRuntimeCandidateAttempted(state, this.now().toISOString());
+            await this.markProfileCandidateAttempted(state);
             await this.writeState(state);
             return candidate;
           }
@@ -171,7 +172,7 @@ export class ElectronRuntimeManager {
       } else {
         try {
           const candidate = await this.resolveRelease(candidateId, true);
-          markRuntimeCandidateAttempted(state, this.now().toISOString());
+          await this.markProfileCandidateAttempted(state);
           await this.writeState(state);
           return candidate;
         } catch (error) {
@@ -238,7 +239,7 @@ export class ElectronRuntimeManager {
       throw error;
     }
     beginRuntimeCandidate(state, manifest.releaseId);
-    markRuntimeCandidateAttempted(state, this.now().toISOString());
+    await this.markProfileCandidateAttempted(state);
     await this.writeState(state);
     try {
       return await this.resolveRelease(manifest.releaseId, true);
@@ -315,7 +316,19 @@ export class ElectronRuntimeManager {
     if (decision === "current" && state.candidateReleaseId === candidate.releaseId) return "staged";
     if (decision !== "newer") return decision;
     if (state.badReleases.some(item => item.releaseId === candidate.releaseId)) return "bad";
-    if (state.deferredReleases.some(item => item.releaseId === candidate.releaseId)) return "deferred";
+    const deferred = state.deferredReleases.find(item => item.releaseId === candidate.releaseId);
+    let recoveryKey: string | undefined;
+    if (deferred !== undefined) {
+      // Retry only the known core/Profile failure after an effective policy or
+      // Profile change. Artifact/readiness/disk failures retain their own rules.
+      const coreFailure = deferred.phase === "unknown" && deferred.scope === "unknown"
+        && /ARKME_CORE_DEPENDENCY_CONFLICT|disabling profile plugin row "(?:llm|settings)": Plugin @deepseek-ai\/dsh-(?:llm|settings)@[^\n]*incompatible/.test(deferred.reason);
+      if ((!coreFailure && !(deferred.scope === "profile" && deferred.code === "PROFILE_EXTENSION_START_FAILED"))
+        || this.options.profileRecoveryKey === undefined) return "deferred";
+      recoveryKey = await this.options.profileRecoveryKey();
+      if (!/^[a-f0-9]{64}$/.test(recoveryKey)) throw new Error("Invalid Profile recovery key");
+      if (state.profileRecoveryAttempts?.some(item => item.releaseId === candidate.releaseId && item.key === recoveryKey)) return "deferred";
+    }
     // Preserve an existing candidate even if the feed has advanced. This state
     // snapshot may also predate a concurrent commit/rollback; never write it
     // back or install a second candidate. A later check uses the settled state.
@@ -324,6 +337,19 @@ export class ElectronRuntimeManager {
     beginRuntimeCandidate(state, candidate.releaseId);
     await this.writeState(state);
     return "staged";
+  }
+
+  private async markProfileCandidateAttempted(state: RuntimeInstallState): Promise<void> {
+    const releaseId = state.candidateReleaseId;
+    if (releaseId === undefined) throw new Error("No Electron runtime candidate is awaiting validation");
+    if (this.options.profileRecoveryKey !== undefined) {
+      const key = await this.options.profileRecoveryKey();
+      if (!/^[a-f0-9]{64}$/.test(key)) throw new Error("Invalid Profile recovery key");
+      if (!state.profileRecoveryAttempts?.some(item => item.releaseId === releaseId && item.key === key)) {
+        state.profileRecoveryAttempts = [...(state.profileRecoveryAttempts ?? []), {releaseId, key}].slice(-20);
+      }
+    }
+    markRuntimeCandidateAttempted(state, this.now().toISOString());
   }
 
   private fetchLatestManifest(baseline?: ElectronRuntimeManifest): Promise<ElectronRuntimeManifest> {
@@ -423,7 +449,7 @@ export class ElectronRuntimeManager {
       );
     }
     beginRuntimeCandidate(state, manifest.releaseId);
-    markRuntimeCandidateAttempted(state, this.now().toISOString());
+    await this.markProfileCandidateAttempted(state);
     await this.writeState(state);
     return await this.resolveRelease(manifest.releaseId, true);
   }

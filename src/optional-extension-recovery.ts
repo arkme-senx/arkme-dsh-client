@@ -45,6 +45,8 @@ export interface DesktopExtensionQuarantineReceipt {
   failureSummary: string;
   failureLogTail: string;
   entries: DesktopExtensionQuarantineEntry[];
+  source?: "core-preflight";
+  runtimeRetryAttempted?: true;
 }
 
 export interface OptionalExtensionRecoveryConfig {
@@ -55,6 +57,8 @@ export interface OptionalExtensionRecoveryConfig {
 
 export interface PrepareOptionalExtensionRecoveryInput extends OptionalExtensionRecoveryConfig {
   failureText: string;
+  incompatiblePackages?: string[];
+  source?: "core-preflight";
 }
 
 export interface OptionalExtensionRecoveryTransaction {
@@ -81,13 +85,16 @@ export async function prepareOptionalExtensionRecovery(
   const profilePath = profileManifestPath(input.dshHome);
   const originalText = await readFile(profilePath, "utf8");
   const parsed = parseProfile(originalText, path.dirname(profilePath));
-  const selection = selectCandidates(parsed.candidates, input.failureText);
+  const selection = input.incompatiblePackages === undefined
+    ? selectCandidates(parsed.candidates, input.failureText)
+    : selectIncompatibleCandidates(parsed.candidates, input.incompatiblePackages);
   if (selection === undefined) return undefined;
 
   const now = Date.now();
   const quarantineId = randomUUID();
   const receipt: DesktopExtensionQuarantineReceipt = {
     schemaVersion: 1,
+    ...(input.source === undefined ? {} : {source: input.source}),
     quarantineId,
     environment: input.environment,
     phase: "pending",
@@ -95,9 +102,9 @@ export async function prepareOptionalExtensionRecovery(
     createdAtMillis: now,
     updatedAtMillis: now,
     ...(input.runtimeReleaseId === undefined ? {} : { runtimeReleaseId: input.runtimeReleaseId }),
-    failureSummary: selection.mode === "targeted"
-      ? `扩展 ${selection.entries[0]!.packageName} 启动时加载失败，已自动停用`
-      : `无法确定具体故障扩展，已停用 ${selection.entries.length} 个本地开发扩展`,
+    failureSummary: (selection.mode === "targeted"
+      ? `扩展 ${selection.entries.map(entry => entry.packageName).join(", ")} 启动时加载失败，已自动停用`
+      : `无法确定具体故障扩展，已停用 ${selection.entries.length} 个本地开发扩展`).slice(0, 2_000),
     failureLogTail: sanitizedFailureTail(input.failureText),
     entries: selection.entries.map(({ matchValues: _matchValues, local: _local, ...entry }) => entry)
   };
@@ -138,6 +145,70 @@ export async function prepareOptionalExtensionRecovery(
   }
 
   return { profilePath, receiptPath, backupPath, receipt };
+}
+
+/** Preflight does not consume the one runtime loader-recovery attempt. */
+export async function extendPreflightOptionalExtensionRecovery(
+  transaction: OptionalExtensionRecoveryTransaction,
+  failureText: string
+): Promise<OptionalExtensionRecoveryTransaction | undefined> {
+  if (transaction.receipt.source !== "core-preflight" || transaction.receipt.runtimeRetryAttempted) return undefined;
+  const current = parseProfile(await readFile(transaction.profilePath, "utf8"), path.dirname(transaction.profilePath));
+  const selection = selectCandidates(current.candidates, failureText);
+  if (selection === undefined) return undefined;
+  const original = parseProfile(await readFile(transaction.backupPath, "utf8"), path.dirname(transaction.profilePath));
+  const entries = [...transaction.receipt.entries, ...selection.entries.map(({matchValues: _matches, local: _local, ...entry}) => ({
+    ...entry, originalBundleIndex: original.bundles.indexOf(entry.packageName)
+  }))];
+  if (entries.some(entry => entry.originalBundleIndex < 0)) return undefined;
+  const receipt: DesktopExtensionQuarantineReceipt = {...transaction.receipt,
+    runtimeRetryAttempted: true, updatedAtMillis: Date.now(), entries,
+    mode: selection.mode === "local-safe-mode" ? "local-safe-mode" : transaction.receipt.mode,
+    failureLogTail: sanitizedFailureTail(failureText),
+    failureSummary: `扩展 ${entries.map(entry => entry.packageName).join(", ")} 启动时加载失败，已自动停用`.slice(0, 2_000)
+  };
+  const disabled = new Set(entries.map(entry => entry.packageName));
+  setProfileBundles(current.value, current.bundles.filter(name => !disabled.has(name)));
+  try {
+    // Persist the attempt before spawning: interruption must never reopen this retry.
+    await writeReceipt(transaction.receiptPath, receipt);
+    transaction.receipt = receipt;
+    await writeTextAtomically(transaction.profilePath, `${JSON.stringify(current.value, undefined, 2)}\n`, (await stat(transaction.profilePath)).mode & 0o777);
+  } catch (error) {
+    await restoreOptionalExtensionRecovery(transaction);
+    throw error;
+  }
+  return transaction;
+}
+
+/** Preserve the final trial's cause separately from the original loader diagnosis. */
+export class OptionalExtensionRecoveryFailure extends Error {
+  readonly effectiveFailureText: string;
+  constructor(message: string, failure: unknown) {
+    super(message, {cause: failure});
+    this.name = "OptionalExtensionRecoveryFailure";
+    this.effectiveFailureText = failure instanceof Error ? failure.message : String(failure);
+  }
+}
+
+/** Classify the final failure, not an earlier optional error retained for diagnostics. */
+export async function isOptionalExtensionProfileFailure(dshHome: string, failure: unknown): Promise<boolean> {
+  let failureText = failure instanceof Error ? failure.message : String(failure);
+  const seen = new Set<unknown>();
+  let current = failure;
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof OptionalExtensionRecoveryFailure) {
+      failureText = current.effectiveFailureText;
+      break;
+    }
+    current = current.cause;
+  }
+  try {
+    const file = profileManifestPath(dshHome);
+    const parsed = parseProfile(await readFile(file, "utf8"), path.dirname(file));
+    return selectCandidates(parsed.candidates, failureText) !== undefined;
+  } catch { return false; }
 }
 
 export async function activateOptionalExtensionRecovery(
@@ -221,7 +292,8 @@ export async function loadPendingOptionalExtensionRecovery(
 
 /** Re-apply active quarantine facts after another Profile transaction restores an older manifest. */
 export async function enforceActiveOptionalExtensionRecoveries(
-  input: OptionalExtensionRecoveryConfig
+  input: OptionalExtensionRecoveryConfig,
+  options?: {pendingQuarantineId: string}
 ): Promise<string[]> {
   const root = quarantineDirectory(input.dshHome);
   const directories = await readdir(root, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
@@ -236,7 +308,8 @@ export async function enforceActiveOptionalExtensionRecoveries(
         path.join(root, directory.name, RECEIPT_FILE_NAME),
         "utf8"
       ));
-      if (receipt.phase !== "active" || receipt.environment !== input.environment) continue;
+      if (receipt.environment !== input.environment) continue;
+      if (receipt.phase !== "active" && !(receipt.phase === "pending" && receipt.quarantineId === options?.pendingQuarantineId)) continue;
       for (const entry of receipt.entries) {
         if (entry.resolvedAtMillis === undefined && entry.reenableRequestedAtMillis === undefined) {
           disabledPackages.add(entry.packageName);
@@ -261,6 +334,14 @@ export async function enforceActiveOptionalExtensionRecoveries(
     profileMode === 0 ? 0o600 : profileMode
   );
   return removed;
+}
+
+function selectIncompatibleCandidates(candidates: ProfileCandidate[], names: string[]): {mode: "targeted"; entries: ProfileCandidate[]} | undefined {
+  const requested = new Set(names);
+  const entries = candidates.filter(candidate => requested.has(candidate.packageName));
+  // Preflight must never turn an unknown/protected package into a broad safe mode.
+  if (entries.length === 0 || entries.length !== requested.size) return undefined;
+  return {mode: "targeted", entries};
 }
 
 function selectCandidates(
@@ -363,6 +444,8 @@ function parseReceipt(text: string): DesktopExtensionQuarantineReceipt {
   }
   return {
     schemaVersion: 1,
+    ...(value.source === "core-preflight" ? {source: "core-preflight" as const} : {}),
+    ...(value.runtimeRetryAttempted === true ? {runtimeRetryAttempted: true as const} : {}),
     quarantineId: value.quarantineId,
     environment: value.environment,
     phase: value.phase as DesktopExtensionQuarantinePhase,

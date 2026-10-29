@@ -28,6 +28,26 @@ describe("desktop device snapshot", () => {
     expect((await createDesktopDeviceReader("win32", read, () => "PC")()).computerName).toBe("PC");
     expect(read).not.toHaveBeenCalled();
   });
+  it("falls back to the hostname when reading the computer name rejects", async () => {
+    const read = vi.fn(async (file: string) => {
+      if (file.endsWith("scutil")) throw new Error("unavailable");
+      return "";
+    });
+    expect((await createDesktopDeviceReader("darwin", read, () => "fallback-host")()).computerName).toBe("fallback-host");
+  });
+  it.each([
+    ["a".repeat(100), "a".repeat(80)],
+    ["电脑".repeat(30), "电脑".repeat(20)],
+    ["💻".repeat(50), "💻".repeat(30)],
+  ])("keeps long names valid within the registration byte limit", async (name, expected) => {
+    const read = vi.fn(async (file: string) => file.endsWith("scutil") ? name : "");
+    const actual = (await createDesktopDeviceReader("darwin", read, () => "fallback")()).computerName;
+    expect(actual).toBe(expected);
+    expect(actual.length).toBeLessThanOrEqual(80);
+    expect(Buffer.byteLength(actual, "utf8")).toBeLessThanOrEqual(120);
+    expect(actual).not.toContain("\ufffd");
+    expect(name.startsWith(actual)).toBe(true);
+  });
 });
 
 it("reads the SSID only for the active Wi-Fi interface and does not cache it", async () => {

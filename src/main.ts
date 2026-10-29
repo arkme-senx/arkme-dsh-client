@@ -1,8 +1,9 @@
+import { isOptionalExtensionProfileFailure } from "./optional-extension-recovery.js";
+import { profileCoreRecoveryKey } from "./profile-core-compatibility.js";
 import { DesktopDeviceLockOwner } from "./device-lock-owner.js";
 import { FileDeviceLockStore } from "./device-lock-store.js";
 import { DeviceLockSurfaces } from "./device-lock-surfaces.js";
 import { deviceAuthExecutable, runDeviceAuthentication } from "./device-lock-native-auth.js";
-import { hostname } from "node:os";
 import { StartupDiagnostics } from "./startup-diagnostics.js";
 import { release as osRelease } from "node:os";
 import { pluginHostEnvironment } from "./plugin-host-policy.js";
@@ -23,7 +24,7 @@ import { assertPreviousHarnessExited } from "./harness-process-lifetime.js";
 import { RuntimeDataTransactionStore, type RuntimeDataTransaction } from "./runtime-data-transaction.js";
 import { beginRuntimeUpgrade, commitRuntimeUpgrade, recoverRuntimeUpgrade, restoreFailedRuntimeTrial } from "./runtime-upgrade.js";
 import { RUNTIME_CACHE_EPOCH, readPreviousRuntimeBaseline, resolveRuntimeCacheRoot } from "./runtime/cache-epoch.js";
-import { createDesktopDeviceReader } from "./desktop-device.js";
+import { createDesktopDeviceReader, readDesktopComputerName } from "./desktop-device.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { access, mkdir, readFile } from "node:fs/promises";
@@ -350,7 +351,7 @@ const desktopDeviceLock = process.platform === "darwin" || process.platform === 
   store: new FileDeviceLockStore(path.join(app.getPath("userData"), "device-lock.json")),
   baseURL: runtimeServiceConfig.serviceBaseUrl,
   platform: process.platform === "darwin" ? "macos" : "windows",
-  name: hostname().slice(0, 80),
+  name: readDesktopComputerName(),
   available: () => runDeviceAuthentication(deviceAuthExecutable(app.isPackaged ? process.resourcesPath : moduleDirectory), "--check"),
   authenticate: signal => runDeviceAuthentication(deviceAuthExecutable(app.isPackaged ? process.resourcesPath : moduleDirectory), "--authenticate", signal),
   changed: snapshot => {
@@ -466,7 +467,7 @@ registerDesktopLocationIpc({
   handle(channel, handler) {
     ipcMain.handle(channel, (event, value: unknown) => handler({
       sender: { id: event.sender.id },
-      senderFrame: event.senderFrame === null ? null : { url: event.senderFrame.url }
+      senderFrame: event.senderFrame === null || event.senderFrame !== event.sender.mainFrame ? null : { url: event.senderFrame.url }
     }, value));
   }
 }, {
@@ -480,6 +481,12 @@ registerDesktopLocationIpc({
       url: window.webContents.getURL(),
       webContentsId: window.webContents.id
     };
+  },
+  getLocationWindow: id => {
+    if (!longArticleWindows.isActive(id) || longArticleWindows.context(id)?.surface !== "location") return null;
+    const window = BrowserWindow.getAllWindows().find(value => value.webContents.id === id);
+    if (!window || window.isDestroyed()) return null;
+    return { destroyed: false, focused: window.isFocused(), url: window.webContents.getURL(), webContentsId: id };
   },
   getService: () => desktopLocationPermission,
   openSettings: async () => {
@@ -1092,15 +1099,17 @@ async function launchHarnessRuntime(
       const failedReleaseId = runtime.release.releaseId;
       const reason = error instanceof Error ? error.message : String(error);
       const artifactFailure = isDeterministicRuntimeArtifactError(error);
+      const profileFailure = !artifactFailure && !(error instanceof RuntimePluginReadinessError)
+        && await isOptionalExtensionProfileFailure(paths.dshHome, error);
       const fallback = artifactFailure
         ? await runtimeManager.quarantineCandidate({
           code: runtimeArtifactFailureCode(error),
           reason
         })
         : await runtimeManager.rollbackCandidate({
-          phase: error instanceof RuntimePluginReadinessError ? "plugin-health" : "unknown",
-          scope: error instanceof RuntimePluginReadinessError ? "artifact" : "unknown",
-          code: error instanceof RuntimePluginReadinessError ? error.code : "RUNTIME_START_FAILED",
+          phase: error instanceof RuntimePluginReadinessError ? "plugin-health" : "harness-start",
+          scope: error instanceof RuntimePluginReadinessError ? "artifact" : profileFailure ? "profile" : "unknown",
+          code: error instanceof RuntimePluginReadinessError ? error.code : profileFailure ? "PROFILE_EXTENSION_START_FAILED" : "RUNTIME_START_FAILED",
           reason
         });
       if (fallback === undefined) {
@@ -1168,6 +1177,7 @@ async function resolveLaunchRuntime(userDataPath: string, shellVersionCode: numb
   runtimeManager = new ElectronRuntimeManager({
     root,
     cacheEpoch: RUNTIME_CACHE_EPOCH,
+    profileRecoveryKey: () => profileCoreRecoveryKey(userDataPath),
     environment: runtimeEnvironment,
     manifestContext: {
       os: process.platform === "win32" ? "windows" : process.platform,
@@ -1290,6 +1300,11 @@ async function initializeHarnessRuntime(
   const supervisor = new HarnessProcessSupervisor({
     // MAS x64 under Rosetta needs additional time to initialize the embedded runtime.
     ...(masChannel && process.arch === "x64" ? { startupTimeoutMs: 300_000 } : {}),
+    ...(runtime.runtimeManaged ? {coreDependencyPolicy: {
+      modulePath: path.join(path.dirname(resolveArkmePreloadPath(
+        moduleDirectory, app.isPackaged, process.resourcesPath
+      )), "harness-core-dependencies.js")
+    }} : {}),
     processGuard: {
       modulePath: path.join(path.dirname(resolveArkmePreloadPath(
         moduleDirectory, app.isPackaged, process.resourcesPath
@@ -1727,6 +1742,7 @@ function createMainWindow(): void {
     mainWindow.webContents.on("did-start-navigation", () => drag.cancel());
   }
   installHarnessPermissionPolicy(mainWindow.webContents.session, {
+    isLocationWebContents: id => longArticleWindows.isActive(id) && longArticleWindows.context(id)?.surface === "location",
     isDeviceLocked: () => desktopDeviceLock?.protected === true,
     getActiveHarnessOrigin: () => activeHarnessOrigin,
     getMainWebContentsId: () => {

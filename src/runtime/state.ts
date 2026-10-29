@@ -52,6 +52,7 @@ export interface RuntimeInstallState {
   badReleases: BadRuntimeRelease[];
   deferredReleases: RuntimeLaunchFailure[];
   launchFailures: RuntimeLaunchFailure[];
+  profileRecoveryAttempts?: Array<{releaseId: string; key: string}>;
   lastError?: { message: string; occurredAt: string };
 }
 
@@ -198,6 +199,18 @@ export function parseRuntimeInstallState(
     throw new Error("Electron runtime state contains an invalid candidate attempt");
   }
   validateStateArrays(state);
+  if (state.profileRecoveryAttempts !== undefined) {
+    if (!Array.isArray(state.profileRecoveryAttempts) || state.profileRecoveryAttempts.length > 20) {
+      throw new Error("Invalid Profile recovery attempts");
+    }
+    for (const attempt of state.profileRecoveryAttempts) {
+      if (attempt === null || typeof attempt !== "object"
+        || !isElectronRuntimeReleaseId(attempt.releaseId)
+        || typeof attempt.key !== "string" || !/^[a-f0-9]{64}$/.test(attempt.key)) {
+        throw new Error("Invalid Profile recovery attempt");
+      }
+    }
+  }
   return state as unknown as RuntimeInstallState;
 }
 
