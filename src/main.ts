@@ -13,6 +13,7 @@ import {installScreenshotShortcut} from './screenshot-shortcut-ipc.js';
 import { installScreenshotIpc } from './desktop-screenshot-ipc.js';
 import { ConversationDraftSaveError, installConversationWindowIpc } from './conversation-window-ipc.js';
 import { installAttachmentPreviewNative } from "./attachment-preview-native.js";
+import { installDayReviewConfirmationWindow } from "./day-review-confirmation-window.js";
 import { installLongArticleWindowIpc } from "./long-article-window-ipc.js";
 import { DesktopSessionSelection } from "./session-selection.js";
 import { DesktopRecordingFiles, type RecordingFilesContext } from './recording-import-files.js';
@@ -1834,6 +1835,7 @@ function createMainWindow(): void {
 
 function installNavigationPolicy(window: BrowserWindow): void {
   const attachmentPreview = installAttachmentPreviewNative(window, () => activeHarnessOrigin);
+  const dayReviewConfirmation = installDayReviewConfirmationWindow(window, () => activeHarnessOrigin);
   const handleNavigation = (event: Electron.Event, targetUrl: string) => {
     const decision = decideNavigation(targetUrl, {
       statusPageUrl,
@@ -1850,6 +1852,8 @@ function installNavigationPolicy(window: BrowserWindow): void {
   window.webContents.on("will-redirect", handleNavigation);
   window.webContents.on("will-attach-webview", (event) => event.preventDefault());
   window.webContents.setWindowOpenHandler(details => {
+    const confirmation = dayReviewConfirmation.handle(details);
+    if (confirmation) return confirmation;
     const preview = attachmentPreview.handle(details);
     if (preview) return preview;
     const { url } = details;
