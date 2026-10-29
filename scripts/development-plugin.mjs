@@ -76,6 +76,12 @@ export function buildDevelopmentCommands(options) {
     },
     {
       command: process.execPath,
+      args: ["scripts/verify-electron-runtime.mjs", "--harness"],
+      cwd: options.projectRoot,
+      ...environment
+    },
+    {
+      command: process.execPath,
       args: ["scripts/copy-static.mjs"],
       cwd: options.projectRoot,
       ...environment

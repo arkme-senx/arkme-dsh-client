@@ -10,6 +10,9 @@ it('keeps MAS native addons inside the signed bundle without changing website lo
  expect(mas.NARB_DISABLE_NATIVE_CACHE).toBe('1');
  expect(JSON.parse(mas.ARKME_HOST_POLICY!)).toEqual(JSON.parse(pluginHostPolicy(true)));
  const website=pluginHostEnvironment(false,'/isolated space/a');
+ expect(website.ARKME_DEVELOPMENT_HOST).toBe("1");
+ expect(pluginHostEnvironment(false)).not.toHaveProperty("ARKME_DEVELOPMENT_HOST");
+ expect(mas).not.toHaveProperty("ARKME_DEVELOPMENT_HOST");
  expect(website).not.toHaveProperty('NARB_DISABLE_NATIVE_CACHE');
  expect(website.ARKME_HOST_POLICY).toBe(pluginHostPolicy(false,'/isolated space/a'));
 });
