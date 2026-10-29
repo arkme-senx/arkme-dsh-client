@@ -212,6 +212,22 @@ describe("development plugin selection", () => {
 });
 
 describe("development commands", () => {
+  test("never launches Electron after a failed real-runtime compatibility check", async () => {
+    const projectRoot = await createProject();
+    const installedPlugin = await createPlugin(projectRoot, "installed");
+    const calls: string[] = [];
+    await expect(runDevelopment({
+      projectRoot, workingDirectory: projectRoot, environment: {},
+      resolveInstalledPlugin: () => installedPlugin,
+      electronExecutable: "electron-test", log: () => {},
+      runCommand: async command => {
+        calls.push(command.command);
+        return { code: command.args.includes("--harness") ? 1 : 0, signal: null };
+      }
+    })).rejects.toThrow('verify-electron-runtime.mjs');
+    expect(calls).not.toContain('electron-test');
+  });
+
   test("builds the local plugin before compiling and launching Harness", () => {
     const localPlugin = "/plugins/arkme";
     const commands = buildDevelopmentCommands({
@@ -225,6 +241,7 @@ describe("development commands", () => {
     expect(commands.map(({ command, args }) => [command, args])).toEqual([
       ["pnpm", ["run", "build"]],
       ["pnpm", ["exec", "tsc", "-p", "tsconfig.build.json"]],
+      [process.execPath, ["scripts/verify-electron-runtime.mjs", "--harness"]],
       [process.execPath, ["scripts/copy-static.mjs"]],
       ["/harness/node_modules/.bin/electron", ["."]]
     ]);
@@ -242,6 +259,7 @@ describe("development commands", () => {
     });
 
     expect(commands.slice(0, -1).map((command) => command.environment)).toEqual([
+      environment,
       environment,
       environment,
       environment
@@ -263,6 +281,7 @@ describe("development commands", () => {
     expect(commands.map((command) => command.environment)).toEqual([
       undefined,
       undefined,
+      undefined,
       undefined
     ]);
   });
@@ -278,6 +297,7 @@ describe("development commands", () => {
       });
 
       expect(commands.slice(0, -1).map((command) => command.environment)).toEqual([
+        undefined,
         undefined,
         undefined,
         undefined
@@ -302,10 +322,12 @@ describe("development commands", () => {
 
     expect(commands.map(({ command, args }) => [command, args])).toEqual([
       ["pnpm", ["exec", "tsc", "-p", "tsconfig.build.json"]],
+      [process.execPath, ["scripts/verify-electron-runtime.mjs", "--harness"]],
       [process.execPath, ["scripts/copy-static.mjs"]],
       ["electron", ["."]]
     ]);
     expect(commands.map((command) => command.environment)).toEqual([
+      { PATH: "/bin" },
       { PATH: "/bin" },
       { PATH: "/bin" },
       { PATH: "/bin" }
@@ -340,6 +362,7 @@ describe("development commands", () => {
     expect(calls.map(({ command, args }) => [command, args])).toEqual([
       ["pnpm-test", ["run", "build"]],
       ["pnpm-test", ["exec", "tsc", "-p", "tsconfig.build.json"]],
+      [process.execPath, ["scripts/verify-electron-runtime.mjs", "--harness"]],
       [process.execPath, ["scripts/copy-static.mjs"]],
       ["electron-test", ["."]]
     ]);

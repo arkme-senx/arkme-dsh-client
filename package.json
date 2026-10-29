@@ -14,7 +14,8 @@
   "scripts": {
     "prepare:mas": "node scripts/mas/prepare.mjs",
     "test:mas": "vitest run tests/mas",
-    "build": "node scripts/validate-app-version-code.mjs && node scripts/build-device-auth.mjs && tsc -p tsconfig.build.json && node scripts/copy-static.mjs",
+    "verify:electron": "node scripts/verify-electron-runtime.mjs",
+    "build": "node scripts/verify-electron-runtime.mjs && node scripts/validate-app-version-code.mjs && node scripts/build-device-auth.mjs && tsc -p tsconfig.build.json && node scripts/verify-electron-runtime.mjs --harness && node scripts/copy-static.mjs",
     "build:test": "ARKME_RUNTIME_SERVICE_BASE_URL=https://jotmo.senguo.me pnpm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",

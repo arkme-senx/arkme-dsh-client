@@ -41,6 +41,7 @@ Harness 运行环境覆盖上述全部目标。桌面客户端内置的更新检
 
 - Node.js 24 或更高版本
 - pnpm 11.19.0
+- Electron 使用 `package.json` / lockfile 固定的 **43.2.0（ABI 148）**，不要全局安装、单独升级/降级，或用 `ELECTRON_OVERRIDE_DIST_PATH` 指向其他版本。
 - macOS 开发与打包需要 Xcode Command Line Tools，用于构建系统通知权限查询模块
 - 已配置 GitHub SSH 访问；生产插件依赖通过 Git SSH 固定到经过审查的 Commit
 
@@ -62,6 +63,10 @@ ARKME_PLUGIN_PATH=/absolute/path/to/arkme-dsh-plugin pnpm dev
 ```
 
 当使用本地插件仓库时，每次执行 `pnpm dev` 都会先构建插件，再构建并启动桌面客户端。插件源码变化后需要重启开发客户端才能重新构建并加载。
+
+`pnpm dev` 和 `pnpm build` 会检查依赖声明、已安装包及实际 Electron 二进制的版本，并在客户端编译后用真实 Electron 验证 Harness 主线程和 ESM Worker 的内部模块加载。开发模式由客户端预加载适配器处理当前 Harness 原生加载器不支持 Electron 43.2.0 指纹的问题，不修改 DSH 源文件，也不需要临时退回 Electron 43.0.0。正式包仍沿用其已准备好的运行环境。
+
+遇到版本不一致，先执行 `pnpm install --frozen-lockfile`，再执行 `pnpm verify:electron` 和 `pnpm build`；不要复制另一 worktree 的 Electron 二进制。升级 Electron 时必须同步校验运行环境合同、ABI、原生依赖及 Harness 兼容性。构建检查失败不会自动更换版本或修改已安装的正式应用。
 
 ## 测试与构建
 

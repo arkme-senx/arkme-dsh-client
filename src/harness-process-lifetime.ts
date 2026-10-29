@@ -17,15 +17,16 @@ export function harnessWorkerExecArgv(requested: string[] | undefined, inherited
   return result;
 }
 
-function installMasBuiltinCompatibility(): void {
+function installHarnessBuiltinCompatibility(): void {
   // Electron's Worker process.versions may omit electron; inherit the verified host version.
   const inherited = getEnvironmentData(builtinCompatibilityKey) as {electronVersion?: string} | undefined;
-  if ((process.versions.electron ?? inherited?.electronVersion) !== '43.2.0' || !process.execArgv.includes('--expose-internals')
-    || process.env.NARB_DISABLE_NATIVE_CACHE !== '1') return;
+  if ((process.versions.electron ?? inherited?.electronVersion) !== '43.2.0' || !process.execArgv.includes('--expose-internals')) return;
   const policy = JSON.parse(process.env.ARKME_HOST_POLICY ?? '{}') as {schemaVersion?: number; distribution?: string};
-  if (policy.schemaVersion !== 1 || policy.distribution !== 'mas') return;
+  const mas = policy.distribution === 'mas' && process.env.NARB_DISABLE_NATIVE_CACHE === '1';
+  const development = policy.distribution === 'website' && process.env.ARKME_DEVELOPMENT_HOST === '1';
+  if (policy.schemaVersion !== 1 || (!mas && !development)) return;
   const entry = process.env.DSH_INSTALLED_MODULE_BASE_PATH;
-  if (entry === undefined) throw new Error('MAS builtin compatibility requires the embedded Harness entry');
+  if (entry === undefined) throw new Error('Harness builtin compatibility requires the selected Harness entry');
   setEnvironmentData(builtinCompatibilityKey, {electronVersion: '43.2.0'});
   const hostRequire = createRequire(import.meta.url);
   // Match the existing Electron 43.2.0 adapter in dsh-app-boot's main thread.
@@ -48,7 +49,7 @@ function installMasBuiltinCompatibility(): void {
   syncBuiltinESMExports();
 }
 
-installMasBuiltinCompatibility();
+installHarnessBuiltinCompatibility();
 
 export interface HarnessProcessReceipt { schemaVersion: 1; pid: number; generation: string; }
 const mutations = new Map<string, Promise<void>>();
