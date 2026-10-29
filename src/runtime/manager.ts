@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   isDeterministicRuntimeArtifactError,
@@ -110,6 +110,7 @@ export class ElectronRuntimeManager {
   private readonly legacyUnmarkedReleaseIds = new Set<string>();
   private discardExistingRuntime = false;
   private stateNeedsPersistence = false;
+  private resetInFlight: Promise<ResolvedElectronRuntime> | undefined;
   private prepareForLaunchInFlight: Promise<ResolvedElectronRuntime> | undefined;
   private stageLatestInFlight: Promise<ElectronRuntimeStageLatestResult> | undefined;
   private lastManifestCheckStartedAtMillis?: number;
@@ -128,6 +129,7 @@ export class ElectronRuntimeManager {
     progress?: (state: RuntimeInstallProgress) => void,
     options: { manualRetry?: boolean } = {}
   ): Promise<ResolvedElectronRuntime> {
+    if (this.resetInFlight !== undefined) return this.resetInFlight;
     if (this.prepareForLaunchInFlight !== undefined) return this.prepareForLaunchInFlight;
     const task = this.performPrepareForLaunch(progress, options.manualRetry === true);
     this.prepareForLaunchInFlight = task;
@@ -253,6 +255,7 @@ export class ElectronRuntimeManager {
   stageLatest(
     progress?: (state: RuntimeInstallProgress) => void
   ): Promise<ElectronRuntimeStageLatestResult> {
+    if (this.resetInFlight !== undefined) return Promise.resolve("deferred");
     if (this.stageLatestInFlight !== undefined) return this.stageLatestInFlight;
     const task = this.performStageLatest(progress);
     this.stageLatestInFlight = task;
@@ -273,6 +276,7 @@ export class ElectronRuntimeManager {
         () => "throttled" as const
       );
     }
+    if (this.resetInFlight !== undefined) return Promise.resolve("deferred");
     if (this.stageLatestInFlight !== undefined) return this.stageLatestInFlight;
     const nowMillis = this.now().getTime();
     if (this.lastManifestCheckStartedAtMillis !== undefined) {
@@ -417,6 +421,60 @@ export class ElectronRuntimeManager {
     return state.activeReleaseId === undefined
       ? undefined
       : await this.resolveRelease(state.activeReleaseId, false);
+  }
+
+  async waitForIdle(): Promise<void> {
+    await Promise.allSettled([this.prepareForLaunchInFlight, this.stageLatestInFlight]);
+  }
+
+  resetCurrentEnvironment(
+    progress?: (state: RuntimeInstallProgress) => void
+  ): Promise<ResolvedElectronRuntime> {
+    if (this.resetInFlight !== undefined) return this.resetInFlight;
+    const task = this.performReset(progress);
+    this.resetInFlight = task;
+    const clear = () => { if (this.resetInFlight === task) this.resetInFlight = undefined; };
+    void task.then(clear, clear);
+    return task;
+  }
+
+  private async performReset(progress?: (state: RuntimeInstallProgress) => void): Promise<ResolvedElectronRuntime> {
+    await this.waitForIdle();
+    if ((await lstat(this.options.root)).isSymbolicLink()) {
+      throw new Error("Refusing to reset a linked runtime cache root");
+    }
+    const previous = await this.readState();
+    let baseline = await this.readAcquisition();
+    const releaseId = previous.candidateReleaseId ?? previous.activeReleaseId;
+    if (releaseId !== undefined) {
+      // Read the manifest without validating damaged runtime files.
+      baseline = parseElectronRuntimeManifest(JSON.parse(await readFile(
+        path.join(this.releasesPath, releaseId, "release.json"), "utf8"
+      )), this.options.manifestContext);
+    }
+    baseline ??= this.options.readInitialBaseline === undefined
+      ? this.options.initialBaseline : await this.options.readInitialBaseline();
+    const manifest = parseElectronRuntimeManifest(await this.fetchLatestManifest(baseline), this.options.manifestContext);
+    if (baseline !== undefined && compareElectronRuntimeCandidate(baseline, manifest) === "stale") {
+      throw new RuntimeArtifactValidationError("RECOVERY_BASELINE_CODE_REGRESSION",
+        "Runtime component Code cannot decrease during reset", "manifest");
+    }
+    // Only this environment's current cache epoch is disposable. Never remove
+    // userData, dsh-containers, profiles, or data-transaction journals.
+    const state = createEmptyRuntimeState(this.options.environment);
+    // Keep the selected compatible baseline durable across interruption of cleanup.
+    await this.writeAcquisition(manifest);
+    await this.writeState(state);
+    await Promise.all([this.releasesPath, this.downloadsPath, this.stagingPath]
+      .map(target => rm(target, { recursive: true, force: true })));
+    this.legacyUnmarkedReleaseIds.clear();
+    this.discardExistingRuntime = false;
+    await this.ensureDirectories();
+    await this.install(manifest, progress);
+    beginRuntimeCandidate(state, manifest.releaseId);
+    await this.markProfileCandidateAttempted(state);
+    await this.writeState(state);
+    return this.resolveRelease(manifest.releaseId, true);
   }
 
   async reloadCurrentEnvironment(

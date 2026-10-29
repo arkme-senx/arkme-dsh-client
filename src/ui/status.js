@@ -94,7 +94,10 @@ if (kind === "runtime-installing") {
   technicalDetailsElement.hidden = technicalDetails.length === 0;
   chooseWorkspaceAction.hidden = networkWaiting || !showWorkspaceAction;
   retryAction.hidden = networkWaiting ? false : showReloadRuntimeAction;
-  reloadRuntimeAction.hidden = networkWaiting || !showReloadRuntimeAction;
+  reloadRuntimeAction.hidden = !(params.get("canResetRuntime") === "1" || (!networkWaiting && showReloadRuntimeAction));
+  const resetHint = document.querySelector("#runtime-reset-hint");
+  resetHint.hidden = reloadRuntimeAction.hidden;
+  resetHint.textContent = "重置环境将重新下载运行组件，保留会话、附件、设置和工作区。";
   spinner.hidden = true;
   failureIcon.hidden = false;
   actions.hidden = false;
@@ -126,7 +129,7 @@ function renderRuntimeInstalling(progress) {
   title.textContent = "正在准备运行环境";
   messageElement.textContent = phase === "verify"
     ? "正在校验下载的运行环境"
-    : phase === "install" ? "正在安装 Harness 和 Arkme 插件" : "首次启动需要下载运行环境";
+    : phase === "install" ? "正在安装 Harness 和 Arkme 插件" : "正在下载 Harness 和 Arkme 插件";
   spinner.hidden = false;
   failureIcon.hidden = true;
   actions.hidden = true;

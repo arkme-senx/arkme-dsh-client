@@ -59,11 +59,12 @@
 
       <nav id="actions" class="actions" aria-label="错误恢复操作" hidden>
         <a id="retry-action" class="button primary" href="app-action://retry">重试</a>
-        <a id="reload-runtime-action" class="button primary" href="app-action://reload-runtime" hidden>重新加载当前环境</a>
+        <a id="reload-runtime-action" class="button primary" href="app-action://reload-runtime" hidden>重置环境</a>
         <a id="choose-workspace-action" class="button" href="app-action://choose-workspace">选择其他项目</a>
         <a class="button subtle" href="app-action://open-logs">打开日志</a>
         <button id="copy-logs-action" class="button subtle" type="button">复制日志</button>
       </nav>
+      <p id="runtime-reset-hint" class="failure-suggestion" hidden></p>
       <p id="network-waiting-footer" class="network-waiting-footer" hidden></p>
     </main>
     <script src="./status.js"></script>

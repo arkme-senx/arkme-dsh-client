@@ -45,6 +45,7 @@ export type HarnessState =
     technicalDetails?: string;
     showWorkspaceAction?: boolean;
     showReloadRuntimeAction?: boolean;
+    canResetRuntime?: boolean;
   }
   | { kind: "stopping"; workspacePath: string };
 

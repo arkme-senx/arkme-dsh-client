@@ -244,6 +244,14 @@ describe("status UI", () => {
     expect(elements.get("environment-badge")?.textContent).toBe("测试环境");
   });
 
+  test("offers reset alongside retry for a managed Harness startup failure", async () => {
+    const {elements} = await renderStatus("?kind=failed&canResetRuntime=1&message=ERR_MODULE_NOT_FOUND");
+    expect(elements.get("reload-runtime-action")?.hidden).toBe(false);
+    expect(elements.get("retry-action")?.hidden).toBe(false);
+    expect(elements.get("runtime-reset-hint")?.hidden).toBe(false);
+    expect(elements.get("runtime-reset-hint")?.textContent).toContain("保留会话、附件、设置和工作区");
+  });
+
   test("keeps reload hidden for ordinary retryable launch failures", async () => {
     const { elements } = await renderStatus("?kind=failed&message=端口暂时不可用");
 
