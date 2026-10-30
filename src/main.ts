@@ -1,4 +1,3 @@
-import { ProductVersionHistory } from './product-version-history.js';
 import { isOptionalExtensionProfileFailure } from "./optional-extension-recovery.js";
 import { profileCoreRecoveryKey } from "./profile-core-compatibility.js";
 import { DesktopDeviceLockOwner } from "./device-lock-owner.js";
@@ -1672,16 +1671,6 @@ ipcMain.handle("arkme-session-selection:save", (event, value: unknown) => {
   return desktopSessionSelection.save(appUpdateSender(event), value).catch(error => {
     logDiagnostic("session-selection-save-failed", error);
     throw error;
-  });
-});
-
-const productVersionHistory = new ProductVersionHistory(path.join(app.getPath("userData"), "product-version-history.json"));
-ipcMain.handle("arkme-desktop:product-version", async (event, pluginVersion: unknown) => {
-  if (!isCurrentAppUpdateSender(event)) return false;
-  const clientVersionCode = await readAppVersionCode(path.join(app.getAppPath(), "package.json"));
-  return productVersionHistory.observe(pluginVersion, clientVersionCode).catch(error => {
-    logDiagnostic("product-version-history-failed", error);
-    return false;
   });
 });
 

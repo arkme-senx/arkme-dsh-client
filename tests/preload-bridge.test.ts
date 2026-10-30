@@ -238,14 +238,6 @@ describe("desktop notification preload", () => {
     expect(source).not.toContain("exposeInMainWorld(\"ipcRenderer\"");
   });
 
-  it("forwards only the plugin version to desktop-owned update history", async () => {
-    const { exposed, invokeCalls } = await executePreload("0.1.0-rc.8");
-    const desktop = exposed.arkmeDesktop as { productVersion: { showClientVersionCode(version: string): Promise<boolean> } };
-    expect(Object.isFrozen(desktop.productVersion)).toBe(true);
-    expect(await desktop.productVersion.showClientVersionCode("3.0.38")).toBe(true);
-    expect(invokeCalls).toContainEqual({ channel: "arkme-desktop:product-version", args: ["3.0.38"] });
-  });
-
   it("exposes the active Release Set Harness version as a read-only desktop capability", async () => {
     const { exposed, syncChannels } = await executePreload("0.1.0-rc.8");
     const desktop = exposed.arkmeDesktop as {

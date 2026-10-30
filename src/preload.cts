@@ -555,10 +555,6 @@ contextBridge.exposeInMainWorld(
     appUpdateUi: true as const,
     appVersion: ipcRenderer.sendSync("arkme-app-update:app-version") as string,
     appVersionCode: ipcRenderer.sendSync("arkme-app-update:app-version-code") as number | null,
-    productVersion: Object.freeze({
-      showClientVersionCode: async (pluginVersion: string): Promise<boolean> =>
-        await ipcRenderer.invoke("arkme-desktop:product-version", pluginVersion) === true,
-    }),
     runtimeManaged: true as const,
     ...(harnessVersion === undefined ? {} : { harnessVersion }),
     attention: Object.freeze(attentionCapabilities),
