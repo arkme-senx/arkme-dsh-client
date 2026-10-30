@@ -238,6 +238,14 @@ describe("desktop notification preload", () => {
     expect(source).not.toContain("exposeInMainWorld(\"ipcRenderer\"");
   });
 
+  it("forwards only the plugin version to desktop-owned update history", async () => {
+    const { exposed, invokeCalls } = await executePreload("0.1.0-rc.8");
+    const desktop = exposed.arkmeDesktop as { productVersion: { showClientVersionCode(version: string): Promise<boolean> } };
+    expect(Object.isFrozen(desktop.productVersion)).toBe(true);
+    expect(await desktop.productVersion.showClientVersionCode("3.0.38")).toBe(true);
+    expect(invokeCalls).toContainEqual({ channel: "arkme-desktop:product-version", args: ["3.0.38"] });
+  });
+
   it("exposes the active Release Set Harness version as a read-only desktop capability", async () => {
     const { exposed, syncChannels } = await executePreload("0.1.0-rc.8");
     const desktop = exposed.arkmeDesktop as {
@@ -683,6 +691,7 @@ describe("independent APP update preload UI", () => {
     expect(f.invokeCalls).toContainEqual({ channel: 'arkme-app-update:open', args: [] });
     f.emit('arkme-app-update:changed', { ...state('downloaded'), revision: 3 });
     expect(findByText(f.document.documentElement, '重启并安装')).toBeDefined();
+    expect(findByText(f.document.documentElement, '客户端新版本 2 已就绪')).toBeDefined();
   });
   it.each(['idle', 'checking', 'current', 'failed'])('renders nothing for %s without a confirmed newer release', async status => {
     const f = await executePreload(undefined, { appSnapshot: state(status, { latestVersion: undefined, latestVersionCode: undefined }) });
@@ -698,13 +707,13 @@ describe("independent APP update preload UI", () => {
   });
   it('shows a known target version while downloading and after download or install failure', async () => {
     const f = await executePreload(undefined, { appSnapshot: state('downloading') });
-    await vi.waitFor(() => expect(findByText(f.document.documentElement, '检测到新版本 v1.3.0')).toBeDefined());
+    await vi.waitFor(() => expect(findByText(f.document.documentElement, '检测到客户端新版本 2')).toBeDefined());
 
     f.emit('arkme-app-update:changed', { ...state('failed', { failureStage: 'download', error: 'checksum mismatch' }), revision: 2 });
-    expect(findByText(f.document.documentElement, 'v1.3.0 更新未完成')).toBeDefined();
+    expect(findByText(f.document.documentElement, '客户端新版 2 更新未完成')).toBeDefined();
 
     f.emit('arkme-app-update:changed', { ...state('failed', { failureStage: 'install', error: '上次安装未完成，请重新尝试' }), revision: 3 });
-    expect(findByText(f.document.documentElement, 'v1.3.0 更新未完成')).toBeDefined();
+    expect(findByText(f.document.documentElement, '客户端新版 2 更新未完成')).toBeDefined();
   });
   it('keeps runtime restart disabled when APP installing renders before or after runtime', async () => {
     const f = await executePreload(undefined, {
@@ -763,6 +772,7 @@ describe("independent APP update preload UI", () => {
     await Promise.resolve(); await Promise.resolve();
     f.emit('arkme-app-update:changed', { ...state('available'), revision: 4 });
     expect(findByText(f.document.documentElement, '重启并安装')).toBeDefined();
+    expect(findByText(f.document.documentElement, '客户端新版本 2 已就绪')).toBeDefined();
     await vi.waitFor(() => expect(f.document.getElementById('arkme-runtime-update-notice')).not.toBeNull());
     const app = f.document.getElementById('arkme-app-update-notice');
     const runtime = f.document.getElementById('arkme-runtime-update-notice');

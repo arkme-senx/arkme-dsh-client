@@ -254,10 +254,10 @@ function installAppUpdateNoticeRenderer(documentRef: Document = document): () =>
     const content = documentRef.createElement("div");
     content.className = "arkme-app-update-content";
     const title = documentRef.createElement("strong");
-    title.textContent = status === "downloaded" ? `客户端 v${state.latestVersion} 已就绪`
+    title.textContent = status === "downloaded" ? `客户端新版本 ${state.latestVersionCode} 已就绪`
       : status === "installing" ? "正在安装更新，即将重新启动…"
-      : status === "failed" ? `v${state.latestVersion} 更新未完成`
-      : `检测到新版本 v${state.latestVersion}`;
+      : status === "failed" ? `客户端新版 ${state.latestVersionCode} 更新未完成`
+      : `检测到客户端新版本 ${state.latestVersionCode}`;
     content.append(title);
     const detail = documentRef.createElement("p");
     detail.textContent = status === "failed" ? state.error ?? "请重试或前往官网下载最新版本"
@@ -555,6 +555,10 @@ contextBridge.exposeInMainWorld(
     appUpdateUi: true as const,
     appVersion: ipcRenderer.sendSync("arkme-app-update:app-version") as string,
     appVersionCode: ipcRenderer.sendSync("arkme-app-update:app-version-code") as number | null,
+    productVersion: Object.freeze({
+      showClientVersionCode: async (pluginVersion: string): Promise<boolean> =>
+        await ipcRenderer.invoke("arkme-desktop:product-version", pluginVersion) === true,
+    }),
     runtimeManaged: true as const,
     ...(harnessVersion === undefined ? {} : { harnessVersion }),
     attention: Object.freeze(attentionCapabilities),
