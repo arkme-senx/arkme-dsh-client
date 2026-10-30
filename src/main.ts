@@ -31,6 +31,7 @@ import { existsSync } from "node:fs";
 import { access, mkdir, readFile } from "node:fs/promises";
 import { RotatingLog } from "./rotating-log.js";
 import path from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   app,
@@ -325,6 +326,7 @@ interface HarnessLaunchPaths {
   harnessLogPath: string;
   runtimeScopeRef: string;
   accountScopeRequired: boolean;
+  localSessionStore?: {root: string; accountRef: string};
 }
 
 const desktopAccountScopes: DesktopAccountScopePort = {
@@ -777,6 +779,10 @@ async function bootstrap(manualRetry = false): Promise<void> {
   }
   runtime = await launchHarnessRuntime(runtime, accountScopeLaunchPaths(userDataPath, accountScope));
   activeLaunchRuntime = runtime;
+  if (deferredAccountScopeRelaunch && !holdCandidateNavigation) {
+    deferredAccountScopeRelaunch = false;
+    scheduleAccountScopeRelaunch();
+  }
   finishRuntimeBootstrap(accountScope.logPath);
 }
 
@@ -812,7 +818,7 @@ async function attestDesktopAccountScope(
   await conversationWindows.prepareToClose();
   // Reconciliation only plans legacy moves. The stopped-process relaunch owns
   // the actual rename, including recovery after commit but before migration.
-  const result = await store.reconcile(identity, {deferLegacyMigration: true});
+  const result = await store.reconcile(identity, {deferLegacyMigration: true, relaunchOnAccountClaim: process.env.ARKME_LOCAL_SESSION_TAKEOVER === "1"});
   if (result.status !== "ready") await renderAccountScopeWaiting();
   activeAccountScope = result.launch;
   accountScopeReady = result.status === "ready";
@@ -852,7 +858,7 @@ async function commitDesktopAccountScope(
   if (store === null) {
     throw new Error("DSH account scope transition is stale");
   }
-  const result = await store.reconcile(transition.identity, {deferLegacyMigration: true});
+  const result = await store.reconcile(transition.identity, {deferLegacyMigration: true, relaunchOnAccountClaim: process.env.ARKME_LOCAL_SESSION_TAKEOVER === "1"});
   accountScopeTransitions.complete(transitionRef);
   if (transition.identity.kind === "guest" && desktopDeviceLock?.snapshot().sessionEnded) await desktopDeviceLock.completeLocalLogout();
   activeAccountScope = result.launch;
@@ -897,7 +903,7 @@ async function renderAccountScopeWaiting(): Promise<void> {
 function scheduleAccountScopeRelaunch(): void {
   // Attestation may register an account during the trial, but moving its data
   // directory must wait until the verified runtime and snapshot commit together.
-  if (holdCandidateNavigation) {
+  if (holdCandidateNavigation || activeLaunchRuntime === null) {
     deferredAccountScopeRelaunch = true;
     return;
   }
@@ -943,7 +949,10 @@ function accountScopeLaunchPaths(
     dshHome: scope.dshHome,
     harnessLogPath: scope.logPath,
     runtimeScopeRef: scope.runtimeScopeRef,
-    accountScopeRequired: accountScopeStore !== null
+    accountScopeRequired: accountScopeStore !== null,
+    ...(process.env.ARKME_LOCAL_SESSION_TAKEOVER === "1" && scope.owner.kind === "account" ? {
+      localSessionStore: { root: path.join(homedir(), ".arkme", "sessions", runtimeEnvironment, scope.owner.accountRef), accountRef: scope.owner.accountRef }
+    } : {})
   };
 }
 
@@ -1284,8 +1293,16 @@ async function initializeHarnessRuntime(
     process.execPath,
     runtime.packageManagerCliPath
   );
+  if (paths.localSessionStore) {
+    await assertPreviousHarnessExited(path.join(paths.userDataPath, "runtime-process.json"));
+    const module = await import(pathToFileURL(path.join(runtime.arkmePluginPath, "lib", "local-session-store.js")).href) as {
+      prepareLocalSessionStore(input: { dshHome: string; root: string; accountRef: string; environment: string; dshVersion: string }): Promise<void>
+    };
+    await module.prepareLocalSessionStore({ dshHome: paths.dshHome, ...paths.localSessionStore, environment: runtimeEnvironment, dshVersion: dshVersion ?? "" });
+  }
   const provisionedProfile = await provisionArkmeWebProfile({
     dshHome: paths.dshHome,
+    ...(paths.localSessionStore ? {localSessionStore: paths.localSessionStore} : {}),
     environment: runtimeEnvironment,
     pluginDir: runtime.arkmePluginPath,
     appVersion: app.getVersion(),
@@ -1335,6 +1352,7 @@ async function initializeHarnessRuntime(
       ...packageManagerEnvironment,
       ARKME_APP_VERSION: app.getVersion(),
       ...pluginHostEnvironment(masChannel, app.isPackaged ? undefined : paths.userDataPath),
+      ...(paths.localSessionStore ? {ARKME_LOCAL_SESSION_ROOT: paths.localSessionStore.root} : {}),
       ...(paths.accountScopeRequired ? {
         ARKME_ACCOUNT_SCOPE_REQUIRED: "1",
         ARKME_DSH_RUNTIME_SCOPE_REF: paths.runtimeScopeRef

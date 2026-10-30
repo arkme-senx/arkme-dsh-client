@@ -206,7 +206,11 @@ async function handleRequest(
         return;
       }
       if (action.action === "device.lock.logout") {
-        assertExactKeys(action.payload, ["sessionId", "loginKey"]);
+        // Registration may be unavailable, so a logout can be fenced by the
+        // login key alone. Keep unknown fields rejected before reaching owner.
+        if (Object.keys(action.payload).some(key => key !== "sessionId" && key !== "loginKey")) {
+          throw new BridgeHttpError(400, "invalid_request");
+        }
         const { sessionId, loginKey } = action.payload;
         if ((sessionId !== undefined && (typeof sessionId !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(sessionId)))
           || (loginKey !== undefined && (typeof loginKey !== "string" || !/^[a-f0-9]{64}$/.test(loginKey)))
