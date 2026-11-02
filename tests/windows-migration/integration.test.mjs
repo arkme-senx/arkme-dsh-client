@@ -74,6 +74,11 @@ test.skipIf(!canTestProtectedAcls)('real Windows ACLs use stored SIDs while reje
  const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/acl-sid.ps1')],{encoding:'utf8'});
  expect(output).toContain('Windows ACL SID regression tests passed.');
 }, 60_000);
+test.skipIf(!canTestProtectedAcls)('shared shortcuts with inherited deletion grants support protected overlay and rollback', () => {
+ const shell = path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
+ const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/shortcut-acl.ps1')],{encoding:'utf8'});
+ expect(output).toContain('Windows shortcut ACL regression tests passed.');
+}, 60_000);
 test.skipIf(!process.env.ARKME_TEST_MAKENSIS)('real NSIS compiler accepts production migration macros', () => {
  const output=execFileSync(process.execPath,['scripts/windows-migration-compile-smoke.mjs'],{encoding:'utf8',env:process.env});
  expect(output).toContain('Processed 1 file');

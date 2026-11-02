@@ -903,11 +903,20 @@ function Save-Journal($Journal) {
 function Test-TrustedOwnerSid([string]$Sid) {
   return $Sid -in @('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
 }
-function Assert-ProtectedObject([string]$Path,[bool]$Ancestor) {
+function Assert-ProtectedObject([string]$Path,[bool]$Ancestor,[switch]$AllowShortcutDeletion) {
+  if ($AllowShortcutDeletion -and ($Ancestor -or [IO.Path]::GetExtension($Path) -ine '.lnk' -or !(Test-Path -LiteralPath $Path -PathType Leaf))) { throw 'Deletion compatibility is restricted to shortcut files.' }
   $acl = Get-Acl -LiteralPath $Path
   if (!(Test-TrustedOwnerSid ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value))) { throw 'Untrusted owner on elevated migration recovery path.' }
   $dangerous = [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
   if (!$Ancestor) { $dangerous = $dangerous -bor [Security.AccessControl.FileSystemRights]::Write }
+  # Shared shell links can inherit per-user Delete/DeleteSubdirectoriesAndFiles
+  # grants from Public Desktop / Common Programs. They are replaceable shell data,
+  # not executable payload or recovery metadata. Keep owner, write and ACL-control
+  # checks; only the shortcut call site may allow these deletion-only grants.
+  # Target/arguments and protected backup hashes still establish transaction ownership.
+  if ($AllowShortcutDeletion) {
+    $dangerous = $dangerous -band (-bnot ([Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles))
+  }
   # Read the stored SID directly. Access exposes localized NTAccount names;
   # converting application-package names back to SID can fail on Windows even
   # for standard read-only ACEs (S-1-15-2-1 / S-1-15-2-2).
@@ -1039,7 +1048,7 @@ function Begin-Overlay([string]$Stage, [string]$UninstallerName, $Legacy) {
     $exists = Test-Path -LiteralPath $file
     if ($exists) {
       $null = Assert-LocalPath $file
-      if ($Scope -eq 'all' -and $location.Role -ne 'Startup' -and $file -in @(Get-ShortcutPaths)) { Assert-ProtectedObject $file $false }
+      if ($Scope -eq 'all' -and $location.Role -ne 'Startup' -and $file -in @(Get-ShortcutPaths)) { Assert-ProtectedObject $file $false -AllowShortcutDeletion }
       $link=Read-ManagedShortcut $file
       $target = $link.Target
       $allowed = @((Join-Path $Destination 'arkme.exe'))
