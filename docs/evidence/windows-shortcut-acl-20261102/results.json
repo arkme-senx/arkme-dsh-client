@@ -1,0 +1,141 @@
+{
+  "date": "2026-11-02",
+  "os": "Windows 11 10.0.26200",
+  "baseline": "47689d8",
+  "scope": "isolated production Begin-Overlay and Recover-Overlay, real ACL/COM/Authenticode; not full NSIS",
+  "results": [
+    {
+      "suite": "acl-sid",
+      "exitCode": 0,
+      "passMarkers": [
+        "PASS standard application-package read ACEs",
+        "PASS inherited application-package read ACEs",
+        "PASS machine-wide overlay planning with signed payload",
+        "PASS dangerous application-package, unmapped SID and user grants remain blocked",
+        "PASS ancestor write semantics preserved",
+        "PASS deny ACE does not grant unsafe access",
+        "PASS inherit-only parent and effective child write semantics preserved",
+        "PASS untrusted owner remains blocked",
+        "Windows ACL SID regression tests passed."
+      ],
+      "rawLogSha256": "184dd293434ba698eb682b1ab56a11e28a7e6bc23349444b02fb7094b1d514d3"
+    },
+    {
+      "suite": "baseline",
+      "exitCode": 0,
+      "passMarkers": [
+        "PASS baseline reproduced CommonDesktopDirectory: Untrusted write, deletion, or ACL-control permission on elevated recovery path.",
+        "PASS baseline reproduced CommonPrograms: Untrusted write, deletion, or ACL-control permission on elevated recovery path.",
+        "Windows shortcut ACL regression tests passed."
+      ],
+      "rawLogSha256": "ce73e0b6c71ac462b568406067ce0fe62d4b61660b2d46ee827cd7d7097430e2"
+    },
+    {
+      "suite": "native-update",
+      "exitCode": 0,
+      "passMarkers": [
+        "Native update admission fixtures passed"
+      ],
+      "rawLogSha256": "ab28bd87fb22405429c2a1d44c5ea6062010faec78ddb514c4d213a85cf96418"
+    },
+    {
+      "suite": "protected-journal",
+      "exitCode": 0,
+      "passMarkers": [
+        "PROTECTED_STORAGE_AND_TRANSFER_PERMISSIONS_PASSED"
+      ],
+      "rawLogSha256": "7eb9b4b640e1f15f8175934c42a9a2063b349d1a83a690b04f93ff67db4a9dba"
+    },
+    {
+      "suite": "recovery",
+      "exitCode": 0,
+      "passMarkers": [
+        "PASS a complete initial pending journal recovers without the incoming manifest",
+        "PASS a second interruption after pending promotion is recoverable",
+        "PASS untrusted initial pending is preserved: malformed",
+        "PASS untrusted initial pending is preserved: active",
+        "PASS untrusted initial pending is preserved: committed",
+        "PASS untrusted initial pending is preserved: wrong-destination",
+        "PASS untrusted initial pending is preserved: wrong-source",
+        "PASS untrusted initial pending is preserved: wrong-registry",
+        "PASS untrusted initial pending is preserved: unknown-neighbor",
+        "PASS untrusted initial pending is preserved: directory",
+        "PASS a later EXE recovers an active older transaction using saved hashes",
+        "PASS unknown replacement at a later file prevents every restoration",
+        "PASS newer registration prevents rollback even when executable bytes are unchanged",
+        "PASS unknown shortcut prevents any program file restoration",
+        "PASS unknown registry children prevent every restoration",
+        "PASS known partial NSIS registration can be restored",
+        "PASS unknown journal file is detected before restoring the program",
+        "PASS empty terminal cleanup directory can be removed repeatedly",
+        "PASS unidentified nonempty directory stays intact",
+        "PASS committed cleanup accepts later installed bytes without changing them",
+        "PASS journal registry scope cannot escape current-user installation",
+        "PASS interrupted payload staging leaves live files intact and a later EXE can retry",
+        "PASS interrupted overlay between atomic replacements is repeatably recoverable",
+        "PASS interrupted rollback copy keeps live bytes valid and a second recovery succeeds",
+        "PASS tampered restoration scratch is preserved before any rollback",
+        "PASS tampered committed backup prevents cleanup",
+        "PASS a clean installation can roll back partial new registration",
+        "PASS a second interruption while cleaning partial backups remains recoverable",
+        "PASS a signed Flutter launcher build cannot be downgraded by a higher semantic version",
+        "PASS interrupted legacy retirement is restored together with owned registration",
+        "PASS unknown legacy retirement bytes prevent any new-program rollback",
+        "PASS malformed saved registry children abort before any restoration",
+        "PASS an originally absent startup entry cannot become transaction-owned during recovery",
+        "PASS machine Flutter with user Arkme restores both hives and external shortcuts after interruption",
+        "PASS mixed-scope recovery rejects a registry snapshot pointed at another hive",
+        "PASS user Flutter with machine Arkme restores original hives and files",
+        "PASS interrupted adjacent transfer is verified before rollback",
+        "PASS identical old and new file hashes still recover a partial transfer",
+        "PASS committed migration cleans its retired launchers before removing the journal",
+        "PASS unknown committed retirement keeps the journal and all other retirements",
+        "PASS partial committed cleanup preserves subsequently reinstalled Flutter",
+        "PASS regular update journals changed files only and restores after interruption",
+        "PASS native admission refuses active rollback and cleans only a committed transaction",
+        "PASS shared Flutter shortcut stays outside rollback and committed cleanup",
+        "PASS unregistered Flutter shortcut can roll back or commit without modifying its program or data",
+        "PASS incomplete registered Flutter installs separately and survives rollback or commit",
+        "PASS incomplete legacy admission rejects ambiguous ownership and retains healthy migration",
+        "Durable recovery fixtures passed."
+      ],
+      "rawLogSha256": "427c3a26857fdfe030e521dcc0f746327bc6a4dcd06b7578442ee1807ddb4180"
+    },
+    {
+      "suite": "shortcut-acl",
+      "exitCode": 0,
+      "passMarkers": [
+        "PASS shortcut deletion-only compatibility and unsafe ACL rejection: CommonDesktopDirectory",
+        "PASS overlay, protected backup, foreign-link preservation and rollback: CommonDesktopDirectory",
+        "PASS shortcut deletion-only compatibility and unsafe ACL rejection: CommonPrograms",
+        "PASS overlay, protected backup, foreign-link preservation and rollback: CommonPrograms",
+        "Windows shortcut ACL regression tests passed."
+      ],
+      "rawLogSha256": "0a9db97630e8aef1bc32d6031828f4d9c46cb4dde4a0d86898b1778988b360f5"
+    },
+    {
+      "suite": "shortcut-compatibility",
+      "exitCode": 0,
+      "passMarkers": [
+        "Shortcut compatibility fixtures passed"
+      ],
+      "rawLogSha256": "41a498cc0018e3bc872f5c2e0b6a05ea3989edb6dac5e74f4f4bfc79df95e43f"
+    },
+    {
+      "suite": "shortcuts",
+      "exitCode": 0,
+      "passMarkers": [
+        "Shortcut reconciliation fixtures passed."
+      ],
+      "rawLogSha256": "97cf87b98b6477a5c6fdd3ce1f7f04d2dbb7baf1ee52688d5434496ea307db02"
+    },
+    {
+      "suite": "transaction",
+      "exitCode": 0,
+      "passMarkers": [
+        "Windows migration filesystem transaction tests passed."
+      ],
+      "rawLogSha256": "0367d757b3d9195f7df459b602b6d718fc7a0ecc7efb398cc56d4a6a980eb52b"
+    }
+  ]
+}
