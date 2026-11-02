@@ -1,64 +1,64 @@
-﻿{
-    "dynamicRuntimeSmoke":  "not-run",
-    "version":  "3.0.24",
-    "artifacts":  [
-                      {
-                          "Name":  "builder-debug.yml",
-                          "Size":  7665,
-                          "SHA256":  "024a2a269e58564d509ee596bf0bd2895a31e2aa9089f35098cf2f81144aaaab"
-                      },
-                      {
-                          "Name":  "latest.yml",
-                          "Size":  351,
-                          "SHA256":  "c4b7bb19beea4076fbcead27a5656f21b0ccdfa75f2defe22cc71dc7b6b1ad5f"
-                      },
-                      {
-                          "Name":  "即我-3.0.24-vc302-x64.exe",
-                          "Size":  94312080,
-                          "SHA256":  "73cee4d1bc213479f799ad2588a0780bbd652758c3b3e875405d9ead16e23e4d"
-                      },
-                      {
-                          "Name":  "即我-3.0.24-vc302-x64.exe.blockmap",
-                          "Size":  99689,
-                          "SHA256":  "52fe2c2519493cff26a1e15b66216385dc04e16cdf748306826f99269802433b"
-                      },
-                      {
-                          "Name":  "即我-3.0.24-vc302-x64.zip",
-                          "Size":  132101366,
-                          "SHA256":  "9dda1298f726f46941125b97039b1a6b162cfc823ff39daad36a7c5d612efcf0"
-                      }
-                  ],
-    "nativeBinary":  "reused exact signed vc301 binary, unchanged source hash verified",
-    "versionCode":  302,
-    "packagedPreflight":  "passed",
-    "signatures":  [
-                       {
-                           "Path":  "C:\\Users\\develop\\arkme-builds\\3.0.24-vc302-20261101\\source\\release\\即我-3.0.24-vc302-x64.exe",
-                           "Status":  "Valid",
-                           "Thumbprint":  "00ADCF59ACCC45F4643B4A682E32620C206CE66B",
-                           "Publisher":  "CN=\"Senqisi (Wuhan) Technology Co., Ltd.\", O=\"Senqisi (Wuhan) Technology Co., Ltd.\", L=Wuhan, S=Hubei, C=CN",
-                           "Timestamp":  "CN=Certum Timestamp 2026, O=Asseco Data Systems S.A., C=PL"
-                       },
-                       {
-                           "Path":  "C:\\Users\\develop\\arkme-builds\\3.0.24-vc302-20261101\\source\\release\\win-unpacked\\arkme.exe",
-                           "Status":  "Valid",
-                           "Thumbprint":  "00ADCF59ACCC45F4643B4A682E32620C206CE66B",
-                           "Publisher":  "CN=\"Senqisi (Wuhan) Technology Co., Ltd.\", O=\"Senqisi (Wuhan) Technology Co., Ltd.\", L=Wuhan, S=Hubei, C=CN",
-                           "Timestamp":  "CN=Certum Timestamp 2026, O=Asseco Data Systems S.A., C=PL"
-                       },
-                       {
-                           "Path":  "C:\\Users\\develop\\arkme-builds\\3.0.24-vc302-20261101\\source\\release\\win-unpacked\\resources\\device-auth\\device-auth-probe.exe",
-                           "Status":  "Valid",
-                           "Thumbprint":  "00ADCF59ACCC45F4643B4A682E32620C206CE66B",
-                           "Publisher":  "CN=\"Senqisi (Wuhan) Technology Co., Ltd.\", O=\"Senqisi (Wuhan) Technology Co., Ltd.\", L=Wuhan, S=Hubei, C=CN",
-                           "Timestamp":  "CN=Certum Timestamp 2026, O=Asseco Data Systems S.A., C=PL"
-                       },
-                       {
-                           "Path":  "C:\\Users\\develop\\arkme-builds\\3.0.24-vc302-20261101\\source\\release\\win-unpacked\\resources\\elevate.exe",
-                           "Status":  "Valid",
-                           "Thumbprint":  "00ADCF59ACCC45F4643B4A682E32620C206CE66B",
-                           "Publisher":  "CN=\"Senqisi (Wuhan) Technology Co., Ltd.\", O=\"Senqisi (Wuhan) Technology Co., Ltd.\", L=Wuhan, S=Hubei, C=CN",
-                           "Timestamp":  "CN=Certum Timestamp 2026, O=Asseco Data Systems S.A., C=PL"
-                       }
-                   ]
+{
+  "dynamicRuntimeSmoke": "not-run",
+  "version": "3.0.24",
+  "artifacts": [
+    {
+      "Name": "builder-debug.yml",
+      "Size": 7665,
+      "SHA256": "024a2a269e58564d509ee596bf0bd2895a31e2aa9089f35098cf2f81144aaaab"
+    },
+    {
+      "Name": "latest.yml",
+      "Size": 351,
+      "SHA256": "c4b7bb19beea4076fbcead27a5656f21b0ccdfa75f2defe22cc71dc7b6b1ad5f"
+    },
+    {
+      "Name": "即我-3.0.24-vc302-x64.exe",
+      "Size": 94312080,
+      "SHA256": "73cee4d1bc213479f799ad2588a0780bbd652758c3b3e875405d9ead16e23e4d"
+    },
+    {
+      "Name": "即我-3.0.24-vc302-x64.exe.blockmap",
+      "Size": 99689,
+      "SHA256": "52fe2c2519493cff26a1e15b66216385dc04e16cdf748306826f99269802433b"
+    },
+    {
+      "Name": "即我-3.0.24-vc302-x64.zip",
+      "Size": 132101366,
+      "SHA256": "9dda1298f726f46941125b97039b1a6b162cfc823ff39daad36a7c5d612efcf0"
+    }
+  ],
+  "nativeBinary": "reused exact signed vc301 binary, unchanged source hash verified",
+  "versionCode": 302,
+  "packagedPreflight": "passed",
+  "signatures": [
+    {
+      "Path": "C:\\Users\\develop\\arkme-builds\\3.0.24-vc302-20261101\\source\\release\\即我-3.0.24-vc302-x64.exe",
+      "Status": "Valid",
+      "Thumbprint": "00ADCF59ACCC45F4643B4A682E32620C206CE66B",
+      "Publisher": "CN=\"Senqisi (Wuhan) Technology Co., Ltd.\", O=\"Senqisi (Wuhan) Technology Co., Ltd.\", L=Wuhan, S=Hubei, C=CN",
+      "Timestamp": "CN=Certum Timestamp 2026, O=Asseco Data Systems S.A., C=PL"
+    },
+    {
+      "Path": "C:\\Users\\develop\\arkme-builds\\3.0.24-vc302-20261101\\source\\release\\win-unpacked\\arkme.exe",
+      "Status": "Valid",
+      "Thumbprint": "00ADCF59ACCC45F4643B4A682E32620C206CE66B",
+      "Publisher": "CN=\"Senqisi (Wuhan) Technology Co., Ltd.\", O=\"Senqisi (Wuhan) Technology Co., Ltd.\", L=Wuhan, S=Hubei, C=CN",
+      "Timestamp": "CN=Certum Timestamp 2026, O=Asseco Data Systems S.A., C=PL"
+    },
+    {
+      "Path": "C:\\Users\\develop\\arkme-builds\\3.0.24-vc302-20261101\\source\\release\\win-unpacked\\resources\\device-auth\\device-auth-probe.exe",
+      "Status": "Valid",
+      "Thumbprint": "00ADCF59ACCC45F4643B4A682E32620C206CE66B",
+      "Publisher": "CN=\"Senqisi (Wuhan) Technology Co., Ltd.\", O=\"Senqisi (Wuhan) Technology Co., Ltd.\", L=Wuhan, S=Hubei, C=CN",
+      "Timestamp": "CN=Certum Timestamp 2026, O=Asseco Data Systems S.A., C=PL"
+    },
+    {
+      "Path": "C:\\Users\\develop\\arkme-builds\\3.0.24-vc302-20261101\\source\\release\\win-unpacked\\resources\\elevate.exe",
+      "Status": "Valid",
+      "Thumbprint": "00ADCF59ACCC45F4643B4A682E32620C206CE66B",
+      "Publisher": "CN=\"Senqisi (Wuhan) Technology Co., Ltd.\", O=\"Senqisi (Wuhan) Technology Co., Ltd.\", L=Wuhan, S=Hubei, C=CN",
+      "Timestamp": "CN=Certum Timestamp 2026, O=Asseco Data Systems S.A., C=PL"
+    }
+  ]
 }
