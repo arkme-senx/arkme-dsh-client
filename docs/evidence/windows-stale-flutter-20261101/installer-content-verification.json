@@ -1,0 +1,9 @@
+{
+  "version": "3.0.24",
+  "versionCode": 302,
+  "embeddedMigrationSHA256": "2a9defac9d0dc9ed890d26566a2c69df6c9993dfd1ab74578f007f1749e16a0c",
+  "payloadFilesVerified": 32,
+  "sourceMatches": true,
+  "allEmbeddedPayloadHashesMatch": true,
+  "packagedVersionMatches": true
+}

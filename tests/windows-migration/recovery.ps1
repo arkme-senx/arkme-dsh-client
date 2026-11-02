@@ -538,6 +538,75 @@ try {
       }
     }
   }
+  Test-Case 'incomplete registered Flutter installs separately and survives rollback or commit' {
+    function Get-LegacyVersionCode {return 270L}
+    function Get-ShortcutTargetVersion {return [pscustomobject]@{ProductName='即我';OriginalFilename='jotmo.exe';FileMajorPart=2;FileVersion='2.61.34.270';FilePrivatePart=270}}
+    foreach ($missing in @('root','jotmo.exe','unins000.exe','flutter_windows.dll','data/flutter_assets')) {
+      foreach ($committed in @($false,$true)) {
+       foreach ($fresh in @($false,$true)) {
+        New-Fixture
+        if ($fresh) {
+          $script:hadExisting=$false
+          Remove-Item (Join-Path $Destination 'arkme.exe')
+          foreach ($key in $ElectronKeys) {$script:registry[$key]=$null}
+        }
+        $legacy=New-LegacyFixture
+        $oldRegistry=$script:registry[$LegacyKey] | ConvertTo-Json -Depth 10 -Compress
+        if ($missing -eq 'root') {Remove-Item $legacy.Root -Recurse -Force}
+        else {
+          Remove-Item (Join-Path $legacy.Root $missing) -Recurse -Force
+          [IO.File]::WriteAllText((Join-Path $legacy.Root 'precious.db'),'keep old data')
+        }
+        $before=@(Get-ChildItem $legacy.Root -Recurse -File -ErrorAction SilentlyContinue | Get-FileHash | Select-Object Path,Hash) | ConvertTo-Json -Compress
+        $effective=Resolve-MigrationLegacy $legacy
+        Assert-True (!$effective -and $script:DetachedLegacy) 'incomplete registration must not enter retirement'
+        $link=(Get-ShortcutLocations)[0].Path
+        @{Exists=$true;Target=(Join-Path $legacy.Root 'jotmo.exe');Arguments=''} | ConvertTo-Json | Set-Content -Encoding UTF8 $link
+        $linkHash=(Get-FileHash $link).Hash
+        Begin-Overlay $Stage 'Uninstall arkme.exe' $effective
+        $saved=Get-Content (Join-Path (Get-JournalDirectory) 'journal.json') -Raw | ConvertFrom-Json
+        Assert-True (!$saved.Legacy -and !$saved.LegacyFiles.Count) 'old files must not enter the transaction'
+        Assert-True (@($saved.Registry | Where-Object Path -eq $LegacyKey).Count -eq 0) 'old registration must not enter the transaction'
+        @{Exists=$true;Target=(Join-Path $Destination 'arkme.exe');Arguments=''} | ConvertTo-Json | Set-Content -Encoding UTF8 $link
+        Reconcile-InstalledShortcuts
+        if ($committed) {Complete-Overlay}
+        Recover-Overlay
+        if (!$committed) {Assert-True ((Get-FileHash $link).Hash -eq $linkHash) 'rollback restores broken old shortcut exactly'}
+        $after=@(Get-ChildItem $legacy.Root -Recurse -File -ErrorAction SilentlyContinue | Get-FileHash | Select-Object Path,Hash) | ConvertTo-Json -Compress
+        Assert-True ($before -eq $after) 'all remaining old files must be unchanged'
+        Assert-True (($script:registry[$LegacyKey] | ConvertTo-Json -Depth 10 -Compress) -eq $oldRegistry) 'old registration must be unchanged'
+        if ($fresh -and !$committed) {Assert-True (!(Test-Path (Join-Path $Destination 'arkme.exe'))) 'failed fresh installation must remove new executable'}
+        else {Assert-True ((Read-Installed) -eq $(if($committed){'new executable'}else{'old executable'})) 'new installation transaction outcome'}
+       }
+      }
+    }
+    $script:DetachedLegacy=$null
+  }
+  Test-Case 'incomplete legacy admission rejects ambiguous ownership and retains healthy migration' {
+    New-Fixture
+    $legacy=New-LegacyFixture
+    Assert-True ((Resolve-MigrationLegacy $legacy) -eq $legacy) 'healthy Flutter still migrates'
+    Remove-Item (Join-Path $legacy.Root 'flutter_windows.dll')
+    function Get-LegacyVersionCode {return 270L}
+    function Get-ShortcutTargetVersion {return [pscustomobject]@{ProductName='即我';OriginalFilename='jotmo.exe';FileMajorPart=2;FileVersion='2.61.34.270';FilePrivatePart=270}}
+    $savedDestination=$Destination
+    $Destination=$legacy.Root
+    Assert-Fails {Resolve-MigrationLegacy $legacy} 'overlap must fail'
+    $Destination=$savedDestination
+    $retired=Join-Path $legacy.Root ('jotmo.exe'+$RetiredSuffix)
+    [IO.File]::WriteAllText($retired,'unresolved')
+    Assert-Fails {Resolve-MigrationLegacy $legacy} 'retired marker must fail'
+    Remove-Item $retired
+    $null=New-Item -ItemType Directory (Join-Path $legacy.Root 'flutter_windows.dll')
+    Assert-Fails {Resolve-MigrationLegacy $legacy} 'wrong filesystem type must fail'
+    Remove-Item (Join-Path $legacy.Root 'flutter_windows.dll')
+    $legacy.Version='2.61.99+999'
+    Assert-Fails {Resolve-MigrationLegacy $legacy} 'newer registered build must fail'
+    $legacy.Version='2.0.0'
+    function Assert-Publisher {throw 'untrusted fixture'}
+    Assert-Fails {Resolve-MigrationLegacy $legacy} 'existing untrusted launcher must fail'
+    Assert-True (!$script:DetachedLegacy) 'failed admission must not authorize shortcuts'
+  }
   if ($script:failures.Count) { throw ($script:failures -join "`n") }
   Write-Output 'Durable recovery fixtures passed.'
 } finally {
