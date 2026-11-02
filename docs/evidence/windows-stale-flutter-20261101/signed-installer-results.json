@@ -1,0 +1,28 @@
+﻿[
+    {
+        "Case":  "missing-dll",
+        "ExitCode":  0,
+        "InstalledVersion":  "3.0.24",
+        "PayloadFilesVerified":  32,
+        "LegacyRegistrationUnchanged":  true,
+        "Start":  "\/Date(1793516515087)\/",
+        "End":  {
+                    "value":  "\/Date(1793516541461)\/",
+                    "DisplayHint":  2,
+                    "DateTime":  "2026年11月1日 15:02:21"
+                }
+    },
+    {
+        "Case":  "missing-root",
+        "ExitCode":  0,
+        "InstalledVersion":  "3.0.24",
+        "PayloadFilesVerified":  32,
+        "LegacyRegistrationUnchanged":  true,
+        "Start":  "\/Date(1793516544433)\/",
+        "End":  {
+                    "value":  "\/Date(1793516573655)\/",
+                    "DisplayHint":  2,
+                    "DateTime":  "2026年11月1日 15:02:53"
+                }
+    }
+]

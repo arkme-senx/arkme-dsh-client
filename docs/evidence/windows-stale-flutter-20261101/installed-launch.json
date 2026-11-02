@@ -1,0 +1,10 @@
+﻿{
+    "Time":  "2026-11-01T15:03:39.8511002+08:00",
+    "Result":  "PASS",
+    "InstalledPath":  "C:\\Users\\develop\\arkme-builds\\3.0.24-vc302-20261101\\installer-validation\\installed\\arkme.exe",
+    "ReadyEvents":  [
+                        "2026-11-01T07:03:34.658Z did-finish-load {\"url\":\"file:///C:/Users/develop/arkme-builds/3.0.24-vc302-20261101/installer-validation/installed/resources/app.asar/dist/ui/status.html?kind=starting\u0026environment=prod\u0026workspace=C%3A%5CUsers%5Cdevelop%5CAppData%5CRoaming%5CArkme+Harness%5Cworkspace\"}",
+                        "2026-11-01T07:03:38.594Z render-ready {\"url\":\"http://127.0.0.1:55625/\"}"
+                    ],
+    "Pid":  12788
+}

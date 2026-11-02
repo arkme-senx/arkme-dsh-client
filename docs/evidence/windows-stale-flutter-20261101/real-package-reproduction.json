@@ -1,0 +1,37 @@
+[
+    {
+        "Case":  "flutter_windows.dll",
+        "BaselineError":  "Unknown Flutter program layout.",
+        "Fixed":  "PASS",
+        "Shortcut":  "verified-flutter",
+        "Registry":  "UNCHANGED"
+    },
+    {
+        "Case":  "data\\flutter_assets",
+        "BaselineError":  "Unknown Flutter program layout.",
+        "Fixed":  "PASS",
+        "Shortcut":  "verified-flutter",
+        "Registry":  "UNCHANGED"
+    },
+    {
+        "Case":  "jotmo.exe",
+        "BaselineError":  "找不到文件 C:\\Users\\develop\\Downloads\\arkme-stale-validation-20261101\\flutter\\jotmo.exe。",
+        "Fixed":  "PASS",
+        "Shortcut":  "stale-flutter",
+        "Registry":  "UNCHANGED"
+    },
+    {
+        "Case":  "unins000.exe",
+        "BaselineError":  "Missing legacy Inno uninstaller.",
+        "Fixed":  "PASS",
+        "Shortcut":  "verified-flutter",
+        "Registry":  "UNCHANGED"
+    },
+    {
+        "Case":  "entire-root",
+        "BaselineError":  "Unknown Flutter program layout.",
+        "Fixed":  "PASS",
+        "Shortcut":  "stale-flutter",
+        "Registry":  "UNCHANGED"
+    }
+]

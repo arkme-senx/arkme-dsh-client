@@ -20,6 +20,7 @@ $Publisher = 'Senqisi (Wuhan) Technology Co., Ltd.'
 $RetiredSuffix = '.jiwo-v3-retired'
 $script:ProtectedJournalDirectory=''
 $script:PreservedLegacy=$null
+$script:DetachedLegacy=$null
 
 function Assert-WindowsCompatibility([version]$Version,[int]$Architecture) {
   if ($Version.Major -lt 10 -or $Architecture -ne 9) { throw 'This production release requires Windows 10/11 on native x64 hardware.' }
@@ -258,6 +259,47 @@ function Assert-Legacy($Install, [string]$Target, [string]$InstallScope) {
   Assert-LegacyUninstaller (Join-Path $old 'unins000.exe')
   $incoming=Get-ReleaseManifest
   Assert-UpgradeAllowed $Install.Version (Get-LegacyVersionCode (Join-Path $old 'jotmo.exe')) $incoming.version $incoming.versionCode
+}
+# A stale registration is evidence of a former install, not ownership of its
+# remaining files. Install separately; never retire or snapshot this legacy tree.
+function Resolve-MigrationLegacy($Legacy) {
+  $script:DetachedLegacy=$null
+  if (!$Legacy) { return $null }
+  $old=Assert-LocalPath $Legacy.Root
+  $drive=New-Object IO.DriveInfo ([IO.Path]::GetPathRoot($old))
+  if (!$drive.IsReady -or $drive.DriveType -ne [IO.DriveType]::Fixed) { throw 'Legacy drive is unavailable or not a fixed local disk.' }
+  if ((Test-Path -LiteralPath $old) -and !(Test-Path -LiteralPath $old -PathType Container)) { throw 'Legacy root is not a directory.' }
+  $required=@{'jotmo.exe'='Leaf';'unins000.exe'='Leaf';'flutter_windows.dll'='Leaf';'data\flutter_assets'='Container'}
+  $missing=@()
+  foreach ($name in $required.Keys) {
+    $path=Assert-LocalPath (Join-Path $old $name)
+    if (!(Test-Path -LiteralPath $path)) { $missing+=$name }
+    elseif (!(Test-Path -LiteralPath $path -PathType $required[$name])) { throw "Unexpected legacy file type: $path" }
+  }
+  if (!$missing.Count) { return $Legacy }
+  Assert-LegacyScope $Legacy $Destination $Scope
+  $target=Assert-LocalPath $Destination
+  if ($old -ieq $target -or (Test-PathWithin $old $target) -or (Test-PathWithin $target $old)) { throw 'New and legacy installation directories must not overlap.' }
+  foreach ($name in @('jotmo.exe','unins000.exe')) {
+    if (Test-Path -LiteralPath (Join-Path $old ($name+$RetiredSuffix))) { throw 'Unresolved retired legacy program; recover its installation transaction before continuing.' }
+  }
+  $launcher=Join-Path $old 'jotmo.exe'
+  $code=0L
+  if (Test-Path -LiteralPath $launcher) {
+    Assert-Publisher $launcher
+    $info=Get-ShortcutTargetVersion $launcher
+    if ($info.ProductName -cne '即我' -or $info.OriginalFilename -ine 'jotmo.exe' -or $info.FileMajorPart -ne 2) { throw 'Incomplete legacy launcher is not a supported Flutter 2.x release.' }
+    $code=Get-LegacyVersionCode $launcher
+    $incoming=Get-ReleaseManifest
+    Assert-UpgradeAllowed $info.FileVersion $code $incoming.version $incoming.versionCode
+  }
+  $uninstaller=Join-Path $old 'unins000.exe'
+  if (Test-Path -LiteralPath $uninstaller) { Assert-LegacyUninstaller $uninstaller }
+  $incoming=Get-ReleaseManifest
+  Assert-UpgradeAllowed $Legacy.Version $code $incoming.version $incoming.versionCode
+  $script:DetachedLegacy=$Legacy
+  Write-Host "Legacy incomplete root=$old missing=$($missing -join ','); installing separately and preserving legacy files and registration."
+  return $null
 }
 function Get-LegacyVersionCode([string]$Launcher) {
   # Flutter's signed PE revision is build evidence when nonzero. Older binaries
@@ -745,7 +787,9 @@ function Get-ShortcutCompatibility($Location,$Link) {
   $info=Get-ShortcutTargetVersion $target
   if ($info.ProductName -cne '即我' -or $info.OriginalFilename -ine 'jotmo.exe' -or $info.FileMajorPart -ne 2) { throw 'Shortcut target is not a supported Flutter 2.x release.' }
   foreach ($item in @((Join-Path $root 'flutter_windows.dll'),(Join-Path $root 'data\flutter_assets'))) { $null=Assert-LocalPath $item }
-  if (!(Test-Path -LiteralPath (Join-Path $root 'flutter_windows.dll') -PathType Leaf) -or !(Test-Path -LiteralPath (Join-Path $root 'data\flutter_assets') -PathType Container)) { throw 'Unrecognized Flutter shortcut target layout.' }
+  if (!(Test-Path -LiteralPath (Join-Path $root 'flutter_windows.dll') -PathType Leaf) -or !(Test-Path -LiteralPath (Join-Path $root 'data\flutter_assets') -PathType Container)) {
+    if (!$script:DetachedLegacy -or $root -ine $script:DetachedLegacy.Root) { throw 'Unrecognized Flutter shortcut target layout.' }
+  }
   $incoming=Get-ReleaseManifest
   Assert-UpgradeAllowed $info.FileVersion ([long]$info.FilePrivatePart) $incoming.version $incoming.versionCode
   return 'verified-flutter'
@@ -1374,7 +1418,7 @@ function Assert-NativeUpdate {
   if (Test-Path -LiteralPath (Get-JournalDirectory)) {
     Recover-Overlay -CommittedOnly
   }
-  $legacy=Select-MigrationLegacy (Get-LegacyInstall)
+  $legacy=Resolve-MigrationLegacy (Select-MigrationLegacy (Get-LegacyInstall))
   if ($legacy) { throw 'Legacy installation remains. Run the full installer manually.' }
   $existing=Assert-ElectronDestination
   if (!(Test-RegularUpdate $existing $legacy)) { throw 'This installation requires the full manual migration installer.' }
@@ -1507,10 +1551,11 @@ try {
   }
   $discovered=Get-LegacyInstall
   Write-Host ("Legacy discovery="+$(if($discovered){"scope=$($discovered.Scope) root=$($discovered.Root) hive=$($discovered.Hive) view=$($discovered.View)"}else{'none'})+" targetScope=$Scope target=$Destination")
-  $legacy = Select-MigrationLegacy $discovered
+  $legacy = Resolve-MigrationLegacy (Select-MigrationLegacy $discovered)
   Initialize-JournalLocation $legacy
   Write-ShortcutPolicy
   $roots = @($Destination)
+  if ($script:DetachedLegacy) { $roots += $script:DetachedLegacy.Root }
   if ($script:PreservedLegacy) { $roots += $script:PreservedLegacy.Root }
   if ($null -ne $legacy) {
     Assert-Legacy $legacy $Destination $Scope

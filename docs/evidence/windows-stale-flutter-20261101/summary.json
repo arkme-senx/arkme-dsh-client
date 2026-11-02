@@ -1,0 +1,26 @@
+{
+    "Date":  "2026-11-01T14:02:03.8944558+08:00",
+    "Host":  "ZP",
+    "User":  "develop",
+    "OS":  "Microsoft Windows NT 10.0.26300.0",
+    "PowerShell":  "5.1.26100.9711",
+    "Elevated":  false,
+    "InstallerSHA256":  "8DDC1B44F4F95B9443A28E3D1DBF116FB62B243C816ED35A320450EF44ADAC92",
+    "BaselineSHA256":  "DD61CCD374D258D7401F86668B63D7A44068CE304E7A4435B6BA486E087EC7E0",
+    "FixedSHA256":  "2A9DEFAC9D0DC9ED890D26566A2C69DF6C9993DFD1AB74578F007F1749E16A0C",
+    "RecoveryPassCases":  47,
+    "RegressionPass":  [
+                           "recovery",
+                           "native-update",
+                           "shortcut-compatibility",
+                           "shortcuts",
+                           "transaction",
+                           "diagnostics"
+                       ],
+    "RegressionUnavailable":  [
+                                  "short-path: Windows powershell.exe signature fixture not Valid",
+                                  "acl-sid: administrator ACL assignment unavailable",
+                                  "process-inspection: WMI AccessDenied"
+                              ],
+    "PowerShellSignature":  "NotSigned"
+}
