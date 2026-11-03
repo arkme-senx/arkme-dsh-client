@@ -4,6 +4,7 @@ import {execFileSync} from 'node:child_process';
 import path from 'node:path';
 import YAML from 'yaml';
 import {api,prefix,required} from './api.mjs';
+import {publishBatch} from './publication.mjs';
 const command=process.argv[2];const json=async p=>JSON.parse(await readFile(p,'utf8'));
 const b=await json('reservation.json');
 const digest=bytes=>createHash('sha512').update(bytes).digest('hex');
@@ -32,5 +33,5 @@ if(command==='collect'){
   const response=await fetch(g.url,{signal:AbortSignal.timeout(300000)});if(!response.ok)throw new Error('CDN unavailable');const check=Buffer.from(await response.arrayBuffer());if(check.length!==bytes.length||digest(check)!==hash)throw new Error('Immutable object conflict or CDN mismatch');
  }
 }else if(command==='publish'){
- const envelope=await json('publication/manifest.json');try{await api('releases',envelope,{timeout:900000})}catch(error){const status=await api('releases/status',{batch_id:b.id,run_id:b.run_id});if(status.status!=='published')throw error}
+ const envelope=await json('publication/manifest.json');await publishBatch(api,envelope);
 }else throw new Error('Unknown artifact operation');
