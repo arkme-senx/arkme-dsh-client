@@ -49,7 +49,8 @@ Add-Type -AssemblyName UIAutomationTypes
 $root=[System.Windows.Automation.AutomationElement]::RootElement
 $condition=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty,$process.Id)
 function Login-Controls {
- $windows=$root.FindAll([System.Windows.Automation.TreeScope]::Children,$condition)
+ $ids=@(Get-Process | Where-Object {$_.ProcessName -eq 'SimplySignDesktop'} | ForEach-Object {$_.Id})
+ $windows=@($root.FindAll([System.Windows.Automation.TreeScope]::Children,[System.Windows.Automation.Condition]::TrueCondition) | Where-Object {$_.Current.ProcessId -in $ids})
  foreach($window in $windows){
   $edits=$window.FindAll([System.Windows.Automation.TreeScope]::Descendants,(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Edit)))
   $buttons=$window.FindAll([System.Windows.Automation.TreeScope]::Descendants,(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button)))
@@ -57,6 +58,44 @@ function Login-Controls {
   if($edits.Count -eq 2 -and $login.Count -eq 1){return @{Account=$edits[0];Token=$edits[1];Submit=$login[0]}}
  }
  return $null
+}
+# SimplySign starts in the notification area. Open the documented Connect menu
+# before looking for account/token controls; no token has been requested yet.
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class ArkmeTrayMouse {
+ [DllImport("user32.dll")] public static extern bool SetCursorPos(int x,int y);
+ [DllImport("user32.dll")] public static extern void mouse_event(uint flags,uint dx,uint dy,uint data,UIntPtr extra);
+}
+'@
+Start-Sleep -Seconds 2
+$buttonCondition=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button)
+function Tray-Buttons {
+ foreach($window in $root.FindAll([System.Windows.Automation.TreeScope]::Children,[System.Windows.Automation.Condition]::TrueCondition)){
+  if($window.Current.ClassName -in @('Shell_TrayWnd','NotifyIconOverflowWindow')){
+   foreach($button in $window.FindAll([System.Windows.Automation.TreeScope]::Descendants,$buttonCondition)){ $button }
+  }
+ }
+}
+$tray=@(Tray-Buttons)
+$icon=@($tray | Where-Object {$_.Current.Name -match 'SimplySign'})
+if(!$icon.Count){
+ $chevron=@($tray | Where-Object {$_.Current.AutomationId -eq 'Chevron' -or $_.Current.Name -eq 'Show hidden icons'})
+ if($chevron.Count -eq 1){([System.Windows.Automation.InvokePattern]$chevron[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)).Invoke();Start-Sleep -Milliseconds 500}
+ $tray=@(Tray-Buttons);$icon=@($tray | Where-Object {$_.Current.Name -match 'SimplySign'})
+}
+if($icon.Count -eq 1){
+ $point=$icon[0].GetClickablePoint();$null=[ArkmeTrayMouse]::SetCursorPos([int]$point.X,[int]$point.Y)
+ [ArkmeTrayMouse]::mouse_event(8,0,0,0,[UIntPtr]::Zero);[ArkmeTrayMouse]::mouse_event(16,0,0,0,[UIntPtr]::Zero)
+ Start-Sleep -Milliseconds 500
+ $menuCondition=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::MenuItem)
+ $connect=@($root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$menuCondition) | Where-Object {$_.Current.Name -match '^Connect( to SimplySign)?$'})
+ if($connect.Count -eq 1){([System.Windows.Automation.InvokePattern]$connect[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)).Invoke()}
+ else{Write-Output 'SimplySign tray Connect menu unavailable'}
+}else{
+ foreach($button in $tray){Write-Output ("Tray button id={0} name={1}" -f $button.Current.AutomationId,$button.Current.Name)}
+ Write-Output 'SimplySign tray icon unavailable'
 }
 $deadline=(Get-Date).AddSeconds(45);$controls=$null
 while((Get-Date) -lt $deadline){$controls=Login-Controls;if($controls){break};Start-Sleep -Milliseconds 500}
