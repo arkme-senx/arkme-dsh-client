@@ -27,3 +27,23 @@ manifest 包含 source/writeback SHA、run/attempt、Electron/ABI、平台签名
 macOS CI 发布 PKG + ZIP。prod PKG 调用已有 buildMigrationPackage，包含正式旧版迁移助手、preinstall/postinstall、签名校验及事务恢复；test PKG 仅安装 /Applications/arkme Test.app，使用 cc.jiwo.arkme.test.installer，不发现或迁移正式安装。两种包均以 Developer ID Installer 签名、公证并 stapler/spctl 验证；PKG/ZIP 解包后逐文件、权限及符号链接比对。latest-mac.yml 仅引用 ZIP。
 
 MAC_INSTALLER_LINK 是同团队 Developer ID Installer 的 Base64 PKCS#12，MAC_INSTALLER_PASSWORD 是其密码。仅放对应 GitHub Environment Secret；CI 使用临时钥匙串，结束后恢复原搜索列表并删除临时钥匙串。
+
+### 平台构建通知
+
+GitHub Actions 的 `test` / `prod` Environment（或仓库级 Actions Secrets）配置
+`ARKME_BUILD_WEBHOOK_TOKEN`，工作流会将其映射为同名环境变量。不要放到普通 Variables。
+默认使用已指定的 jotmo Bot Hook；可通过 Actions Variable `ARKME_BUILD_WEBHOOK_URL`
+覆盖 HTTPS 地址。协议为 POST JSON `{token, message, external_message_id}`。
+
+macOS、Windows 每个 matrix job 在检出源码后发送开始通知，在构建、签名校验和
+GitHub Artifact 保存结束后通过 `always()` 分别发送最终结果，包含环境、分支、
+可用的预留版本、耗时与本次运行链接。复用产物会明确标注；构建成功不等于 OSS
+发布成功，通知对此明确说明。开始消息早于版本文件下载，因此不包含版本。
+
+网络错误、408/429/5xx 最多重试三次，单次超时 10 秒；同一运行尝试、平台、阶段
+使用固定去重 ID。凭据缺失或发送失败只产生脱敏 warning，不影响发布。
+最终通知覆盖常规失败和取消；源码检出失败、runner 失联、强制终止可能无法发送，
+应以 Actions 页面为准。脚本不输出凭据、请求体、响应正文或原始网络错误。
+
+本地协议测试：`node --test tests/ci-notify.test.mjs`。真实发送需配置上述 Secret，
+未配置时不向 Hook 发送请求。

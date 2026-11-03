@@ -52,6 +52,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     environment: ${{ needs.reserve.outputs.environment }}
     env:
+      ARKME_BUILD_WEBHOOK_TOKEN: ${{ secrets.ARKME_BUILD_WEBHOOK_TOKEN }}
+      ARKME_BUILD_WEBHOOK_URL: ${{ vars.ARKME_BUILD_WEBHOOK_URL }}
+      ARKME_BUILD_PLATFORM: ${{ matrix.platform }}
       GH_TOKEN: ${{ github.token }}
       ARKME_CI_ENV: ${{ needs.reserve.outputs.environment }}
       ARKME_CI_BACKEND: ${{ vars.ARKME_CI_BACKEND }}
@@ -67,6 +70,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {ref: '${{ github.sha }}'}
+      - name: 通知平台构建开始
+        continue-on-error: true
+        timeout-minutes: 1
+        run: node scripts/ci/notify.mjs start
       - uses: actions/setup-node@v4
         with: {node-version: '24'}
       - uses: actions/download-artifact@v4
@@ -120,6 +127,14 @@ jobs:
             release-ci/platform.json
           if-no-files-found: error
           retention-days: 30
+      - name: 通知平台最终构建结果
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          ARKME_BUILD_RESULT: ${{ job.status }}
+          ARKME_BUILD_REUSED: ${{ steps.restore.outputs.reused }}
+        run: node scripts/ci/notify.mjs finish
   publish:
     needs: [reserve, build]
     runs-on: ubuntu-latest
