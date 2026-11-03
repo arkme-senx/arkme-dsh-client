@@ -127,8 +127,8 @@ jobs:
             release-ci/platform.json
           if-no-files-found: error
           retention-days: 30
-      - name: 通知平台最终构建结果
-        if: always()
+      - name: 通知平台构建失败或取消
+        if: failure() || cancelled()
         continue-on-error: true
         timeout-minutes: 1
         env:
@@ -143,6 +143,9 @@ jobs:
       contents: write
       actions: read
     env:
+      ARKME_BUILD_WEBHOOK_TOKEN: ${{ secrets.ARKME_BUILD_WEBHOOK_TOKEN }}
+      ARKME_BUILD_WEBHOOK_URL: ${{ vars.ARKME_BUILD_WEBHOOK_URL }}
+      ARKME_CI_ENV: ${{ needs.reserve.outputs.environment }}
       GH_TOKEN: ${{ github.token }}
       ARKME_CDN_BASE: ${{ vars.ARKME_CDN_BASE }}
       ARKME_CI_BACKEND: ${{ vars.ARKME_CI_BACKEND }}
@@ -183,4 +186,23 @@ jobs:
           path: publication/manifest.json
           retention-days: 30
       - run: node scripts/ci/artifacts.mjs upload
-      - run: node scripts/ci/artifacts.mjs publish
+      - id: release
+        run: node scripts/ci/artifacts.mjs publish
+      - name: 通知 macos 最终发布结果
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          ARKME_BUILD_PLATFORM: macos
+          ARKME_BUILD_RESULT: ${{ job.status }}
+          ARKME_RELEASE_RESULT: ${{ steps.release.outcome }}
+        run: node scripts/ci/notify.mjs release
+      - name: 通知 windows 最终发布结果
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          ARKME_BUILD_PLATFORM: windows
+          ARKME_BUILD_RESULT: ${{ job.status }}
+          ARKME_RELEASE_RESULT: ${{ steps.release.outcome }}
+        run: node scripts/ci/notify.mjs release
