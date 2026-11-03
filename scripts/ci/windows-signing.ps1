@@ -6,7 +6,7 @@ function Check-Certificate {
  $cert=Get-Item "Cert:\CurrentUser\My\$thumb" -ErrorAction SilentlyContinue
  if(!$cert -or !$cert.HasPrivateKey -or $cert.NotBefore -gt (Get-Date) -or $cert.NotAfter -le (Get-Date).AddHours(1)){return $false}
  if(!$env:SIMPLYSIGN_PUBLISHER -or $cert.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,$false) -ne $env:SIMPLYSIGN_PUBLISHER){throw 'Unexpected certificate publisher'}
- if(!($cert.EnhancedKeyUsageList | Where-Object {$_.ObjectId.Value -eq '1.3.6.1.5.5.7.3.3'})){throw 'Certificate is not valid for code signing'}
+ if(!($cert.EnhancedKeyUsageList | Where-Object {$_.ObjectId -eq '1.3.6.1.5.5.7.3.3'})){throw 'Certificate is not valid for code signing'}
  return $true
 }
 if($Operation -eq 'verify'){
@@ -167,13 +167,14 @@ for($attempt=1;$attempt -le 2;$attempt++){
   $child=[System.Diagnostics.Process]::Start($start)
   $token=$child.StandardOutput.ReadToEnd();$null=$child.StandardError.ReadToEnd();$child.WaitForExit()
   if($child.ExitCode -ne 0 -or $token -notmatch '^\d{6}$'){throw 'Token request failed'}
+  Write-Output 'Fresh signing token received through private pipe; submitting login'
   [ArkmeLoginControls]::SetText([IntPtr]$controls.Account,$env:SIMPLYSIGN_ACCOUNT)
   [ArkmeLoginControls]::SetText([IntPtr]$controls.Token,$token)
   $token=$null
   [ArkmeLoginControls]::Click([IntPtr]$controls.Submit)
   $deadline=(Get-Date).AddSeconds(20)
   while((Get-Date) -lt $deadline){if(Check-Certificate){Write-Output 'SimplySign certificate ready';exit 0};Start-Sleep -Milliseconds 500}
- }catch{if($attempt -eq 2){throw 'SimplySign login failed after two attempts'}}finally{$token=$null}
+ }catch{if($_.Exception.Message -in @('Unexpected certificate publisher','Certificate is not valid for code signing')){throw};if($attempt -eq 2){throw 'SimplySign login failed after two attempts'}}finally{$token=$null}
  $controls=Login-Controls;if(!$controls){throw 'SimplySign login unavailable for retry'}
 }
 throw 'SimplySign certificate unavailable'
