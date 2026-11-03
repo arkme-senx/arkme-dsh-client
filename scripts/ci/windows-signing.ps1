@@ -54,7 +54,7 @@ function Login-Controls {
  foreach($window in $windows){
   $edits=$window.FindAll([System.Windows.Automation.TreeScope]::Descendants,(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Edit)))
   $buttons=$window.FindAll([System.Windows.Automation.TreeScope]::Descendants,(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button)))
-  $login=@($buttons | Where-Object {$_.Current.Name -match '^(Connect|Log in|Login|Sign in)$' -and $_.Current.IsEnabled})
+  $login=@($buttons | Where-Object {$_.Current.Name -match '^(Connect|Log in|Login|Sign in|OK|Ok)$' -and $_.Current.IsEnabled})
   if($edits.Count -eq 2 -and $login.Count -eq 1){return @{Account=$edits[0];Token=$edits[1];Submit=$login[0]}}
  }
  return $null
@@ -108,6 +108,18 @@ if($icon.Count -eq 1){
 $deadline=(Get-Date).AddSeconds(45);$controls=$null
 while((Get-Date) -lt $deadline){$controls=Login-Controls;if($controls){break};Start-Sleep -Milliseconds 500}
 if(!$controls){
+ # This path runs before token/account entry; capture only the empty login desktop.
+ try{
+  Add-Type -AssemblyName System.Windows.Forms
+  Add-Type -AssemblyName System.Drawing
+  $bounds=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+  $bitmap=New-Object System.Drawing.Bitmap($bounds.Width,$bounds.Height)
+  $graphics=[System.Drawing.Graphics]::FromImage($bitmap)
+  $graphics.CopyFromScreen($bounds.Location,[System.Drawing.Point]::Empty,$bounds.Size)
+  $bitmap.Save((Join-Path $env:RUNNER_TEMP 'simplysign-prelogin.png'))
+  $graphics.Dispose();$bitmap.Dispose()
+  Write-Output ("Pre-login desktop size={0}x{1}" -f $bounds.Width,$bounds.Height)
+ }catch{Write-Output 'Pre-login desktop capture unavailable'}
  # Pre-login diagnostics only: never inspect edit values or token-bearing text.
  $peers=@(Get-Process | Where-Object {$_.ProcessName -match 'SimplySign'})
  foreach($peer in $peers){

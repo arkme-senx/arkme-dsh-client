@@ -48,3 +48,11 @@ jobs:
           $signature=Get-AuthenticodeSignature $exe
           if($signature.Status -ne 'Valid' -or !$signature.TimeStamperCertificate -or $signature.SignerCertificate.Thumbprint -ne $env:SIMPLYSIGN_CERTIFICATE_SHA1){throw 'Signature identity invalid'}
           Write-Output 'Hosted Windows SimplySign signature and timestamp verified.'
+      - name: Save pre-login desktop evidence only
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simplysign-prelogin
+          path: ${{ runner.temp }}/simplysign-prelogin.png
+          if-no-files-found: ignore
+          retention-days: 1
