@@ -108,7 +108,7 @@ if($icon.Count -eq 1){
 if(!(Login-Controls)){
  & python -m pip install --disable-pip-version-check --quiet pywinauto==0.6.9
  if($LASTEXITCODE -ne 0){throw 'Native desktop automation dependency installation failed'}
- & python scripts/ci/windows-open-login.py
+ & python scripts/ci/windows-open-login.py $app.FullName
  if($LASTEXITCODE -ne 0){Write-Output 'Native tray opening failed; collect pre-login diagnostics'}
 }
 $deadline=(Get-Date).AddSeconds(45);$controls=$null

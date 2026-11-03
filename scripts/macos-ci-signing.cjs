@@ -124,7 +124,7 @@ function runCommand(command, args, env = process.env, capture = false) {
     const detail = capture ? redact((result.stderr || result.stdout || "").trim()) : "";
     throw new Error(`${command} failed (${result.status ?? result.error?.code ?? "signal"})${detail ? `: ${detail}` : ""}`);
   }
-  return result.stdout || "";
+  return capture === "combined" ? (result.stdout || "") + (result.stderr || "") : result.stdout || "";
 }
 
 function runLoggedCommand(command, args, env = process.env) {

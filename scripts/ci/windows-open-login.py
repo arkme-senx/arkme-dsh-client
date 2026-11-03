@@ -1,5 +1,5 @@
 """Open the vendor Desktop tray menu before requesting any account/token data."""
-import time
+import time, sys
 from pywinauto import Application, Desktop, taskbar
 from pywinauto.timings import Timings
 Timings.window_find_timeout = 5
@@ -11,7 +11,7 @@ except Exception:
 time.sleep(.5)
 # The menu belongs to SimplySign, not Explorer. Prefer its native popup menu.
 try:
-    app = Application(backend='win32').connect(path=r'C:\Program Files\Certum\SimplySign Desktop\SimplySignDesktop.exe')
+    app = Application(backend='win32').connect(path=sys.argv[1])
     app.PopupMenu.menu_select('Connect to SimplySign')
 except Exception:
     menus = Desktop(backend='uia').windows(control_type='Menu')

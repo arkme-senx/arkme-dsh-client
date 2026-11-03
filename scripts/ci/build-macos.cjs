@@ -1,5 +1,5 @@
 const path=require('node:path');const {readdir,writeFile}=require('node:fs/promises');const {withMacCiSigningEnvironment,runCommand,runLoggedCommand,createMacCiLogRedactor}=require('../macos-ci-signing.cjs');
-async function verify(app,env){runCommand('codesign',['--verify','--deep','--strict',app],env);runCommand('xcrun',['stapler','validate',app],env);runCommand('spctl',['--assess','--type','exec',app],env);const details=runCommand('codesign',['-d','--verbose=4',app],env,true);if(!details.includes(`TeamIdentifier=${env.APPLE_TEAM_ID}`))throw new Error('Unexpected signing team')}
+async function verify(app,env){runCommand('codesign',['--verify','--deep','--strict',app],env);runCommand('xcrun',['stapler','validate',app],env);runCommand('spctl',['--assess','--type','exec',app],env);const details=runCommand('codesign',['-d','--verbose=4',app],env,'combined');if(!details.includes(`TeamIdentifier=${env.APPLE_TEAM_ID}`))throw new Error('Unexpected signing team')}
 withMacCiSigningEnvironment(process.env,async(env,temp)=>{
  await runLoggedCommand('pnpm',['exec','electron-builder','--config','electron-builder.ci-config.cjs','--mac','dmg','zip','--universal','--publish','never'],env);
  const config=require('../../electron-builder.ci-config.cjs');const name=config.productName+'.app';await verify(path.join('release-ci','mac-universal',name),env);
