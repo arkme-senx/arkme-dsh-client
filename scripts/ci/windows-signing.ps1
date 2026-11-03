@@ -53,7 +53,7 @@ using System.Runtime.InteropServices;
 public static class ArkmeLoginControls {
  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint process);
- public static uint Process(IntPtr hwnd){uint p;GetWindowThreadProcessId(hwnd,out p);return p;}
+ public static int OwnerProcessId(IntPtr hwnd){uint p;GetWindowThreadProcessId(hwnd,out p);return checked((int)p);}
  [DllImport("user32.dll")] static extern bool PostMessage(IntPtr hwnd,uint message,IntPtr wParam,IntPtr lParam);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd,StringBuilder text,int count);
  [DllImport("user32.dll",EntryPoint="SendMessageTimeoutW",CharSet=CharSet.Unicode)] static extern IntPtr Send(IntPtr hwnd,uint message,IntPtr wParam,string value,uint flags,uint timeout,out IntPtr result);
@@ -71,7 +71,10 @@ function Login-Controls {
  $value=Get-Content $controlFile -Raw | ConvertFrom-Json
  $ids=@(Get-Process | Where-Object {$_.ProcessName -eq 'SimplySignDesktop' -and $_.Path -eq $app.FullName} | ForEach-Object {$_.Id})
  foreach($handle in @($value.account,$value.token,$value.submit)){
-  if(![ArkmeLoginControls]::IsWindow([IntPtr]$handle) -or [ArkmeLoginControls]::Process([IntPtr]$handle) -notin $ids){return $null}
+  $windowHandle=[IntPtr]$handle
+  if(![ArkmeLoginControls]::IsWindow($windowHandle)){return $null}
+  $ownerId=[ArkmeLoginControls]::OwnerProcessId($windowHandle)
+  if($ownerId -notin $ids){return $null}
  }
  return @{Account=[IntPtr]$value.account;Token=[IntPtr]$value.token;Submit=[IntPtr]$value.submit}
 }
