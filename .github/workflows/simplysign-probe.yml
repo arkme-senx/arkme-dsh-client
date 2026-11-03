@@ -1,8 +1,5 @@
 name: SimplySign hosted Windows proof
 on:
-  push:
-    branches: [zp-codex/arkme-client-ci-20261103]
-    paths: ['scripts/ci/**', '.github/workflows/simplysign-probe.yml']
   workflow_dispatch:
 permissions: {contents: read}
 concurrency:

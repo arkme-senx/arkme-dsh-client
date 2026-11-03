@@ -1,8 +1,5 @@
 name: macOS Universal signing proof
 on:
-  push:
-    branches: [zp-codex/arkme-client-ci-20261103]
-    paths: ['.github/workflows/macos-signing-probe.yml']
   workflow_dispatch:
 permissions: {contents: read}
 jobs:
