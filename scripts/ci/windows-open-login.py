@@ -1,5 +1,7 @@
 """Open the vendor Desktop tray menu before requesting any account/token data."""
-import time, sys
+import time, sys, faulthandler
+# Bound native accessibility calls before any credential is requested.
+faulthandler.dump_traceback_later(40, exit=True)
 from pywinauto import Application, Desktop, taskbar
 from pywinauto.timings import Timings
 Timings.window_find_timeout = 5
