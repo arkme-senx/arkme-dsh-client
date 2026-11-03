@@ -17,7 +17,7 @@ for toolbar in tray.descendants(class_name='ToolbarWindow32'):
     except Exception:
         pass
 if not opened:
-    buttons = tray.children(class_name='Button')
+    buttons = [b for b in tray.children(class_name='Button') if b.control_id() == 1502 and b.is_visible() and b.rectangle().width() > 0 and b.rectangle().height() > 0]
     print('Native notification buttons:', [(b.window_text(), b.control_id(), str(b.rectangle())) for b in buttons])
     if len(buttons) != 1:
         raise RuntimeError('Ambiguous notification chevron')

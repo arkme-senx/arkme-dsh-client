@@ -200,3 +200,21 @@ Harness 自身负责在会话列表成功加载后校验与恢复；原会话不
 桌面通过现有受认证的 Host bridge 提供 `lifecycle.get`，返回进程内 `resumeGeneration` 与 `suspended`。它只服务当前 Harness session；旧 session 请求被拒绝。系统唤醒不重启正在执行任务的 Harness，远控插件自行使过期连接失效并恢复。
 
 Harness 输出按 5MiB 轮转，最多保留当前日志及两个历史文件；输出写入积压超过 256KiB 时丢弃额外诊断输出，仍保留内存中的有限故障 tail。插件断线不触发整个 Harness 重启。
+
+## Arkme CI 自动发布（新链路）
+
+`.github/workflows/build-pre-release.yml` 将 `pre-release` 固定映射为 `test`，`master` 固定映射为 `prod`。两个环境使用独立后端和凭据；必须先完成测试验收再配置生产。当前功能分支的 `simplysign-probe.yml`、`macos-signing-probe.yml` 只进行测试环境签名可行性验证，不发布 release。
+
+每个 GitHub Environment 配置以下内容：
+
+- Variables：`ARKME_CI_BACKEND`、`ARKME_RUNTIME_SERVICE_BASE_URL`、`ARKME_CDN_BASE`、`SIMPLYSIGN_CERTIFICATE_SHA1`、`SIMPLYSIGN_PUBLISHER`、`SIMPLYSIGN_INSTALLER_SHA256`。
+- Secrets：`ARKME_CI_SECRET`（publisher 专用）、`ARKME_MANIFEST_PRIVATE_KEY`（Ed25519 PEM）、`SIMPLYSIGN_ACCOUNT`。
+- 沿用 Apple Secrets：`MAC_CSC_LINK`、`MAC_CSC_KEY_PASSWORD`、`APPLE_ID`、`APPLE_APP_SPECIFIC_PASSWORD`、`APPLE_TEAM_ID`。
+
+Action 向后端预留版本，两平台构建与签名验证完成后才回写版本。分支已有新提交时停止旧批次，不强推。机器人提交包含 `Arkme-CI-Batch:`，不递归构建。失败时在**原 run**上重跑，恢复同一版本、原始平台产物和签名清单；不要对机器人提交新建发布。
+
+新链路使用 `app/arkme/{test|prod}/{windows|macos}/{version}-vc{versionCode}/`，文件名保持 electron-builder 输出。macOS 为 Universal DMG/ZIP，Windows 为 x64 NSIS/ZIP；这是独立 CI 批次合同，旧手工发布的 PKG 和历史 `arkme-releases/app/` 路径继续保留。先完成签名、公证及最终文件校验，再上传包/blockmap、更新 YAML、清单。STS 限定单个对象，不保存长期 OSS 密钥；同路径不同内容禁止覆盖。
+
+SimplySign Desktop 登录窗准备好后才向后端申请手机 token。Action 临时 RSA 私钥仅在进程内存在；本机服务通过 Codex Skill 读取固定 Android SimplySign 账号、等待临期验证码换新、加密回传。任何签名或证书校验失败都停止，不生成无签名发布。
+
+后端校验签名清单、CDN内容、更新元数据、兼容快照和 Electron/ABI 后，原子切换 macOS arm64/Intel 与 Windows 三个目标。首次 Intel 按已确认方案复制 arm64 兼容配置快照，后续独立继承。发布异常通过后端管理员批次回滚接口恢复旧指针，保留历史产物与兼容记录。
