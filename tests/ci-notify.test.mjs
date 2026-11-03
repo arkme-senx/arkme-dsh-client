@@ -2,17 +2,19 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { notification, sendNotification } from '../scripts/ci/notify.mjs'
 
-const env = { ARKME_BUILD_PLATFORM: 'macos', ARKME_CI_ENV: 'test', GITHUB_REF_NAME: 'pre-release', GITHUB_REPOSITORY: 'arkme-senx/arkme-dsh-client', GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', ARKME_BUILD_RESULT: 'success' }
-const make = (overrides = {}, phase = 'finish') => notification({ env: { ...env, ...overrides }, phase, started: 1000, now: 158000, version: { version: '3.0.49', version_code: 327 } })
+const env = { ARKME_BUILD_PLATFORM: 'macos', ARKME_CI_ENV: 'test', GITHUB_REF_NAME: 'pre-release', GITHUB_REPOSITORY: 'arkme-senx/arkme-dsh-client', GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', ARKME_BUILD_RESULT: 'success', ARKME_RELEASE_RESULT: 'success' }
+const make = (overrides = {}, phase = 'release') => notification({ env: { ...env, ...overrides }, phase, started: 1000, now: 158000, version: { version: '3.0.49', version_code: 327 } })
 
-test('platform result describes artifacts without claiming release succeeded', () => {
+test('release success requires publication success; failures never claim uploaded artifacts', () => {
   const payload = make()
-  for (const text of ['macOS', '构建成功', '2 分 37 秒', 'vc327', 'PKG', '后续发布任务']) assert.ok(payload.message.includes(text))
-  assert.ok(make({ ARKME_BUILD_PLATFORM: 'windows', ARKME_BUILD_REUSED: 'true' }).message.includes('复用'))
-  for (const [result, label] of [['failure', '构建失败'], ['cancelled', '构建已取消']]) {
+  for (const text of ['macOS', '发布成功', '2 分 37 秒', 'vc327', 'PKG', '已上传 OSS']) assert.ok(payload.message.includes(text))
+  assert.ok(make({ ARKME_BUILD_PLATFORM: 'windows' }).message.includes('EXE'))
+  assert.throws(() => make({ ARKME_RELEASE_RESULT: 'failure' }))
+  assert.throws(() => make({}, 'finish'))
+  for (const [result, label] of [['failure', '发布失败'], ['cancelled', '发布已取消']]) {
     const message = make({ ARKME_BUILD_RESULT: result }).message
     assert.ok(message.includes(label))
-    assert.ok(!message.includes('已保存'))
+    assert.ok(!message.includes('已上传 OSS'))
   }
 })
 

@@ -8,18 +8,20 @@ const clean = value => String(value ?? '').replace(/[\r\n\[\]`]/g, ' ').replaceA
 
 export function notification({ env, phase, version, started, now = Date.now() }) {
   const platform = { macos: 'macOS', windows: 'Windows' }[env.ARKME_BUILD_PLATFORM]
-  if (!platform || !['start', 'finish'].includes(phase)) throw new Error('Invalid notification phase/platform')
+  if (!platform || !['start', 'finish', 'release'].includes(phase)) throw new Error('Invalid notification phase/platform')
   const result = phase === 'start' ? 'start' : env.ARKME_BUILD_RESULT
-  const label = { start: '🚀 开始构建', success: '✅ 构建成功', failure: '❌ 构建失败', cancelled: '⏹ 构建已取消' }[result] ?? 'ℹ️ 构建已结束（状态未知）'
-  const lines = [`arkme-dsh-client ${platform} ${label}`, `环境：${clean(env.ARKME_CI_ENV)}`, `分支：${clean(env.GITHUB_REF_NAME)}`]
+  if (result === 'success' && (phase !== 'release' || env.ARKME_RELEASE_RESULT !== 'success')) throw new Error('Publication has not succeeded')
+  const label = { start: '🚀 开始构建', success: '✅ 发布成功', failure: '❌ 构建失败', cancelled: '⏹ 构建已取消' }[result] ?? 'ℹ️ 构建已结束（状态未知）'
+  const statusLabel = phase === 'release' ? label.replaceAll('构建', '发布') : label
+  const lines = [`arkme-dsh-client ${platform} ${statusLabel}`, `环境：${clean(env.ARKME_CI_ENV)}`, `分支：${clean(env.GITHUB_REF_NAME)}`]
   if (version?.version && version?.version_code) lines.push(`版本：${clean(version.version)} / vc${clean(version.version_code)}`)
-  if (phase === 'finish' && Number.isFinite(started) && now >= started) {
+  if (phase !== 'start' && Number.isFinite(started) && now >= started) {
     const seconds = Math.floor((now - started) / 1000)
     lines.push(`耗时：约 ${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`)
   }
   if (result === 'success') {
-    lines.push(env.ARKME_BUILD_REUSED === 'true' ? '产物：复用已验证的构建产物' : `产物：${platform === 'macOS' ? 'PKG、ZIP 与更新文件' : 'EXE、ZIP 与更新文件'}已保存至 GitHub Artifacts`)
-    lines.push('发布状态：OSS 上传及版本发布由后续发布任务处理')
+    lines.push(`产物：${platform === 'macOS' ? 'PKG、ZIP 与更新文件' : 'EXE、ZIP 与更新文件'}已上传 OSS`)
+    lines.push('发布状态：产物及兼容配置校验通过，版本已正式生效')
   }
   lines.push(`🔗 查看构建详情：https://github.com/${clean(env.GITHUB_REPOSITORY)}/actions/runs/${clean(env.GITHUB_RUN_ID)}/attempts/${clean(env.GITHUB_RUN_ATTEMPT)}`)
   const identity = [env.GITHUB_REPOSITORY, env.GITHUB_RUN_ID, env.GITHUB_RUN_ATTEMPT, env.ARKME_BUILD_PLATFORM, phase]
@@ -60,6 +62,7 @@ async function main() {
   if (phase === 'start') await writeFile(marker, JSON.stringify(Date.now()))
   else { try { started = JSON.parse(await readFile(marker, 'utf8')) } catch {} }
   try { version = JSON.parse(await readFile('reservation.json', 'utf8')) } catch {}
+  if (phase === 'release' && version?.created_at) started = Number(version.created_at) * 1000
   const status = await sendNotification({ env, payload: notification({ env, phase, version, started }) })
   if (status === 'accepted') console.log('Build notification accepted')
   else console.log(`::warning::Build notification: ${status}. Check ARKME_BUILD_WEBHOOK_TOKEN and bot configuration.`)

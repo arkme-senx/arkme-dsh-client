@@ -35,10 +35,11 @@ GitHub Actions 的 `test` / `prod` Environment（或仓库级 Actions Secrets）
 默认使用已指定的 jotmo Bot Hook；可通过 Actions Variable `ARKME_BUILD_WEBHOOK_URL`
 覆盖 HTTPS 地址。协议为 POST JSON `{token, message, external_message_id}`。
 
-macOS、Windows 每个 matrix job 在检出源码后发送开始通知，在构建、签名校验和
-GitHub Artifact 保存结束后通过 `always()` 分别发送最终结果，包含环境、分支、
-可用的预留版本、耗时与本次运行链接。复用产物会明确标注；构建成功不等于 OSS
-发布成功，通知对此明确说明。开始消息早于版本文件下载，因此不包含版本。
+macOS、Windows 每个 matrix job 在检出源码后发送开始通知，仅在构建失败或取消时
+发送构建结束通知。成功通知统一放到 publish job：全部产物上传 OSS，后端产物与
+兼容校验通过且确认批次 published 后，分别发送两端“发布成功”。上传/发布失败或
+取消时分别通知两端发布失败/取消，不发送成功消息。成功消息耗时自批次预留起算。
+开始消息早于版本文件下载，因此不包含版本。
 
 网络错误、408/429/5xx 最多重试三次，单次超时 10 秒；同一运行尝试、平台、阶段
 使用固定去重 ID。凭据缺失或发送失败只产生脱敏 warning，不影响发布。
