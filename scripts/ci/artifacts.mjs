@@ -5,6 +5,7 @@ import path from 'node:path';
 import YAML from 'yaml';
 import {api,prefix,required} from './api.mjs';
 import {publishBatch} from './publication.mjs';
+import {putImmutableObject} from './oss-upload.mjs';
 const command=process.argv[2];const json=async p=>JSON.parse(await readFile(p,'utf8'));
 const b=await json('reservation.json');
 const digest=bytes=>createHash('sha512').update(bytes).digest('hex');
@@ -27,9 +28,7 @@ if(command==='collect'){
  const all=[...m.files.map(f=>({...f,file:path.join('artifacts',f.platform,f.name)})),...['macos','windows'].map(platform=>({platform,name:'manifest.json',kind:'manifest',file:'publication/manifest.json'}))].sort((a,b)=>rank(a.kind)-rank(b.kind));
  function rank(k){return k==='manifest'?2:k==='yaml'?1:0}
  for(const f of all){const bytes=await readFile(f.file);const hash=digest(bytes);if(f.sha512&&(hash!==f.sha512||bytes.length!==f.size))throw new Error('Artifact changed after manifest');
-  const g=await api('upload-credentials',{batch_id:b.id,run_id:b.run_id,platform:f.platform,file:f.name});if(g.object_key!==prefix(b.environment,f.platform,b.version,b.version_code)+f.name)throw new Error('Invalid upload scope');
-  const client=new OSS({endpoint:g.endpoint,bucket:g.bucket,accessKeyId:g.credentials.access_key_id,accessKeySecret:g.credentials.access_key_secret,stsToken:g.credentials.security_token,secure:true});
-  try{await client.put(g.object_key,bytes,{headers:{'x-oss-forbid-overwrite':'true','Cache-Control':'public, max-age=31536000, immutable'}})}catch(e){if(e.code!=='FileAlreadyExists'&&e.status!==409)throw new Error('OSS upload failed')}
+  const g=await putImmutableObject({bytes,credentials:async()=>{const grant=await api('upload-credentials',{batch_id:b.id,run_id:b.run_id,platform:f.platform,file:f.name});if(grant.object_key!==prefix(b.environment,f.platform,b.version,b.version_code)+f.name)throw new Error('Invalid upload scope');return grant},createClient:(grant,options)=>new OSS({...options,endpoint:grant.endpoint,bucket:grant.bucket,accessKeyId:grant.credentials.access_key_id,accessKeySecret:grant.credentials.access_key_secret,stsToken:grant.credentials.security_token,secure:true})});
   const response=await fetch(g.url,{signal:AbortSignal.timeout(300000)});if(!response.ok)throw new Error('CDN unavailable');const check=Buffer.from(await response.arrayBuffer());if(check.length!==bytes.length||digest(check)!==hash)throw new Error('Immutable object conflict or CDN mismatch');
  }
 }else if(command==='publish'){
