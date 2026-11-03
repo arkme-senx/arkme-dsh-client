@@ -2,19 +2,66 @@ import { app, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, native
 import { createHash, randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { ScreenshotSession, decodeScreenshotPng } from './desktop-screenshot-session.js';
+import {encodeOpaqueBgraPng} from './screenshot-fast-png.js';
 import {readScreenshotWindows} from './native-screenshot-windows.js';
 import {windowsInFrame} from './screenshot-window-geometry.js';
+const SCREENSHOT_EDITOR_PATH='/arkme-self/screenshot';
 const prefix = 'arkme-screenshot:';
+type ScreenshotTrace = (stage: string, windowId?: number) => void;
 type Result = {status:'cancelled'} | {status:'captured'; contentBase64:string; mimeType:'image/png'; fileName:string};
 interface Active {
- destination: 'attachment' | 'clipboard'; lease: ScreenshotSession; owner: BrowserWindow; windows: Map<number,BrowserWindow>; ready: Set<number>;
+ reusable:boolean; cleanups:Array<()=>void>; trace: ScreenshotTrace; destination: 'attachment' | 'clipboard'; lease: ScreenshotSession; owner: BrowserWindow; windows: Map<number,BrowserWindow>; ready: Set<number>;
  cancelAsk?: (()=>void) | undefined; askAttempt?: {digest:string;id:string};
  finish(result?: Result, error?: Error): void; timer: ReturnType<typeof setTimeout> | undefined; saving: boolean;
 }
 export function installScreenshotIpc(options: {
  main(): BrowserWindow | null; origin(): string | null; scope(): string; preload(): string;
- allowed(id: number): boolean; blocked?(): boolean;
+ allowed(id: number): boolean; blocked?(): boolean; editorPreload?(): string;
 }) {
+ let standaloneRegistration: {origin:string;owner:number;reuse:boolean} | undefined;
+ type WarmEditor = {window:BrowserWindow;display:number;key:string;load:Promise<void>;context?:((value:unknown)=>void);detach:()=>void};
+ const warmEditors=new Map<number,WarmEditor>();
+ let warmTimer:ReturnType<typeof setTimeout>|undefined;
+ let quitting=false;
+ const geometryKey=(d:Electron.Display)=>JSON.stringify([d.id,d.bounds,d.scaleFactor]);
+ const dropWarm=()=>{
+  clearTimeout(warmTimer);warmTimer=undefined;
+  for(const warm of warmEditors.values()) {warm.context?.(null);if(!warm.window.isDestroyed())warm.window.destroy();}
+  warmEditors.clear();
+ };
+ const makeWindow=(display:Electron.Display,session:Electron.Session,preload:string)=>{
+  const window=new BrowserWindow({...display.bounds,show:false,frame:false,resizable:false,movable:false,skipTaskbar:true,alwaysOnTop:true,
+   ...(process.platform==='darwin'?{type:'panel' as const}:{}),
+   fullscreenable:false,enableLargerThanScreen:true,backgroundColor:'#111111',hasShadow:false,
+   webPreferences:{session,preload,sandbox:true,contextIsolation:true,nodeIntegration:false,webSecurity:true,backgroundThrottling:false}});
+  window.setAlwaysOnTop(true,'screen-saver');
+  window.setVisibleOnAllWorkspaces(true,{visibleOnFullScreen:true,skipTransformProcessType:true});
+  window.webContents.setWindowOpenHandler(()=>({action:'deny'}));
+  window.webContents.on('will-navigate',event=>event.preventDefault());
+  window.webContents.on('will-redirect',event=>event.preventDefault());
+  window.webContents.on('will-attach-webview',event=>event.preventDefault());
+  return window;
+ };
+ const prepareWarm=()=>{
+  warmTimer=undefined;
+  const main=options.main(),registration=standaloneRegistration;
+  if(quitting||active||!main||main.isDestroyed()||!registration||!options.editorPreload
+   ||registration.owner!==main.webContents.id||registration.origin!==options.origin())return;
+  for(const display of screen.getAllDisplays()) {
+   if([...warmEditors.values()].some(w=>w.key===geometryKey(display)))continue;
+   const window=makeWindow(display,main.webContents.session,options.editorPreload());
+   const id=window.webContents.id;
+   const warm:WarmEditor={window,display:display.id,key:geometryKey(display),load:Promise.resolve(),detach:()=>{window.removeListener('closed',discard);window.webContents.removeListener('render-process-gone',discard);}};
+   warmEditors.set(id,warm);
+   const discard=()=>{if(warmEditors.get(id)!==warm)return;warmEditors.delete(id);warm.context?.(null);if(!window.isDestroyed())window.destroy();};
+   window.once('closed',discard);window.webContents.once('render-process-gone',discard);
+   warm.load=window.loadURL(`${registration.origin}${SCREENSHOT_EDITOR_PATH}?arkmeScreenshot=1`).catch(error=>{discard();throw error;});
+   // A failed warm-up is not a capture failure; the next request creates a fresh editor.
+   void warm.load.catch(()=>{});
+  }
+ };
+ const scheduleWarm=()=>{clearTimeout(warmTimer);if(!quitting)warmTimer=setTimeout(prepareWarm,100);};
+ app.on('before-quit',()=>{quitting=true;dropWarm();});
  let active: Active | undefined;
  let askPending: {session:Active;target:BrowserWindow;requestId:string;settle(error?:Error):void} | undefined;
  const trusted = (e: IpcMainInvokeEvent) => {
@@ -22,12 +69,18 @@ export function installScreenshotIpc(options: {
   try { return new URL(e.senderFrame.url).origin === options.origin(); } catch { return false; }
  };
  const valid = (s: Active) => active === s && s.lease.scope === options.scope() && !s.owner.isDestroyed() && options.allowed(s.lease.owner);
- const editor = (e: IpcMainInvokeEvent) => trusted(e) && active && valid(active) && active.lease.context(e.sender.id, options.scope()) ? active : undefined;
+ const editor = (e: IpcMainInvokeEvent,token?:unknown) => trusted(e) && active && (!active.reusable || token===active.lease.requestId) && valid(active) && active.lease.context(e.sender.id, options.scope()) ? active : undefined;
  const cancel = () => active?.finish();
  // A display change invalidates pixel mapping; never export using stale coordinates.
- screen.on('display-added', cancel); screen.on('display-removed', cancel); screen.on('display-metrics-changed', cancel);
+ const displaysChanged=()=>{cancel();dropWarm();scheduleWarm();};
+ screen.on('display-added', displaysChanged); screen.on('display-removed', displaysChanged); screen.on('display-metrics-changed', displaysChanged);
  const capture = async (owner: BrowserWindow, requestId: string, destination: Active['destination']): Promise<Result> => {
   if (owner.isDestroyed() || !options.allowed(owner.webContents.id)) throw new Error('截图来源已失效');
+  const started=performance.now();
+  const trace: ScreenshotTrace = process.env.ARKME_SCREENSHOT_PROFILE === '1'
+   ? (stage, windowId) => console.info('[arkme-screenshot-profile]', JSON.stringify({requestId,stage,elapsedMs:Math.round((performance.now()-started)*100)/100,...(windowId===undefined?{}:{windowId})}))
+   : () => {};
+  trace('capture-start');
   const sender=owner.webContents;
   const url = new URL(sender.getURL());
   if (url.origin !== options.origin()) throw new Error('截图来源已失效');
@@ -38,15 +91,32 @@ export function installScreenshotIpc(options: {
    const ownerId=sender.id;
    const abort=()=>s.finish();
    const watch=setInterval(()=> { if (!valid(s)) s.finish(); },250);
-   const s: Active = { destination, lease:new ScreenshotSession(ownerId,requestId,options.scope()), owner, windows:new Map(), ready:new Set(), timer:undefined, saving:false,
+   const s: Active = { reusable:false,cleanups:[],trace, destination, lease:new ScreenshotSession(ownerId,requestId,options.scope()), owner, windows:new Map(), ready:new Set(), timer:undefined, saving:false,
     finish(result={status:'cancelled'},error) {
      if (active!==s) return;
      const current=valid(s);
      s.cancelAsk?.();
+     trace(error?'failed':'finished');
      active=undefined; s.lease.close(); clearInterval(watch); clearTimeout(s.timer);
      sender.removeListener('destroyed',abort); sender.removeListener('did-start-navigation',abort);
-     for(const window of s.windows.values()) if(!window.isDestroyed()) window.destroy();
+     for(const cleanup of s.cleanups)cleanup();
+     for(const window of s.windows.values()) if(!window.isDestroyed()) {
+      if(s.reusable && current && !quitting && standaloneRegistration?.origin===options.origin()) {
+       const display=screen.getAllDisplays().find(d=>(['x','y','width','height'] as const).every(key=>d.bounds[key]===window.getBounds()[key]));
+       if(display) {
+        window.hide();
+        const id=window.webContents.id;
+        const discard=()=>{const w=warmEditors.get(id);if(!w)return;warmEditors.delete(id);w.context?.(null);if(!window.isDestroyed())window.destroy();};
+        warmEditors.set(id,{window,display:display.id,key:geometryKey(display),load:Promise.resolve(),detach:()=>{window.removeListener('closed',discard);window.webContents.removeListener('render-process-gone',discard);}});
+        window.once('closed',discard);window.webContents.once('render-process-gone',discard);
+        window.webContents.send(prefix+'reset');
+        continue;
+       }
+      }
+      window.destroy();
+     }
      s.windows.clear();
+     scheduleWarm();
      // On macOS, activating the opener can switch Spaces on another display.
      // Closing the non-activating panel lets macOS restore focus naturally.
      if(destination==='attachment' && process.platform!=='darwin' && current && !owner.isDestroyed() && owner.isVisible()) owner.focus();
@@ -76,8 +146,14 @@ export function installScreenshotIpc(options: {
     try {
     // Capture the visible desktop as-is, including the opener; do not hide or transform the app.
     if(!valid(s)) { s.finish(); return; }
+    // The loaded main-window plugin announces support; no network probe on the shortcut path.
+    const standalone=!!options.editorPreload && standaloneRegistration?.origin===url.origin
+     && standaloneRegistration.owner===options.main()?.webContents.id;
+    s.reusable=standalone && standaloneRegistration?.reuse===true;
     const displays=screen.getAllDisplays();
+    trace('native-windows-start');
     const nativeWindows=readScreenshotWindows();
+    trace('native-windows-end');
     const captures=new Map<string, ReturnType<typeof desktopCapturer.getSources>>();
     const frames=await Promise.all(displays.map(async d=> {
      // A shared maximum thumbnail size upsamples smaller/differently shaped screens.
@@ -88,7 +164,8 @@ export function installScreenshotIpc(options: {
      const key=`${thumbnailSize.width}x${thumbnailSize.height}`;
      let capture=captures.get(key);
      if(!capture) {
-      capture=desktopCapturer.getSources({types:['screen'],thumbnailSize});
+      trace(`get-sources-start:${key}`);
+      capture=desktopCapturer.getSources({types:['screen'],thumbnailSize}).then(sources=>{trace(`get-sources-end:${key}`);return sources;});
       captures.set(key,capture);
      }
      const sources=await capture;
@@ -98,30 +175,45 @@ export function installScreenshotIpc(options: {
      const size=source.thumbnail.getSize();
      // Win32 uses physical desktop pixels; Quartz uses logical desktop points.
      const nativeBounds=process.platform==='win32'?screen.dipToScreenRect(null,d.bounds):d.bounds;
-     return {display:d,frame:{contentBase64:source.thumbnail.toPNG().toString('base64'),width:size.width,height:size.height,
+     trace('png-start',d.id);
+     const png=(process.platform==='darwin' && typeof source.thumbnail.toBitmap==='function'
+      ? encodeOpaqueBgraPng(source.thumbnail.toBitmap(),size.width,size.height) : null) ?? source.thumbnail.toPNG();
+     trace('png-end',d.id);
+     const contentBase64=png.toString('base64');
+     trace('base64-end',d.id);
+     return {display:d,frame:{contentBase64,width:size.width,height:size.height,
       windows:windowsInFrame(nativeWindows,nativeBounds,size)}};
     }));
     if(!valid(s)) { s.finish(); return; }
+    const editorUrl=new URL(url.href);
+    if(standalone)editorUrl.pathname=SCREENSHOT_EDITOR_PATH;
+    const preload=standalone ? options.editorPreload!() : options.preload();
+    trace(standalone?'entry-standalone':'entry-legacy');
     // Capture all screens before constructing overlays, then load every editor concurrently.
     await Promise.all(frames.map(async entry=> {
      if(!entry)return;
      const {display,frame}=entry;
-     const window=new BrowserWindow({...display.bounds,show:false,frame:false,resizable:false,movable:false,skipTaskbar:true,alwaysOnTop:true,
-      // A panel accepts keyboard focus without activating the app and switching Spaces.
-      ...(process.platform==='darwin' ? {type:'panel' as const} : {}),
-      fullscreenable:false,enableLargerThanScreen:true,backgroundColor:'#111111',hasShadow:false,
-      webPreferences:{session:sender.session,preload:options.preload(),sandbox:true,contextIsolation:true,nodeIntegration:false,webSecurity:true}});
-     const id=window.webContents.id; s.windows.set(id,window); s.lease.add(id,frame);
-     window.setAlwaysOnTop(true,'screen-saver');
-     // macOS's default workspace transition transforms the entire app and briefly hides its Dock icon.
-     // Screenshot overlays must keep Arkme's existing foreground application identity.
-     window.setVisibleOnAllWorkspaces(true,{visibleOnFullScreen:true,skipTransformProcessType:true});
-     window.webContents.setWindowOpenHandler(()=>({action:'deny'}));
-     window.webContents.on('will-navigate',event=>event.preventDefault()); window.webContents.on('will-redirect',event=>event.preventDefault());
-     window.webContents.on('will-attach-webview',event=>event.preventDefault());
-     window.webContents.on('render-process-gone',()=>s.finish(undefined,new Error('截图编辑器异常关闭，请重试')));
-     window.on('closed',()=> { if(s.windows.has(id)) s.finish(); });
-     await window.loadURL(url.href);
+     trace('window-create-start',display.id);
+     const warm=standalone?[...warmEditors.values()].find(w=>w.key===geometryKey(display)&&!w.window.isDestroyed()):undefined;
+     if(warm){warmEditors.delete(warm.window.webContents.id);warm.detach();}
+     const window=warm?.window ?? makeWindow(display,sender.session,preload);
+     const id=window.webContents.id; trace(warm?'window-warm':'window-created',id);
+     window.webContents.once('dom-ready',()=>trace('dom-ready',id));
+     window.webContents.once('did-finish-load',()=>trace('did-finish-load',id));
+     s.windows.set(id,window); s.lease.add(id,frame);
+     warm?.context?.({...frame,requestId:s.lease.requestId,destination:s.destination,...(process.env.ARKME_SCREENSHOT_PROFILE==='1'?{profileEnabled:true}:{})});
+     const gone=()=>s.finish(undefined,new Error('截图编辑器异常关闭，请重试'));
+     const closed=()=>{if(s.windows.has(id))s.finish();};
+     window.webContents.on('render-process-gone',gone);window.on('closed',closed);
+     s.cleanups.push(()=>{
+      // Selecting one display destroys its peers before the capture finishes.
+      // Electron rejects webContents access on those destroyed BrowserWindows.
+      if(!window.isDestroyed())window.webContents.removeListener('render-process-gone',gone);
+      window.removeListener('closed',closed);
+     });
+     trace('load-url-start',id);
+     if(warm)await warm.load;else await window.loadURL(editorUrl.href);
+     trace('load-url-end',id);
     }));
     if(!valid(s)) { s.finish(); return; }
     } catch(error) {
@@ -134,6 +226,24 @@ export function installScreenshotIpc(options: {
    })().catch(error=>s.finish(undefined,error instanceof Error ? error : new Error('截图失败')));
   });
  };
+ ipcMain.handle(prefix+'enable-standalone',(e,capability:unknown)=>{
+  const origin=options.origin();
+  if(!origin || !trusted(e) || e.sender.id!==options.main()?.webContents.id)return false;
+  if(standaloneRegistration?.owner!==e.sender.id || standaloneRegistration.origin!==origin) {
+   dropWarm();
+   const navigating=(details?:{isSameDocument?:boolean;isMainFrame?:boolean})=>{
+    if(details?.isSameDocument || details?.isMainFrame===false)return;
+    e.sender.removeListener('did-start-navigation',navigating);
+    standaloneRegistration=undefined;dropWarm();
+   };
+   e.sender.on('did-start-navigation',navigating);
+   e.sender.once('destroyed',()=>{standaloneRegistration=undefined;dropWarm();});
+  }
+  standaloneRegistration={origin,owner:e.sender.id,reuse:capability==='reset-v1'};
+  scheduleWarm();
+  if(process.env.ARKME_SCREENSHOT_PROFILE==='1')console.info('[arkme-screenshot-entry]', 'standalone registered');
+  return true;
+ });
  ipcMain.handle(prefix+'capture', async (e, requestId: unknown) => {
   if (!trusted(e) || !options.allowed(e.sender.id)) throw new Error('截图来源已失效');
   if (typeof requestId !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(requestId)) throw new Error('无效的截图请求');
@@ -143,34 +253,46 @@ export function installScreenshotIpc(options: {
  });
  ipcMain.handle(prefix+'cancel',(e,id:unknown)=> { if(trusted(e) && active?.lease.ownedBy(e.sender.id,id)) active.finish(); });
  ipcMain.handle(prefix+'context',e=> {
-  const s=editor(e), frame=s?.lease.context(e.sender.id,options.scope());
-  return frame && s ? {...frame,destination:s.destination} : null;
+  const warm=trusted(e)?warmEditors.get(e.sender.id):undefined;
+  if(warm) {
+   // Blank editors wait without receiving pixels or any account/business state.
+   return new Promise<unknown>(resolve=>{warm.context?.(null);warm.context=resolve;});
+  }
+  const s=editor(e,active?.lease.requestId), frame=s?.lease.context(e.sender.id,options.scope());
+  s?.trace('context-request',e.sender.id);
+  return frame && s ? {...frame,requestId:s.lease.requestId,destination:s.destination,...(process.env.ARKME_SCREENSHOT_PROFILE==='1'?{profileEnabled:true}:{})} : null;
  });
- ipcMain.handle(prefix+'ready',e=> {
-  const s=editor(e); if(!s) return false; s.ready.add(e.sender.id);
+ ipcMain.handle(prefix+'profile',(e,stage:unknown,token:unknown)=>{
+  if(typeof stage!=='string'||!['context-decoded','image-decoded','canvas-painted'].includes(stage))return;
+  editor(e,token)?.trace(stage,e.sender.id);
+ });
+ ipcMain.handle(prefix+'ready',(e,token:unknown)=> {
+  const s=editor(e,token); if(!s) return false; s.ready.add(e.sender.id); s.trace('editor-ready',e.sender.id);
   // All displays must be captured and all renderers must be ready before showing any.
   if(s.windows.size===screen.getAllDisplays().length && s.ready.size===s.windows.size) {
    clearTimeout(s.timer); s.timer=undefined;
+   s.trace('show-start');
    for(const window of s.windows.values()) window.showInactive();
+   s.trace('show-called');
    const pointer=screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
    const window=[...s.windows.values()].find(w=>screen.getDisplayMatching(w.getBounds()).id===pointer.id);
    (window ?? s.windows.values().next().value)?.focus();
   }
   return true;
  });
- ipcMain.handle(prefix+'select',e=> {
-  const s=editor(e); if(!s || !s.lease.select(e.sender.id,options.scope())) return false;
+ ipcMain.handle(prefix+'select',(e,token:unknown)=> {
+  const s=editor(e,token); if(!s || !s.lease.select(e.sender.id,options.scope())) return false;
   for(const [id,window] of s.windows) if(id!==e.sender.id) { s.windows.delete(id); window.destroy(); }
   return true;
  });
- ipcMain.handle(prefix+'close',e=> { editor(e)?.finish(); });
+ ipcMain.handle(prefix+'close',(e,token:unknown)=> { editor(e,token)?.finish(); });
  const png=(value:unknown) => {
   const bytes=decodeScreenshotPng(value), decoded=nativeImage.createFromBuffer(bytes);
   if(decoded.isEmpty()) throw new Error('无法解码截图');
   return bytes;
  };
- ipcMain.handle(prefix+'complete',(e,value:unknown)=> {
-  const s=editor(e); if(!s || s.saving) return false;
+ ipcMain.handle(prefix+'complete',(e,value:unknown,token:unknown)=> {
+  const s=editor(e,token); if(!s || s.saving) return false;
   const bytes=png(value);
   // Clipboard-only sessions never return an image to a renderer/composer.
   if (s.destination === 'clipboard') {
@@ -188,8 +310,8 @@ export function installScreenshotIpc(options: {
   p.settle(reply.ok?undefined:new Error(typeof reply.error==='string'?reply.error.slice(0,1000):'DSH 附件准备失败，请重试'));
   return true;
  });
- ipcMain.handle(prefix+'ask-dsh',async(e,value:unknown)=> {
-  const s=editor(e);if(!s || s.saving)return false;
+ ipcMain.handle(prefix+'ask-dsh',async(e,value:unknown,token:unknown)=> {
+  const s=editor(e,token);if(!s || s.saving)return false;
   const bytes=png(value),target=options.main();
   if(!target || target.isDestroyed() || !options.allowed(target.webContents.id) || new URL(target.webContents.getURL()).origin!==options.origin())throw new Error('DSH 主窗口尚未就绪，请重试');
   const digest=createHash('sha256').update(bytes).digest('hex');
@@ -218,8 +340,8 @@ export function installScreenshotIpc(options: {
    return true;
   }finally{s.saving=false}
  });
- ipcMain.handle(prefix+'save',async(e,value:unknown)=> {
-  const s=editor(e), window=s?.windows.get(e.sender.id); if(!s || !window || s.saving) return false;
+ ipcMain.handle(prefix+'save',async(e,value:unknown,token:unknown)=> {
+  const s=editor(e,token), window=s?.windows.get(e.sender.id); if(!s || !window || s.saving) return false;
   const bytes=png(value); s.saving=true;
   try {
    // Native save panels must be above the capture overlay.

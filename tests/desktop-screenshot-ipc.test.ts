@@ -14,7 +14,7 @@ vi.mock('electron',async()=>{
   async loadURL(url:string){this.webContents.mainFrame.url=url;this.visible=false;await mocks.load(this)}
   destroy(){this.destroyed=true;this.emit('closed')}
  }
- return {app:{getName:()=>'即我'},systemPreferences:{getMediaAccessStatus:mocks.permission},shell:{openExternal:mocks.openSettings},BrowserWindow:Window,ipcMain:{handle:(k:string,v:Function)=>mocks.handlers.set(k,v)},desktopCapturer:{getSources:mocks.sources},dialog:{showSaveDialog:mocks.save,showMessageBox:mocks.guidance},
+ return {app:{getName:()=>'即我',on:vi.fn()},systemPreferences:{getMediaAccessStatus:mocks.permission},shell:{openExternal:mocks.openSettings},BrowserWindow:Window,ipcMain:{handle:(k:string,v:Function)=>mocks.handlers.set(k,v)},desktopCapturer:{getSources:mocks.sources},dialog:{showSaveDialog:mocks.save,showMessageBox:mocks.guidance},
  clipboard:{writeImage:mocks.clipboard},nativeImage:{createFromBuffer:(bytes:Buffer)=>({isEmpty:()=>false,toPNG:()=>bytes})},screen:{on:(k:string,v:Function)=>mocks.displayEvents.set(k,v),
  dipToScreenRect:mocks.physicalBounds,getAllDisplays:()=>mocks.displays,getCursorScreenPoint:()=>({x:0,y:0}),getDisplayNearestPoint:()=>({id:10}),getDisplayMatching:()=>({id:10})}};
 });
@@ -27,7 +27,7 @@ const png=()=>{const b=Buffer.alloc(33);Buffer.from([137,80,78,71,13,10,26,10]).
 beforeEach(()=>{vi.useFakeTimers();mocks.permission.mockReset().mockReturnValue('granted');mocks.guidance.mockReset().mockResolvedValue({response:0});mocks.openSettings.mockReset().mockResolvedValue(undefined);mocks.handlers.clear();mocks.clipboard.mockReset();mocks.windows.length=0;mocks.scope='a';mocks.blocked=false;mocks.allowed=true;mocks.construct.mockReset();mocks.load.mockReset();mocks.nativeWindows=[];mocks.physicalBounds.mockImplementation((_window:any,bounds:any)=>bounds);mocks.write.mockReset();mocks.save.mockReset();mocks.sources.mockReset();
  mocks.displays=[{id:10,bounds:{x:-800,y:0,width:800,height:600},size:{width:800,height:600},scaleFactor:2}];
  owner=new BrowserWindow();mocks.sources.mockResolvedValue([{display_id:'10',thumbnail:{isEmpty:()=>false,getSize:()=>({width:1600,height:1200}),toPNG:()=>Buffer.from('frame')}}]);
- controller=installScreenshotIpc({blocked:()=>mocks.blocked,main:()=>owner,origin:()=> 'http://localhost:1234',scope:()=>mocks.scope,preload:()=>'/preload',allowed:id=>mocks.allowed && id===owner.webContents.id});
+ controller=installScreenshotIpc({blocked:()=>mocks.blocked,main:()=>owner,origin:()=> 'http://localhost:1234',scope:()=>mocks.scope,preload:()=>'/preload',editorPreload:()=>'/screenshot-preload',allowed:id=>mocks.allowed && id===owner.webContents.id});
 });
 afterEach(()=>{for(const w of mocks.windows)if(!w.destroyed)w.destroy();vi.useRealTimers();vi.unstubAllGlobals()});
 async function start(){const result=call('capture',event(owner),'request');await vi.advanceTimersByTimeAsync(200);return {result,child:mocks.windows[1]}}
@@ -272,4 +272,154 @@ it('does not dispatch invalid PNG or overlapping DSH requests',async()=>{
  const {result,child}=await start();await expect(call('ask-dsh',event(child),'invalid')).rejects.toThrow();expect(owner.webContents.send).not.toHaveBeenCalled();
  const ask=call('ask-dsh',event(child),png());await Promise.resolve();await expect(call('ask-dsh',event(child),png())).resolves.toBe(false);
  const payload=owner.webContents.send.mock.calls.at(-1)![1];call('ask-dsh-result',event(owner),{requestId:payload.requestId,ok:true});await ask;await result;
+});
+
+it('logs only authorized diagnostic stages when explicitly enabled',async()=>{
+ vi.stubEnv('ARKME_SCREENSHOT_PROFILE','1');
+ const info=vi.spyOn(console,'info').mockImplementation(()=>{});
+ try{
+  const started=await start();const child=mocks.windows.at(-1);
+  await call('context',event(child));
+  await call('profile',event(owner),'image-decoded');
+  await call('profile',event(child),'arbitrary-sensitive-data');
+  await call('profile',event(child),'image-decoded');
+  const records=info.mock.calls.filter(args=>args[0]==='[arkme-screenshot-profile]').map(args=>JSON.parse(args[1] as string));
+  expect(records.filter(r=>r.stage==='image-decoded')).toHaveLength(1);
+  expect(records.some(r=>r.stage==='arbitrary-sensitive-data')).toBe(false);
+  expect(records.some(r=>r.stage==='context-request')).toBe(true);
+  expect(records.every(r=>Object.keys(r).every(k=>['requestId','stage','elapsedMs','windowId'].includes(k)))).toBe(true);
+  await call('close',event(child));await started.result;
+ }finally{info.mockRestore();vi.unstubAllEnvs();}
+});
+
+it('keeps screenshot diagnostics disabled by default',async()=>{
+ vi.stubEnv('ARKME_SCREENSHOT_PROFILE','');
+ const info=vi.spyOn(console,'info').mockImplementation(()=>{});
+ try{
+  const started=await start();const child=mocks.windows.at(-1);
+  expect(await call('context',event(child))).not.toHaveProperty('profileEnabled');
+  await call('profile',event(child),'image-decoded');
+  await call('close',event(child));await started.result;
+  expect(info).not.toHaveBeenCalled();
+ }finally{info.mockRestore();vi.unstubAllEnvs();}
+});
+
+it('loads the standalone page with its dedicated preload when the runtime advertises support',async()=>{
+ expect(await call('enable-standalone',event(owner))).toBe(true);
+ const {result,child}=await start();
+ expect(child.webContents.mainFrame.url).toBe('http://localhost:1234/arkme-self/screenshot?arkmeScreenshot=1');
+ expect(child.options.webPreferences.preload).toBe('/screenshot-preload');
+ expect(await call('context',event(child))).toHaveProperty('contentBase64');
+ await call('ready',event(child));expect(child.visible).toBe(true);
+ await call('close',event(child));await result;
+});
+it('keeps the old document and preload for older plugin versions',async()=>{
+ const {result,child}=await start();
+ expect(child.webContents.mainFrame.url).toBe('http://localhost:1234/?arkmeScreenshot=1');
+ expect(child.options.webPreferences.preload).toBe('/preload');
+ await call('close',event(child));await result;
+});
+
+it('accepts standalone registration only from the main window top frame',async()=>{
+ const {result,child}=await start();
+ expect(await call('enable-standalone',event(child))).toBe(false);
+ const nested=event(owner);nested.senderFrame={url:'http://localhost:1234/'};
+ expect(await call('enable-standalone',nested)).toBe(false);
+ const foreign=event(owner);foreign.senderFrame={url:'https://example.com/'};
+ expect(await call('enable-standalone',foreign)).toBe(false);
+ await call('close',event(child));await result;
+});
+
+it('preloads a blank editor without capturing and hands pixels to it only during an authorized capture',async()=>{
+ await call('enable-standalone',event(owner));
+ await vi.advanceTimersByTimeAsync(100);
+ const warm=mocks.windows[1];
+ expect(warm.visible).toBe(false);expect(mocks.sources).not.toHaveBeenCalled();
+ let received=false;
+ const pending=call('context',event(warm)).then((value:any)=>{received=true;return value});
+ await Promise.resolve();expect(received).toBe(false);
+ expect(call('ready',event(warm))).toBe(false);
+ const result=call('capture',event(owner),'warm-request');
+ await vi.advanceTimersByTimeAsync(1);
+ expect(await pending).toMatchObject({contentBase64:Buffer.from('frame').toString('base64')});
+ expect(mocks.windows).toHaveLength(2);expect(mocks.load).toHaveBeenCalledTimes(1);
+ call('ready',event(warm));expect(warm.visible).toBe(true);
+ call('close',event(warm));await result;expect(warm.destroyed).toBe(true);
+ await vi.advanceTimersByTimeAsync(100);
+ expect(mocks.windows).toHaveLength(3);expect(mocks.windows[2].visible).toBe(false);
+ expect(call('context',event(warm))).toBeNull();
+});
+it('drops blank editors and pending context on main navigation',async()=>{
+ await call('enable-standalone',event(owner));await vi.advanceTimersByTimeAsync(100);
+ const warm=mocks.windows[1],pending=call('context',event(warm));
+ owner.webContents.emit('did-start-navigation');
+ expect(await pending).toBeNull();expect(warm.destroyed).toBe(true);
+ await vi.advanceTimersByTimeAsync(200);expect(mocks.windows).toHaveLength(2);
+});
+it('discards a warm editor after display geometry changes and never exposes pixels to a subframe',async()=>{
+ await call('enable-standalone',event(owner));await vi.advanceTimersByTimeAsync(100);
+ const warm=mocks.windows[1];
+ expect(call('context',event(warm,{url:warm.webContents.getURL()}))).toBeNull();
+ const pending=call('context',event(warm));
+ mocks.displayEvents.get('display-metrics-changed')!();
+ expect(await pending).toBeNull();expect(warm.destroyed).toBe(true);
+ await vi.advanceTimersByTimeAsync(100);expect(mocks.windows).toHaveLength(3);
+});
+
+it('keeps prewarming across SPA conversation navigation and child frame navigation',async()=>{
+ await call('enable-standalone',event(owner));
+ owner.webContents.emit('did-start-navigation',{isSameDocument:true,isMainFrame:true});
+ owner.webContents.emit('did-start-navigation',{isSameDocument:false,isMainFrame:false});
+ await vi.advanceTimersByTimeAsync(100);
+ const warm=mocks.windows[1];expect(warm.destroyed).toBe(false);
+ const {result,child}=await start();expect(child).toBe(warm);
+ expect(child.webContents.getURL()).toContain('/arkme-self/screenshot');
+ call('close',event(child));await result;
+});
+
+it('reuses a reset-capable renderer across rapid captures and rejects every stale-session operation',async()=>{
+ await call('enable-standalone',event(owner),'reset-v1');await vi.advanceTimersByTimeAsync(100);
+ const child=mocks.windows[1];
+ for(let i=0;i<5;i++) {
+  const token=`reuse-${i}`,result=call('capture',event(owner),token);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(await call('context',event(child))).toHaveProperty('requestId',token);
+  expect(call('ready',event(child),'previous')).toBe(false);
+  expect(call('select',event(child),'previous')).toBe(false);
+  expect(call('complete',event(child),png(),'previous')).toBe(false);
+  expect(await call('save',event(child),png(),'previous')).toBe(false);
+  expect(await call('ask-dsh',event(child),png(),'previous')).toBe(false);
+  call('close',event(child),'previous');expect(child.destroyed).toBe(false);
+  expect(call('ready',event(child),token)).toBe(true);
+  call('close',event(child),token);await result;
+  expect(child.visible).toBe(false);expect(child.destroyed).toBe(false);
+ }
+ expect(mocks.load).toHaveBeenCalledTimes(1);expect(mocks.windows).toHaveLength(2);
+ expect(child.webContents.send).toHaveBeenCalledTimes(5);
+ expect(child.webContents.send).toHaveBeenLastCalledWith('arkme-screenshot:reset');
+ expect(child.webContents.listenerCount('render-process-gone')).toBe(1);
+});
+it('destroys a reusable editor on account invalidation rather than retaining its frame',async()=>{
+ await call('enable-standalone',event(owner),'reset-v1');await vi.advanceTimersByTimeAsync(100);
+ const child=mocks.windows[1],result=call('capture',event(owner),'scope-reuse');await vi.advanceTimersByTimeAsync(1);
+ mocks.scope='other';await vi.advanceTimersByTimeAsync(250);
+ await expect(result).resolves.toEqual({status:'cancelled'});expect(child.destroyed).toBe(true);
+ expect(child.webContents.send).not.toHaveBeenCalled();
+});
+
+it.each(['complete','close'])('settles a reusable dual-screen capture after selection destroys the other native window (%s)',async action=>{
+ mocks.displays.push({id:20,bounds:{x:0,y:0,width:1000,height:700},size:{width:1000,height:700},scaleFactor:2});
+ mocks.sources.mockResolvedValue([10,20].map(id=>({display_id:String(id),thumbnail:{isEmpty:()=>false,getSize:()=>({width:1600,height:1200}),toPNG:()=>Buffer.from('frame')}})));
+ await call('enable-standalone',event(owner),'reset-v1');await vi.advanceTimersByTimeAsync(100);
+ const child=mocks.windows[1],other=mocks.windows[2],contents=other.webContents;
+ Object.defineProperty(other,'webContents',{get(){if(other.destroyed)throw new Error('Object has been destroyed');return contents;}});
+ const result=call('capture',event(owner),'selected-request');await vi.advanceTimersByTimeAsync(1);
+ expect(call('select',event(child),'selected-request')).toBe(true);expect(other.destroyed).toBe(true);
+ if(action==='complete')expect(call('complete',event(child),png(),'selected-request')).toBe(true);
+ else call('close',event(child),'selected-request');
+ await expect(result).resolves.toMatchObject({status:action==='complete'?'captured':'cancelled'});
+ expect(child.visible).toBe(false);
+ const next=call('capture',event(owner),'next-selected');await vi.advanceTimersByTimeAsync(1);
+ expect(call('ready',event(child),'selected-request')).toBe(false);
+ call('close',event(child),'next-selected');await expect(next).resolves.toEqual({status:'cancelled'});
 });

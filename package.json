@@ -92,6 +92,7 @@
     "asar": true,
     "asarUnpack": [
       "dist/preload.cjs",
+      "dist/screenshot-preload.cjs",
       "dist/harness-process-lifetime.js",
       "dist/harness-core-dependencies.js",
       "node_modules/@arkme/macos-notification-permission/build/Release/*.node",

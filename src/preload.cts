@@ -967,10 +967,12 @@ contextBridge.exposeInMainWorld('arkmeConversation', Object.freeze({
 // Dedicated, versioned screenshot bridge. Every call is authorized again in main.
 contextBridge.exposeInMainWorld('arkmeScreenshot', Object.freeze({
   version: 1,
+  enableStandaloneEditor: (capability?:string) => ipcRenderer.invoke('arkme-screenshot:enable-standalone',capability),
   capture: (requestId: string) => ipcRenderer.invoke('arkme-screenshot:capture', requestId),
   cancel: (requestId: string) => ipcRenderer.invoke('arkme-screenshot:cancel', requestId),
   context: () => ipcRenderer.invoke('arkme-screenshot:context'),
   ready: () => ipcRenderer.invoke('arkme-screenshot:ready'),
+  profile: (stage: string) => ipcRenderer.invoke('arkme-screenshot:profile', stage),
   select: () => ipcRenderer.invoke('arkme-screenshot:select'),
   close: () => ipcRenderer.invoke('arkme-screenshot:close'),
   complete: (png: string) => ipcRenderer.invoke('arkme-screenshot:complete', png),
