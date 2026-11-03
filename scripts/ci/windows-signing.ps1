@@ -69,6 +69,14 @@ public static class ArkmeTrayMouse {
  [DllImport("user32.dll")] public static extern void mouse_event(uint flags,uint dx,uint dy,uint data,UIntPtr extra);
 }
 '@
+# Hosted images may not start Explorer in the runner's desktop session.
+$session=(Get-Process -Id $PID).SessionId
+Write-Output ("Runner session={0} interactive={1}" -f $session,[Environment]::UserInteractive)
+$explorers=@(Get-Process explorer -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -eq $session})
+if(!$explorers.Count){$null=Start-Process "$env:WINDIR\explorer.exe" -PassThru;Start-Sleep -Seconds 5}
+foreach($window in $root.FindAll([System.Windows.Automation.TreeScope]::Children,[System.Windows.Automation.Condition]::TrueCondition)){
+ Write-Output ("Desktop child class={0} process={1}" -f $window.Current.ClassName,$window.Current.ProcessId)
+}
 Start-Sleep -Seconds 2
 $buttonCondition=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button)
 function Tray-Buttons {

@@ -1,6 +1,8 @@
 import {readFile,writeFile,appendFile} from 'node:fs/promises';import {execFileSync} from 'node:child_process';import {api,environment,required} from './api.mjs';
 const command=process.argv[2];const read=async p=>JSON.parse(await readFile(p,'utf8'));const pkg=await read('package.json');
 if(command==='reserve'){
+ const headMessage=execFileSync('git',['log','-1','--format=%B'],{encoding:'utf8'});
+ if(headMessage.includes('Arkme-CI-Batch:'))throw new Error('This is a CI version writeback commit; rerun the original release run to reuse its batch and artifacts');
  const env=environment(required('GITHUB_REF'));const b=await api('versions/reserve',{repository:required('GITHUB_REPOSITORY'),source_sha:required('GITHUB_SHA'),version:pkg.version,version_code:pkg.versionCode,run_id:required('GITHUB_RUN_ID')});if(b.environment!==env)throw new Error('Backend environment mismatch');await writeFile('reservation.json',JSON.stringify(b));if(process.env.GITHUB_OUTPUT)await appendFile(process.env.GITHUB_OUTPUT,`environment=${env}\npublished=${b.status==='published'}\n`);
 }else{
  const b=await read('reservation.json');pkg.version=b.version;pkg.versionCode=b.version_code;if(pkg.build?.mac)pkg.build.mac.bundleVersion=String(b.version_code);await writeFile('package.json',JSON.stringify(pkg,null,2)+'\n');
