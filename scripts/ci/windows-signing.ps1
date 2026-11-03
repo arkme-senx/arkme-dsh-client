@@ -46,16 +46,32 @@ if(!$app){throw 'SimplySign executable not found; inspect pinned installer layou
 $process=Start-Process $app.FullName -PassThru
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+Add-Type @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class ArkmeLoginControls {
+ [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd,StringBuilder text,int count);
+ [DllImport("user32.dll",EntryPoint="SendMessageTimeoutW",CharSet=CharSet.Unicode)] static extern IntPtr Send(IntPtr hwnd,uint message,IntPtr wParam,string value,uint flags,uint timeout,out IntPtr result);
+ public static string Label(IntPtr hwnd){var b=new StringBuilder(128);GetWindowText(hwnd,b,b.Capacity);return b.ToString();}
+ public static void SetText(IntPtr hwnd,string value){IntPtr result;if(Send(hwnd,12,IntPtr.Zero,value,2,5000,out result)==IntPtr.Zero)throw new Exception("Login field unavailable");}
+ public static void Click(IntPtr hwnd){IntPtr result;if(Send(hwnd,245,IntPtr.Zero,null,2,5000,out result)==IntPtr.Zero)throw new Exception("Login submit unavailable");}
+}
+'@
+
 $root=[System.Windows.Automation.AutomationElement]::RootElement
 $condition=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty,$process.Id)
 function Login-Controls {
  $ids=@(Get-Process | Where-Object {$_.ProcessName -eq 'SimplySignDesktop'} | ForEach-Object {$_.Id})
  $windows=@($root.FindAll([System.Windows.Automation.TreeScope]::Children,[System.Windows.Automation.Condition]::TrueCondition) | Where-Object {$_.Current.ProcessId -in $ids})
  foreach($window in $windows){
-  $edits=$window.FindAll([System.Windows.Automation.TreeScope]::Descendants,(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Edit)))
-  $buttons=$window.FindAll([System.Windows.Automation.TreeScope]::Descendants,(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button)))
-  $login=@($buttons | Where-Object {$_.Current.Name -match '^(Connect|Log in|Login|Sign in|OK|Ok)$' -and $_.Current.IsEnabled})
-  if($edits.Count -eq 2 -and $login.Count -eq 1){return @{Account=$edits[0];Token=$edits[1];Submit=$login[0]}}
+  $all=$window.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)
+  # The pinned WinForms build reports all controls as Pane on hosted runners.
+  # Match observed native classes, then order ID above Token by actual bounds.
+  $edits=@($all | Where-Object {$_.Current.ClassName -match '^WindowsForms10\.EDIT\.' -and $_.Current.IsEnabled} | Sort-Object {$_.Current.BoundingRectangle.Top})
+  $login=@($all | Where-Object {$_.Current.ClassName -match '^WindowsForms10\.BUTTON\.' -and $_.Current.IsEnabled -and [ArkmeLoginControls]::Label([IntPtr]$_.Current.NativeWindowHandle) -match '^(OK|Ok|Connect|Log in|Login|Sign in)$'})
+  if($edits.Count -eq 2 -and $login.Count -eq 1 -and $edits[0].Current.BoundingRectangle.Top -lt $edits[1].Current.BoundingRectangle.Top){return @{Account=$edits[0];Token=$edits[1];Submit=$login[0]}}
+
  }
  return $null
 }
@@ -151,10 +167,10 @@ for($attempt=1;$attempt -le 2;$attempt++){
   $child=[System.Diagnostics.Process]::Start($start)
   $token=$child.StandardOutput.ReadToEnd();$null=$child.StandardError.ReadToEnd();$child.WaitForExit()
   if($child.ExitCode -ne 0 -or $token -notmatch '^\d{6}$'){throw 'Token request failed'}
-  ([System.Windows.Automation.ValuePattern]$controls.Account.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)).SetValue($env:SIMPLYSIGN_ACCOUNT)
-  ([System.Windows.Automation.ValuePattern]$controls.Token.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)).SetValue($token)
+  [ArkmeLoginControls]::SetText([IntPtr]$controls.Account.Current.NativeWindowHandle,$env:SIMPLYSIGN_ACCOUNT)
+  [ArkmeLoginControls]::SetText([IntPtr]$controls.Token.Current.NativeWindowHandle,$token)
   $token=$null
-  ([System.Windows.Automation.InvokePattern]$controls.Submit.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)).Invoke()
+  [ArkmeLoginControls]::Click([IntPtr]$controls.Submit.Current.NativeWindowHandle)
   $deadline=(Get-Date).AddSeconds(20)
   while((Get-Date) -lt $deadline){if(Check-Certificate){Write-Output 'SimplySign certificate ready';exit 0};Start-Sleep -Milliseconds 500}
  }catch{if($attempt -eq 2){throw 'SimplySign login failed after two attempts'}}finally{$token=$null}
