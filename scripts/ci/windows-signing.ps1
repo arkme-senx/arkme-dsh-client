@@ -60,7 +60,22 @@ function Login-Controls {
 }
 $deadline=(Get-Date).AddSeconds(45);$controls=$null
 while((Get-Date) -lt $deadline){$controls=Login-Controls;if($controls){break};Start-Sleep -Milliseconds 500}
-if(!$controls){throw 'SimplySign login controls unavailable on hosted runner; token was not requested'}
+if(!$controls){
+ # Pre-login diagnostics only: never inspect edit values or token-bearing text.
+ $peers=@(Get-Process | Where-Object {$_.ProcessName -match 'SimplySign'})
+ foreach($peer in $peers){
+  Write-Output ("SimplySign process id={0} name={1} session={2} mainWindow={3}" -f $peer.Id,$peer.ProcessName,$peer.SessionId,$peer.MainWindowHandle)
+  $peerCondition=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty,$peer.Id)
+  foreach($w in $root.FindAll([System.Windows.Automation.TreeScope]::Children,$peerCondition)){
+   Write-Output ("Window class={0} offscreen={1}" -f $w.Current.ClassName,$w.Current.IsOffscreen)
+   foreach($control in $w.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)){
+    $label='';if($control.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button){$label=$control.Current.Name}
+    Write-Output ("Control type={0} id={1} class={2} enabled={3} button={4}" -f $control.Current.ControlType.ProgrammaticName,$control.Current.AutomationId,$control.Current.ClassName,$control.Current.IsEnabled,$label)
+   }
+  }
+ }
+ throw 'SimplySign login controls unavailable on hosted runner; token was not requested'
+}
 if(!$env:SIMPLYSIGN_ACCOUNT){throw 'SimplySign account required'}
 for($attempt=1;$attempt -le 2;$attempt++){
  $token=$null
