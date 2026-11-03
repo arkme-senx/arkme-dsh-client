@@ -100,6 +100,8 @@ jobs:
         env:
           CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          MAC_INSTALLER_LINK: ${{ secrets.MAC_INSTALLER_LINK }}
+          MAC_INSTALLER_PASSWORD: ${{ secrets.MAC_INSTALLER_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -111,7 +113,7 @@ jobs:
           name: arkme-${{ needs.reserve.outputs.batch }}-${{ matrix.platform }}
           path: |
             release-ci/*.exe
-            release-ci/*.dmg
+            release-ci/*.pkg
             release-ci/*.zip
             release-ci/*.blockmap
             release-ci/latest*.yml
