@@ -1,0 +1,6 @@
+import {it,expect,vi,afterEach} from 'vitest';import {api} from '../scripts/ci/api.mjs';
+afterEach(()=>vi.unstubAllEnvs());
+function env(){vi.stubEnv('ARKME_CI_BACKEND','https://example.com');vi.stubEnv('ARKME_CI_SECRET','fixture-private')}
+it('retries connection loss and gateway timeouts with the identical idempotent body',async()=>{env();const bodies:any[]=[];const delays:number[]=[];let calls=0;const data=await api('versions/reserve',{source_sha:'source'},{fetcher:async(_u,opts)=>{bodies.push(opts?.body);calls++;if(calls===1)throw new TypeError('connection');return calls===2?new Response('',{status:504}):Response.json({code:200,data:{id:'same'}})},wait:async ms=>{delays.push(ms)}});expect(data.id).toBe('same');expect(new Set(bodies).size).toBe(1);expect(delays).toEqual([1000,2000])});
+it('does not retry authentication rejection',async()=>{env();let calls=0;await expect(api('versions/reserve',{}, {fetcher:async()=>{calls++;return new Response('',{status:401})},wait:async()=>{}})).rejects.toThrow('401');expect(calls).toBe(1)});
+it('bounds network retries and omits underlying sensitive details',async()=>{env();let calls=0;await expect(api('versions/reserve',{}, {fetcher:async()=>{calls++;throw new Error('sensitive response')},wait:async()=>{}})).rejects.toThrow('CI API connection unavailable');expect(calls).toBe(3)});

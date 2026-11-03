@@ -117,12 +117,7 @@ function updateFeedDirectory(raw: string): string {
 }
 
 export function resolveSupportedAppUpdateTarget(platform: string, arch: string): SupportedAppUpdateTarget | null {
-  if (platform === "darwin" && arch === "x64") {
-    // The legacy API slot is named arm64; production artifacts are Universal.
-    // This selects the APP release feed, never the native Harness architecture.
-    return { platform: "darwin", arch: "arm64" };
-  }
-  return (platform === "darwin" && arch === "arm64")
+  return (platform === "darwin" && (arch === "arm64" || arch === "x64"))
     || (platform === "win32" && arch === "x64")
     || (platform === "linux" && arch === "x64")
     ? { platform, arch }
@@ -135,6 +130,7 @@ export function appUpdateFeedURL(base: string, platform: UpdatePlatform, arch: U
     throw new Error(`unsupported Arkme app update target: ${platform}/${arch}`);
   }
   const endpoint = `${origin(base)}/api/public/v1/arkme/app-update/${target.platform}/${target.arch}/latest`;
+  if (appId === "cc.jiwo.arkme.test") return `${endpoint}?installation=arkme-test-v3`;
   // Historical V3 protocol marker and feed paths remain stable across the macOS ID change.
   return (target.platform === "darwin" || target.platform === "win32") && (appId === "cc.jiwo.arkme" || (target.platform === "darwin" && appId === "com.senqisi.Jotmo")) ? `${endpoint}?installation=jiwo-v3-cc-jiwo-arkme` : endpoint;
 }

@@ -1,0 +1,208 @@
+name: Arkme signed client release
+on:
+  push:
+    branches: [pre-release, master]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: arkme-client-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  reserve:
+    if: >-
+      (github.ref == 'refs/heads/pre-release' || github.ref == 'refs/heads/master') &&
+      !contains(github.event.head_commit.message, 'Arkme-CI-Batch:')
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/master' && 'prod' || 'test' }}
+    outputs:
+      batch: ${{ steps.batch.outputs.id }}
+      reservation_artifact: reservation-${{ github.run_attempt }}
+      environment: ${{ steps.reserve.outputs.environment }}
+      published: ${{ steps.reserve.outputs.published }}
+    env:
+      ARKME_CI_BACKEND: ${{ vars.ARKME_CI_BACKEND }}
+      ARKME_CI_SECRET: ${{ secrets.ARKME_CI_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: '${{ github.sha }}'}
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - id: reserve
+        run: node scripts/ci/version.mjs reserve
+      - id: batch
+        run: node -e 'const fs=require("fs");fs.appendFileSync(process.env.GITHUB_OUTPUT,"id="+require("./reservation.json").id+"\n")'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reservation-${{ github.run_attempt }}
+          path: reservation.json
+          retention-days: 30
+  build:
+    needs: reserve
+    if: needs.reserve.outputs.published != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            runner: macos-14
+          - platform: windows
+            runner: windows-2022
+    runs-on: ${{ matrix.runner }}
+    environment: ${{ needs.reserve.outputs.environment }}
+    env:
+      ARKME_BUILD_WEBHOOK_TOKEN: ${{ secrets.ARKME_BUILD_WEBHOOK_TOKEN }}
+      ARKME_BUILD_WEBHOOK_URL: ${{ vars.ARKME_BUILD_WEBHOOK_URL }}
+      ARKME_BUILD_PLATFORM: ${{ matrix.platform }}
+      GH_TOKEN: ${{ github.token }}
+      ARKME_CI_ENV: ${{ needs.reserve.outputs.environment }}
+      ARKME_CI_BACKEND: ${{ vars.ARKME_CI_BACKEND }}
+      ARKME_CI_SECRET: ${{ secrets.ARKME_CI_SECRET }}
+      ARKME_CDN_BASE: ${{ vars.ARKME_CDN_BASE }}
+      ARKME_RUNTIME_SERVICE_BASE_URL: ${{ vars.ARKME_RUNTIME_SERVICE_BASE_URL }}
+      SIMPLYSIGN_ACCOUNT: ${{ secrets.SIMPLYSIGN_ACCOUNT }}
+      SIMPLYSIGN_CERTIFICATE_SHA1: ${{ vars.SIMPLYSIGN_CERTIFICATE_SHA1 }}
+      SIMPLYSIGN_PUBLISHER: ${{ vars.SIMPLYSIGN_PUBLISHER }}
+      SIMPLYSIGN_INSTALLER_SHA256: ${{ vars.SIMPLYSIGN_INSTALLER_SHA256 }}
+    defaults:
+      run: {shell: bash}
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: '${{ github.sha }}'}
+      - name: 通知平台构建开始
+        continue-on-error: true
+        timeout-minutes: 1
+        run: node scripts/ci/notify.mjs start
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.reserve.outputs.reservation_artifact }}
+      - id: restore
+        run: node scripts/ci/restore.mjs ${{ matrix.platform }}
+      - if: steps.restore.outputs.reused != 'true'
+        run: node scripts/ci/version.mjs apply
+      - if: steps.restore.outputs.reused != 'true'
+        uses: pnpm/action-setup@v4
+        with: {version: '11.19.0'}
+      - if: steps.restore.outputs.reused != 'true'
+        run: |
+          git config --global --add url."https://github.com/".insteadOf 'ssh://git@github.com/'
+          git config --global --add url."https://github.com/".insteadOf 'git@github.com:'
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run postinstall
+      - if: steps.restore.outputs.reused != 'true'
+        run: pnpm run build
+      - if: steps.restore.outputs.reused != 'true' && matrix.platform == 'windows'
+        shell: pwsh
+        run: ./scripts/ci/windows-signing.ps1 login
+      - if: steps.restore.outputs.reused != 'true' && matrix.platform == 'windows'
+        run: node scripts/ci/build-windows.mjs
+      - if: steps.restore.outputs.reused != 'true' && matrix.platform == 'windows'
+        shell: pwsh
+        run: ./scripts/ci/windows-signing.ps1 verify
+      - if: steps.restore.outputs.reused != 'true' && matrix.platform == 'macos'
+        run: node scripts/ci/build-macos.cjs
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          MAC_INSTALLER_LINK: ${{ secrets.MAC_INSTALLER_LINK }}
+          MAC_INSTALLER_PASSWORD: ${{ secrets.MAC_INSTALLER_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - if: steps.restore.outputs.reused != 'true'
+        run: node scripts/ci/artifacts.mjs collect ${{ matrix.platform }}
+      - if: steps.restore.outputs.reused != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: arkme-${{ needs.reserve.outputs.batch }}-${{ matrix.platform }}
+          path: |
+            release-ci/*.exe
+            release-ci/*.pkg
+            release-ci/*.zip
+            release-ci/*.blockmap
+            release-ci/latest*.yml
+            release-ci/platform.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: 通知平台构建失败或取消
+        if: failure() || cancelled()
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          ARKME_BUILD_RESULT: ${{ job.status }}
+          ARKME_BUILD_REUSED: ${{ steps.restore.outputs.reused }}
+        run: node scripts/ci/notify.mjs finish
+  publish:
+    needs: [reserve, build]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.reserve.outputs.environment }}
+    permissions:
+      contents: write
+      actions: read
+    env:
+      ARKME_BUILD_WEBHOOK_TOKEN: ${{ secrets.ARKME_BUILD_WEBHOOK_TOKEN }}
+      ARKME_BUILD_WEBHOOK_URL: ${{ vars.ARKME_BUILD_WEBHOOK_URL }}
+      ARKME_CI_ENV: ${{ needs.reserve.outputs.environment }}
+      GH_TOKEN: ${{ github.token }}
+      ARKME_CDN_BASE: ${{ vars.ARKME_CDN_BASE }}
+      ARKME_CI_BACKEND: ${{ vars.ARKME_CI_BACKEND }}
+      ARKME_CI_SECRET: ${{ secrets.ARKME_CI_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - uses: pnpm/action-setup@v4
+        with: {version: '11.19.0'}
+      - run: |
+          git config --global --add url."https://github.com/".insteadOf 'ssh://git@github.com/'
+          git config --global --add url."https://github.com/".insteadOf 'git@github.com:'
+          pnpm install --frozen-lockfile --ignore-scripts
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.reserve.outputs.reservation_artifact }}
+      - name: Restore immutable platform outputs
+        run: |
+          mkdir -p artifacts
+          node scripts/ci/restore.mjs macos
+          mv release-ci artifacts/macos
+          node scripts/ci/restore.mjs windows
+          mv release-ci artifacts/windows
+      - name: Write back only if source branch is unchanged
+        run: node scripts/ci/version.mjs writeback
+      - id: plan
+        run: node scripts/ci/restore.mjs publication
+      - if: steps.plan.outputs.reused != 'true'
+        run: node scripts/ci/artifacts.mjs manifest
+        env:
+          ARKME_MANIFEST_PRIVATE_KEY: ${{ secrets.ARKME_MANIFEST_PRIVATE_KEY }}
+      - if: steps.plan.outputs.reused != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: arkme-${{ needs.reserve.outputs.batch }}-publication
+          path: publication/manifest.json
+          retention-days: 30
+      - run: node scripts/ci/artifacts.mjs upload
+      - id: release
+        run: node scripts/ci/artifacts.mjs publish
+      - name: 通知 macos 最终发布结果
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          ARKME_BUILD_PLATFORM: macos
+          ARKME_BUILD_RESULT: ${{ job.status }}
+          ARKME_RELEASE_RESULT: ${{ steps.release.outcome }}
+        run: node scripts/ci/notify.mjs release
+      - name: 通知 windows 最终发布结果
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          ARKME_BUILD_PLATFORM: windows
+          ARKME_BUILD_RESULT: ${{ job.status }}
+          ARKME_RELEASE_RESULT: ${{ steps.release.outcome }}
+        run: node scripts/ci/notify.mjs release

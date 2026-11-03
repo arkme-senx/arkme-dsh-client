@@ -74,16 +74,18 @@ export async function stageMigrationPayload(appRoot, work) {
   return root;
 }
 
-export async function buildMigrationPackage({ appRoot, outputDirectory }) {
+export async function buildMigrationPackage({ appRoot, outputDirectory, env = process.env }) {
   if (process.platform !== "darwin") throw new Error("Build the migration PKG on macOS");
-  const installerIdentity = process.env.JIWO_INSTALLER_IDENTITY?.trim();
-  const appIdentity = process.env.CSC_NAME?.trim();
-  const notaryProfile = process.env.JIWO_NOTARY_PROFILE?.trim();
-  if (!installerIdentity?.startsWith("Developer ID Installer:") || !appIdentity?.startsWith("Developer ID Application:") || !notaryProfile) {
+  const installerIdentity = env.JIWO_INSTALLER_IDENTITY?.trim();
+  const appIdentity = env.CSC_NAME?.trim();
+  const notaryProfile = env.JIWO_NOTARY_PROFILE?.trim();
+  const { notarytoolAuthArgs } = await import('./macos-ci-signing.cjs');
+  const notaryAuth = notaryProfile ? ['--keychain-profile', notaryProfile] : notarytoolAuthArgs(env);
+  if (!installerIdentity?.startsWith("Developer ID Installer:") || !appIdentity?.startsWith("Developer ID Application:")) {
     throw new Error("Set CSC_NAME, JIWO_INSTALLER_IDENTITY and JIWO_NOTARY_PROFILE on the release host");
   }
   function run(tool, args) {
-    const result = spawnSync(tool, args, { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
+    const result = spawnSync(tool, args, { env, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
     if (result.error || result.status !== 0) throw new Error(`${path.basename(tool)} failed: ${result.stderr || result.error?.message || result.status}`);
     return `${result.stdout ?? ""}${result.stderr ?? ""}`;
   }
@@ -151,7 +153,7 @@ export async function buildMigrationPackage({ appRoot, outputDirectory }) {
     const filename = `即我-${manifest.version}-vc${manifest.versionCode}-universal.pkg`;
     const artifact = path.join(work, filename);
     run("/usr/bin/productbuild", ["--distribution", distribution, "--package-path", work, "--sign", installerIdentity, artifact]);
-    const notarization = JSON.parse(run("/usr/bin/xcrun", ["notarytool", "submit", artifact, "--keychain-profile", notaryProfile, "--wait", "--output-format", "json"]));
+    const notarization = JSON.parse(run("/usr/bin/xcrun", ["notarytool", "submit", artifact, ...notaryAuth, "--wait", "--output-format", "json"]));
     if (notarization.status !== "Accepted") throw new Error("Migration PKG notarization was not accepted");
     run("/usr/bin/xcrun", ["stapler", "staple", artifact]);
     run("/usr/bin/xcrun", ["stapler", "validate", artifact]);

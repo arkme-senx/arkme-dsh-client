@@ -1,0 +1,52 @@
+name: macOS Universal signing proof
+on:
+  workflow_dispatch:
+permissions: {contents: read}
+jobs:
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 60
+    environment: test
+    env:
+      ARKME_CI_ENV: test
+      ARKME_CI_BACKEND: ${{ vars.ARKME_CI_BACKEND }}
+      ARKME_CI_SECRET: ${{ secrets.ARKME_CI_SECRET }}
+      ARKME_CDN_BASE: ${{ vars.ARKME_CDN_BASE }}
+      ARKME_RUNTIME_SERVICE_BASE_URL: ${{ vars.ARKME_RUNTIME_SERVICE_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - name: Reserve isolated test build batch
+        run: |
+          node --input-type=module -e 'import {api} from "./scripts/ci/api.mjs";import{readFile,writeFile}from"node:fs/promises";const p=JSON.parse(await readFile("package.json"));const b=await api("versions/reserve",{repository:process.env.GITHUB_REPOSITORY,source_sha:process.env.GITHUB_SHA,version:p.version,version_code:p.versionCode,run_id:process.env.GITHUB_RUN_ID});if(b.environment!=="test")throw Error("Wrong environment");await writeFile("reservation.json",JSON.stringify(b));'
+          node scripts/ci/version.mjs apply
+      - uses: pnpm/action-setup@v4
+        with: {version: '11.19.0'}
+      - run: |
+          git config --global --add url."https://github.com/".insteadOf 'ssh://git@github.com/'
+          git config --global --add url."https://github.com/".insteadOf 'git@github.com:'
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run postinstall
+          pnpm run build
+      - name: Universal build, signing, notarization and final verification
+        run: node scripts/ci/build-macos.cjs
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - run: node scripts/ci/artifacts.mjs collect macos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-signing-proof
+          path: |
+            release-ci/*.dmg
+            release-ci/*.zip
+            release-ci/*.blockmap
+            release-ci/latest*.yml
+            release-ci/platform.json
+            reservation.json
+          if-no-files-found: error
+          retention-days: 7

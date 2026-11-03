@@ -1,0 +1,183 @@
+param([ValidateSet('login','verify')][string]$Operation='login')
+$ErrorActionPreference='Stop'
+function Check-Certificate {
+ $thumb=$env:SIMPLYSIGN_CERTIFICATE_SHA1 -replace '\s',''
+ if($thumb -notmatch '^[A-Fa-f0-9]{40}$'){throw 'Certificate thumbprint required'}
+ $cert=Get-Item "Cert:\CurrentUser\My\$thumb" -ErrorAction SilentlyContinue
+ if(!$cert -or !$cert.HasPrivateKey -or $cert.NotBefore -gt (Get-Date) -or $cert.NotAfter -le (Get-Date).AddHours(1)){return $false}
+ if(!$env:SIMPLYSIGN_PUBLISHER -or $cert.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,$false) -ne $env:SIMPLYSIGN_PUBLISHER){throw 'Unexpected certificate publisher'}
+ if(!($cert.EnhancedKeyUsageList | Where-Object {$_.ObjectId -eq '1.3.6.1.5.5.7.3.3'})){throw 'Certificate is not valid for code signing'}
+ return $true
+}
+if($Operation -eq 'verify'){
+ if(!(Check-Certificate)){throw 'Signing certificate unavailable'}
+ $tool=Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+ if(!$tool){throw 'SignTool not installed'}
+ $targets=@(Get-ChildItem release-ci -Filter *.exe -File)
+ $targets+=Get-ChildItem release-ci/win-unpacked -Filter *.exe -Recurse -File | Where-Object {$_.Name -in @('arkme.exe','arkme Test.exe','elevate.exe')}
+ if($targets.Count -lt 2){throw 'Missing signed executable outputs'}
+ foreach($file in $targets){
+  $s=Get-AuthenticodeSignature $file.FullName
+  if($s.Status -ne 'Valid' -or $s.SignerCertificate.Thumbprint -ne ($env:SIMPLYSIGN_CERTIFICATE_SHA1 -replace '\s','') -or !$s.TimeStamperCertificate){throw 'Authenticode or timestamp verification failed'}
+  & $tool.FullName verify /pa /all /tw $file.FullName
+  if($LASTEXITCODE -ne 0){throw 'SignTool verification failed'}
+ }
+ # Verify the final ZIP bytes separately, without repacking them.
+ $zip=Get-ChildItem release-ci -Filter *.zip -File | Select-Object -First 1
+ $dir=Join-Path $env:RUNNER_TEMP ('arkme-zip-'+[guid]::NewGuid())
+ try{Expand-Archive $zip.FullName $dir; $exe=Get-ChildItem $dir -Recurse -File | Where-Object {$_.Name -in @('arkme.exe','arkme Test.exe')} | Select-Object -First 1
+  if(!$exe){throw 'ZIP application missing'};$s=Get-AuthenticodeSignature $exe.FullName
+  if($s.Status -ne 'Valid' -or !$s.TimeStamperCertificate -or $s.SignerCertificate.Thumbprint -ne ($env:SIMPLYSIGN_CERTIFICATE_SHA1 -replace '\s','')){throw 'ZIP signature invalid'}
+ }finally{Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue}
+ @{verified=$true;timestamp=$true;certificate_sha1=$env:SIMPLYSIGN_CERTIFICATE_SHA1} | ConvertTo-Json -Compress | Set-Content release-ci/signing-evidence.json -Encoding utf8NoBOM
+ exit 0
+}
+# Installation is pinned by both version URL and independently configured digest.
+$url='https://files.certum.eu/software/SimplySignDesktop/Windows/9.4.4.92/SimplySignDesktop-9.4.4.92-64-bit-en.msi'
+$installer=Join-Path $env:RUNNER_TEMP 'SimplySignDesktop-9.4.4.92.msi'
+Invoke-WebRequest $url -OutFile $installer
+if($env:SIMPLYSIGN_INSTALLER_SHA256 -notmatch '^[a-fA-F0-9]{64}$' -or (Get-FileHash $installer -Algorithm SHA256).Hash -ne $env:SIMPLYSIGN_INSTALLER_SHA256){throw 'Installer digest mismatch'}
+$signature=Get-AuthenticodeSignature $installer
+if($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Asseco'){throw 'Installer signature invalid'}
+$p=Start-Process msiexec.exe -ArgumentList @('/i',"`"$installer`"",'/qn','/norestart') -Wait -PassThru
+if($p.ExitCode -notin @(0,3010)){throw 'SimplySign installation failed'}
+$app=Get-ChildItem "$env:ProgramFiles\Certum" -Recurse -Filter 'SimplySignDesktop.exe' -File | Select-Object -First 1
+if(!$app){throw 'SimplySign executable not found; inspect pinned installer layout'}
+$process=Start-Process $app.FullName -PassThru
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+Add-Type @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class ArkmeLoginControls {
+ [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
+ [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint process);
+ public static int OwnerProcessId(IntPtr hwnd){uint p;GetWindowThreadProcessId(hwnd,out p);return checked((int)p);}
+ [DllImport("user32.dll")] static extern bool PostMessage(IntPtr hwnd,uint message,IntPtr wParam,IntPtr lParam);
+ [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd,StringBuilder text,int count);
+ [DllImport("user32.dll",EntryPoint="SendMessageTimeoutW",CharSet=CharSet.Unicode)] static extern IntPtr Send(IntPtr hwnd,uint message,IntPtr wParam,string value,uint flags,uint timeout,out IntPtr result);
+ public static string Label(IntPtr hwnd){var b=new StringBuilder(128);GetWindowText(hwnd,b,b.Capacity);return b.ToString();}
+ public static void SetText(IntPtr hwnd,string value){IntPtr result;if(Send(hwnd,12,IntPtr.Zero,value,2,5000,out result)==IntPtr.Zero)throw new Exception("Login field unavailable");}
+ public static void Click(IntPtr hwnd){if(!PostMessage(hwnd,245,IntPtr.Zero,IntPtr.Zero))throw new Exception("Login submit unavailable");}
+}
+'@
+
+$root=[System.Windows.Automation.AutomationElement]::RootElement
+$condition=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty,$process.Id)
+$controlFile=Join-Path $env:RUNNER_TEMP 'simplysign-login-controls.json'
+function Login-Controls {
+ if(!(Test-Path $controlFile)){return $null}
+ $value=Get-Content $controlFile -Raw | ConvertFrom-Json
+ $ids=@(Get-Process | Where-Object {$_.ProcessName -eq 'SimplySignDesktop' -and $_.Path -eq $app.FullName} | ForEach-Object {$_.Id})
+ foreach($handle in @($value.account,$value.token,$value.submit)){
+  $windowHandle=[IntPtr]$handle
+  if(![ArkmeLoginControls]::IsWindow($windowHandle)){return $null}
+  $ownerId=[ArkmeLoginControls]::OwnerProcessId($windowHandle)
+  if($ownerId -notin $ids){return $null}
+ }
+ return @{Account=[IntPtr]$value.account;Token=[IntPtr]$value.token;Submit=[IntPtr]$value.submit}
+}
+# SimplySign starts in the notification area. Open the documented Connect menu
+# before looking for account/token controls; no token has been requested yet.
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class ArkmeTrayMouse {
+ [DllImport("user32.dll")] public static extern bool SetCursorPos(int x,int y);
+ [DllImport("user32.dll")] public static extern void mouse_event(uint flags,uint dx,uint dy,uint data,UIntPtr extra);
+}
+'@
+# Hosted images may not start Explorer in the runner's desktop session.
+$session=(Get-Process -Id $PID).SessionId
+Write-Output ("Runner session={0} interactive={1}" -f $session,[Environment]::UserInteractive)
+$explorers=@(Get-Process explorer -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -eq $session})
+if(!$explorers.Count){$null=Start-Process "$env:WINDIR\explorer.exe" -PassThru;Start-Sleep -Seconds 5}
+foreach($window in $root.FindAll([System.Windows.Automation.TreeScope]::Children,[System.Windows.Automation.Condition]::TrueCondition)){
+ Write-Output ("Desktop child class={0} process={1}" -f $window.Current.ClassName,$window.Current.ProcessId)
+}
+Start-Sleep -Seconds 2
+$buttonCondition=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Button)
+function Tray-Buttons {
+ foreach($window in $root.FindAll([System.Windows.Automation.TreeScope]::Children,[System.Windows.Automation.Condition]::TrueCondition)){
+  if($window.Current.ClassName -in @('Shell_TrayWnd','NotifyIconOverflowWindow')){
+   foreach($button in $window.FindAll([System.Windows.Automation.TreeScope]::Descendants,$buttonCondition)){ $button }
+  }
+ }
+}
+$tray=@(Tray-Buttons)
+$icon=@($tray | Where-Object {$_.Current.Name -match 'SimplySign'})
+if(!$icon.Count){
+ $chevron=@($tray | Where-Object {$_.Current.AutomationId -eq 'Chevron' -or $_.Current.Name -eq 'Show hidden icons'})
+ if($chevron.Count -eq 1){([System.Windows.Automation.InvokePattern]$chevron[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)).Invoke();Start-Sleep -Milliseconds 500}
+ $tray=@(Tray-Buttons);$icon=@($tray | Where-Object {$_.Current.Name -match 'SimplySign'})
+}
+if($icon.Count -eq 1){
+ $point=$icon[0].GetClickablePoint();$null=[ArkmeTrayMouse]::SetCursorPos([int]$point.X,[int]$point.Y)
+ [ArkmeTrayMouse]::mouse_event(8,0,0,0,[UIntPtr]::Zero);[ArkmeTrayMouse]::mouse_event(16,0,0,0,[UIntPtr]::Zero)
+ Start-Sleep -Milliseconds 500
+ $menuCondition=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::MenuItem)
+ $connect=@($root.FindAll([System.Windows.Automation.TreeScope]::Descendants,$menuCondition) | Where-Object {$_.Current.Name -match '^Connect( to SimplySign)?$'})
+ if($connect.Count -eq 1){([System.Windows.Automation.InvokePattern]$connect[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)).Invoke()}
+ else{Write-Output 'SimplySign tray Connect menu unavailable'}
+}else{
+ foreach($button in $tray){Write-Output ("Tray button id={0} name={1}" -f $button.Current.AutomationId,$button.Current.Name)}
+ Write-Output 'SimplySign tray icon unavailable'
+}
+if(!(Login-Controls)){
+ & python -m pip install --disable-pip-version-check --quiet pywinauto==0.6.9
+ if($LASTEXITCODE -ne 0){throw 'Native desktop automation dependency installation failed'}
+ & python scripts/ci/windows-open-login.py $app.FullName $controlFile
+ if($LASTEXITCODE -ne 0){Write-Output 'Native tray opening failed; collect pre-login diagnostics'}
+}
+$deadline=(Get-Date).AddSeconds(45);$controls=$null
+while((Get-Date) -lt $deadline){$controls=Login-Controls;if($controls){break};Start-Sleep -Milliseconds 500}
+if(!$controls){
+ # This path runs before token/account entry; capture only the empty login desktop.
+ try{
+  Add-Type -AssemblyName System.Windows.Forms
+  Add-Type -AssemblyName System.Drawing
+  $bounds=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+  $bitmap=New-Object System.Drawing.Bitmap($bounds.Width,$bounds.Height)
+  $graphics=[System.Drawing.Graphics]::FromImage($bitmap)
+  $graphics.CopyFromScreen($bounds.Location,[System.Drawing.Point]::Empty,$bounds.Size)
+  $bitmap.Save((Join-Path $env:RUNNER_TEMP 'simplysign-prelogin.png'))
+  $graphics.Dispose();$bitmap.Dispose()
+  Write-Output ("Pre-login desktop size={0}x{1}" -f $bounds.Width,$bounds.Height)
+ }catch{Write-Output 'Pre-login desktop capture unavailable'}
+ # Pre-login diagnostics only: never inspect edit values or token-bearing text.
+ $peers=@(Get-Process | Where-Object {$_.ProcessName -match 'SimplySign'})
+ foreach($peer in $peers){
+  Write-Output ("SimplySign process id={0} name={1} session={2} mainWindow={3}" -f $peer.Id,$peer.ProcessName,$peer.SessionId,$peer.MainWindowHandle)
+  $peerCondition=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty,$peer.Id)
+  foreach($w in $root.FindAll([System.Windows.Automation.TreeScope]::Children,$peerCondition)){
+   Write-Output ("Window class={0} offscreen={1}" -f $w.Current.ClassName,$w.Current.IsOffscreen)
+   foreach($control in $w.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)){
+    $label='';if($control.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button){$label=$control.Current.Name}
+    Write-Output ("Control type={0} id={1} class={2} enabled={3} button={4}" -f $control.Current.ControlType.ProgrammaticName,$control.Current.AutomationId,$control.Current.ClassName,$control.Current.IsEnabled,$label)
+   }
+  }
+ }
+ throw 'SimplySign login controls unavailable on hosted runner; token was not requested'
+}
+if(!$env:SIMPLYSIGN_ACCOUNT){throw 'SimplySign account required'}
+for($attempt=1;$attempt -le 2;$attempt++){
+ $token=$null
+ try{
+  $start=New-Object System.Diagnostics.ProcessStartInfo
+  $start.FileName='node';$start.ArgumentList.Add('scripts/ci/token.mjs');$start.ArgumentList.Add([string]$attempt)
+  $start.UseShellExecute=$false;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+  $child=[System.Diagnostics.Process]::Start($start)
+  $token=$child.StandardOutput.ReadToEnd();$null=$child.StandardError.ReadToEnd();$child.WaitForExit()
+  if($child.ExitCode -ne 0 -or $token -notmatch '^\d{6}$'){throw 'Token request failed'}
+  Write-Output 'Fresh signing token received through private pipe; submitting login'
+  [ArkmeLoginControls]::SetText([IntPtr]$controls.Account,$env:SIMPLYSIGN_ACCOUNT)
+  [ArkmeLoginControls]::SetText([IntPtr]$controls.Token,$token)
+  $token=$null
+  [ArkmeLoginControls]::Click([IntPtr]$controls.Submit)
+  $deadline=(Get-Date).AddSeconds(20)
+  while((Get-Date) -lt $deadline){if(Check-Certificate){Write-Output 'SimplySign certificate ready';exit 0};Start-Sleep -Milliseconds 500}
+ }catch{if($_.Exception.Message -in @('Unexpected certificate publisher','Certificate is not valid for code signing')){throw};if($attempt -eq 2){throw 'SimplySign login failed after two attempts'}}finally{$token=$null}
+ $controls=Login-Controls;if(!$controls){throw 'SimplySign login unavailable for retry'}
+}
+throw 'SimplySign certificate unavailable'
