@@ -105,6 +105,12 @@ if($icon.Count -eq 1){
  foreach($button in $tray){Write-Output ("Tray button id={0} name={1}" -f $button.Current.AutomationId,$button.Current.Name)}
  Write-Output 'SimplySign tray icon unavailable'
 }
+if(!(Login-Controls)){
+ & python -m pip install --disable-pip-version-check --quiet pywinauto==0.6.9
+ if($LASTEXITCODE -ne 0){throw 'Native desktop automation dependency installation failed'}
+ & python scripts/ci/windows-open-login.py
+ if($LASTEXITCODE -ne 0){Write-Output 'Native tray opening failed; collect pre-login diagnostics'}
+}
 $deadline=(Get-Date).AddSeconds(45);$controls=$null
 while((Get-Date) -lt $deadline){$controls=Login-Controls;if($controls){break};Start-Sleep -Milliseconds 500}
 if(!$controls){
