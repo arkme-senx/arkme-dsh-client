@@ -2,14 +2,30 @@
 import time, sys, faulthandler
 # Bound native accessibility calls before any credential is requested.
 faulthandler.dump_traceback_later(40, exit=True)
-from pywinauto import Application, Desktop, taskbar
+from pywinauto import Application, Desktop
 from pywinauto.timings import Timings
 Timings.window_find_timeout = 5
 Timings.window_find_retry = .2
-try:
-    taskbar.RightClickSystemTrayIcon('SimplySign Desktop')
-except Exception:
-    taskbar.RightClickHiddenSystemTrayIcon('SimplySign Desktop')
+desktop = Desktop(backend='win32')
+tray = desktop.window(class_name='Shell_TrayWnd').child_window(class_name='TrayNotifyWnd')
+opened = False
+for toolbar in tray.descendants(class_name='ToolbarWindow32'):
+    try:
+        toolbar.button('SimplySign Desktop').click_input(button='right')
+        opened = True
+        break
+    except Exception:
+        pass
+if not opened:
+    buttons = tray.children(class_name='Button')
+    print('Native notification buttons:', [(b.window_text(), b.control_id(), str(b.rectangle())) for b in buttons])
+    if len(buttons) != 1:
+        raise RuntimeError('Ambiguous notification chevron')
+    buttons[0].click_input()
+    overflow = desktop.window(class_name='NotifyIconOverflowWindow').wait('visible',timeout=5)
+    toolbar = overflow.child_window(class_name='ToolbarWindow32').wrapper_object()
+    print('Pre-login hidden notification labels:', toolbar.texts())
+    toolbar.button('SimplySign Desktop').click_input(button='right')
 time.sleep(.5)
 # The menu belongs to SimplySign, not Explorer. Prefer its native popup menu.
 try:
