@@ -22,7 +22,8 @@ if not opened:
     if len(buttons) != 1:
         raise RuntimeError('Ambiguous notification chevron')
     buttons[0].click_input()
-    overflow = desktop.window(class_name='NotifyIconOverflowWindow').wait('visible',timeout=5)
+    overflow = desktop.window(class_name='NotifyIconOverflowWindow')
+    overflow.wait('visible',timeout=5)
     toolbar = overflow.child_window(class_name='ToolbarWindow32').wrapper_object()
     print('Pre-login hidden notification labels:', toolbar.texts())
     toolbar.button('SimplySign Desktop').click_input(button='right')
