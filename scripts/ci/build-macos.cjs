@@ -1,0 +1,8 @@
+const path=require('node:path');const {readdir,writeFile}=require('node:fs/promises');const {withMacCiSigningEnvironment,runCommand,runLoggedCommand,createMacCiLogRedactor}=require('../macos-ci-signing.cjs');
+async function verify(app,env){runCommand('codesign',['--verify','--deep','--strict',app],env);runCommand('xcrun',['stapler','validate',app],env);runCommand('spctl',['--assess','--type','exec',app],env);const details=runCommand('codesign',['-d','--verbose=4',app],env,true);if(!details.includes(`TeamIdentifier=${env.APPLE_TEAM_ID}`))throw new Error('Unexpected signing team')}
+withMacCiSigningEnvironment(process.env,async(env,temp)=>{
+ await runLoggedCommand('pnpm',['exec','electron-builder','--config','electron-builder.ci-config.cjs','--mac','dmg','zip','--universal','--publish','never'],env);
+ const config=require('../../electron-builder.ci-config.cjs');const name=config.productName+'.app';await verify(path.join('release-ci','mac-universal',name),env);
+ const files=await readdir('release-ci');const dmg=files.find(f=>f.endsWith('.dmg')),zip=files.find(f=>f.endsWith('.zip'));if(!dmg||!zip)throw new Error('Missing macOS output');runCommand('codesign',['--verify','--strict',path.join('release-ci',dmg)],env);runCommand('xcrun',['stapler','validate',path.join('release-ci',dmg)],env);
+ const unpack=path.join(temp,'zip-check');runCommand('ditto',['-x','-k',path.join('release-ci',zip),unpack],env);await verify(path.join(unpack,name),env);await writeFile('release-ci/signing-evidence.json',JSON.stringify({verified:true,notarized:true,team_id:env.APPLE_TEAM_ID}));
+}).catch(e=>{console.error(createMacCiLogRedactor()(e.message));process.exitCode=1});

@@ -1,0 +1,50 @@
+name: SimplySign hosted Windows proof
+on:
+  push:
+    branches: [zp-codex/arkme-client-ci-20261103]
+    paths: ['scripts/ci/**', '.github/workflows/simplysign-probe.yml']
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency:
+  group: simplysign-test-proof
+  cancel-in-progress: false
+jobs:
+  sign:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    environment: test
+    env:
+      ARKME_CI_BACKEND: ${{ vars.ARKME_CI_BACKEND }}
+      ARKME_CI_SECRET: ${{ secrets.ARKME_CI_SECRET }}
+      SIMPLYSIGN_ACCOUNT: ${{ secrets.SIMPLYSIGN_ACCOUNT }}
+      SIMPLYSIGN_CERTIFICATE_SHA1: ${{ vars.SIMPLYSIGN_CERTIFICATE_SHA1 }}
+      SIMPLYSIGN_PUBLISHER: ${{ vars.SIMPLYSIGN_PUBLISHER }}
+      SIMPLYSIGN_INSTALLER_SHA256: ${{ vars.SIMPLYSIGN_INSTALLER_SHA256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - name: Reserve isolated test signing batch
+        shell: pwsh
+        run: |
+          node --input-type=module -e 'import {api} from "./scripts/ci/api.mjs";import{readFile,writeFile}from"node:fs/promises";const p=JSON.parse(await readFile("package.json"));const b=await api("versions/reserve",{repository:process.env.GITHUB_REPOSITORY,source_sha:process.env.GITHUB_SHA,version:p.version,version_code:p.versionCode,run_id:process.env.GITHUB_RUN_ID});if(b.environment!=="test")throw Error("Wrong environment");await writeFile("reservation.json",JSON.stringify(b));'
+      - name: Install and log in to SimplySign
+        shell: pwsh
+        run: ./scripts/ci/windows-signing.ps1 login
+      - name: Sign a disposable proof executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $source=Join-Path $env:RUNNER_TEMP 'ArkmeSigningProof.cs'
+          'class ArkmeSigningProof { static void Main() {} }' | Set-Content $source
+          $exe=Join-Path $env:RUNNER_TEMP 'ArkmeSigningProof.exe'
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo "/out:$exe" $source
+          if($LASTEXITCODE -ne 0){throw 'Compile failed'}
+          $tool=Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          & $tool.FullName sign /sha1 $env:SIMPLYSIGN_CERTIFICATE_SHA1 /fd SHA256 /tr http://time.certum.pl /td SHA256 $exe
+          if($LASTEXITCODE -ne 0){throw 'Sign failed'}
+          & $tool.FullName verify /pa /all /tw $exe
+          if($LASTEXITCODE -ne 0){throw 'Verify failed'}
+          $signature=Get-AuthenticodeSignature $exe
+          if($signature.Status -ne 'Valid' -or !$signature.TimeStamperCertificate -or $signature.SignerCertificate.Thumbprint -ne $env:SIMPLYSIGN_CERTIFICATE_SHA1){throw 'Signature identity invalid'}
+          Write-Output 'Hosted Windows SimplySign signature and timestamp verified.'

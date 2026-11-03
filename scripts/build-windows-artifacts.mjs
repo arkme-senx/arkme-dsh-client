@@ -45,7 +45,7 @@ try {
   const manifest = JSON.parse(
     await readFile(path.resolve("package.json"), "utf8")
   );
-  const config = structuredClone(manifest.build);
+  const config = process.env.ARKME_CI_ENV ? require("../electron-builder.ci-config.cjs") : structuredClone(manifest.build);
   // The programmatic builder API treats extends as a filesystem path on Windows.
   if (typeof config.extends === "string" && config.extends.startsWith("file:")) {
     config.extends = path.resolve(config.extends.slice(5));
