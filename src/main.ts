@@ -1727,6 +1727,7 @@ function createMainWindow(): void {
     screenshotIpcInstalled = true;
     const screenshotShortcut = installScreenshotShortcut({capture:owner=>screenshotIpc.captureClipboard(owner),main:()=>mainWindow,origin:()=>activeHarnessOrigin,allowed:id=>desktopDeviceLock?.protected !== true && accountScopeReady && (id===mainWindow?.webContents.id || conversationWindows.isActive(id))});
     const screenshotIpc = installScreenshotIpc({
+      editorPreload: () => path.join(path.dirname(resolveArkmePreloadPath(moduleDirectory, app.isPackaged, process.resourcesPath)), 'screenshot-preload.cjs'),
       blocked: () => desktopDeviceLock?.protected === true || screenshotShortcut.isRecording(),
       main: () => mainWindow, origin: () => activeHarnessOrigin,
       scope: () => JSON.stringify([activeHarnessOrigin, activeAccountScope?.dshHome, accountScopeReady]),

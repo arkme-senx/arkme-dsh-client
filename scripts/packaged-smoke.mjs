@@ -49,6 +49,7 @@ const requiredPackagedFiles = [
   "/dist/harness-core-dependencies.js",
   "/dist/macos-notification-permission.js",
   "/dist/preload.cjs",
+  "/dist/screenshot-preload.cjs",
   "/dist/desktop-capabilities.js",
   "/dist/desktop-capability-bridge.js",
   "/dist/native-badge.js",
