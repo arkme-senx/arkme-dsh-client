@@ -6,7 +6,7 @@ function Check-Certificate {
  $cert=Get-Item "Cert:\CurrentUser\My\$thumb" -ErrorAction SilentlyContinue
  if(!$cert -or !$cert.HasPrivateKey -or $cert.NotBefore -gt (Get-Date) -or $cert.NotAfter -le (Get-Date).AddHours(1)){return $false}
  if(!$env:SIMPLYSIGN_PUBLISHER -or $cert.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,$false) -ne $env:SIMPLYSIGN_PUBLISHER){throw 'Unexpected certificate publisher'}
- if(!($cert.EnhancedKeyUsageList | Where-Object {$_.ObjectId.Value -eq '1.3.6.1.5.5.7.3.3'})){throw 'Certificate is not valid for code signing'}
+ if(!($cert.EnhancedKeyUsageList | Where-Object {$_.ObjectId -eq '1.3.6.1.5.5.7.3.3'})){throw 'Certificate is not valid for code signing'}
  return $true
 }
 if($Operation -eq 'verify'){
@@ -51,29 +51,32 @@ using System;
 using System.Text;
 using System.Runtime.InteropServices;
 public static class ArkmeLoginControls {
+ [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
+ [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint process);
+ public static int OwnerProcessId(IntPtr hwnd){uint p;GetWindowThreadProcessId(hwnd,out p);return checked((int)p);}
+ [DllImport("user32.dll")] static extern bool PostMessage(IntPtr hwnd,uint message,IntPtr wParam,IntPtr lParam);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd,StringBuilder text,int count);
  [DllImport("user32.dll",EntryPoint="SendMessageTimeoutW",CharSet=CharSet.Unicode)] static extern IntPtr Send(IntPtr hwnd,uint message,IntPtr wParam,string value,uint flags,uint timeout,out IntPtr result);
  public static string Label(IntPtr hwnd){var b=new StringBuilder(128);GetWindowText(hwnd,b,b.Capacity);return b.ToString();}
  public static void SetText(IntPtr hwnd,string value){IntPtr result;if(Send(hwnd,12,IntPtr.Zero,value,2,5000,out result)==IntPtr.Zero)throw new Exception("Login field unavailable");}
- public static void Click(IntPtr hwnd){IntPtr result;if(Send(hwnd,245,IntPtr.Zero,null,2,5000,out result)==IntPtr.Zero)throw new Exception("Login submit unavailable");}
+ public static void Click(IntPtr hwnd){if(!PostMessage(hwnd,245,IntPtr.Zero,IntPtr.Zero))throw new Exception("Login submit unavailable");}
 }
 '@
 
 $root=[System.Windows.Automation.AutomationElement]::RootElement
 $condition=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty,$process.Id)
+$controlFile=Join-Path $env:RUNNER_TEMP 'simplysign-login-controls.json'
 function Login-Controls {
- $ids=@(Get-Process | Where-Object {$_.ProcessName -eq 'SimplySignDesktop'} | ForEach-Object {$_.Id})
- $windows=@($root.FindAll([System.Windows.Automation.TreeScope]::Children,[System.Windows.Automation.Condition]::TrueCondition) | Where-Object {$_.Current.ProcessId -in $ids})
- foreach($window in $windows){
-  $all=$window.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)
-  # The pinned WinForms build reports all controls as Pane on hosted runners.
-  # Match observed native classes, then order ID above Token by actual bounds.
-  $edits=@($all | Where-Object {$_.Current.ClassName -match '^WindowsForms10\.EDIT\.' -and $_.Current.IsEnabled} | Sort-Object {$_.Current.BoundingRectangle.Top})
-  $login=@($all | Where-Object {$_.Current.ClassName -match '^WindowsForms10\.BUTTON\.' -and $_.Current.IsEnabled -and [ArkmeLoginControls]::Label([IntPtr]$_.Current.NativeWindowHandle) -match '^(OK|Ok|Connect|Log in|Login|Sign in)$'})
-  if($edits.Count -eq 2 -and $login.Count -eq 1 -and $edits[0].Current.BoundingRectangle.Top -lt $edits[1].Current.BoundingRectangle.Top){return @{Account=$edits[0];Token=$edits[1];Submit=$login[0]}}
-
+ if(!(Test-Path $controlFile)){return $null}
+ $value=Get-Content $controlFile -Raw | ConvertFrom-Json
+ $ids=@(Get-Process | Where-Object {$_.ProcessName -eq 'SimplySignDesktop' -and $_.Path -eq $app.FullName} | ForEach-Object {$_.Id})
+ foreach($handle in @($value.account,$value.token,$value.submit)){
+  $windowHandle=[IntPtr]$handle
+  if(![ArkmeLoginControls]::IsWindow($windowHandle)){return $null}
+  $ownerId=[ArkmeLoginControls]::OwnerProcessId($windowHandle)
+  if($ownerId -notin $ids){return $null}
  }
- return $null
+ return @{Account=[IntPtr]$value.account;Token=[IntPtr]$value.token;Submit=[IntPtr]$value.submit}
 }
 # SimplySign starts in the notification area. Open the documented Connect menu
 # before looking for account/token controls; no token has been requested yet.
@@ -124,7 +127,7 @@ if($icon.Count -eq 1){
 if(!(Login-Controls)){
  & python -m pip install --disable-pip-version-check --quiet pywinauto==0.6.9
  if($LASTEXITCODE -ne 0){throw 'Native desktop automation dependency installation failed'}
- & python scripts/ci/windows-open-login.py $app.FullName
+ & python scripts/ci/windows-open-login.py $app.FullName $controlFile
  if($LASTEXITCODE -ne 0){Write-Output 'Native tray opening failed; collect pre-login diagnostics'}
 }
 $deadline=(Get-Date).AddSeconds(45);$controls=$null
@@ -167,13 +170,14 @@ for($attempt=1;$attempt -le 2;$attempt++){
   $child=[System.Diagnostics.Process]::Start($start)
   $token=$child.StandardOutput.ReadToEnd();$null=$child.StandardError.ReadToEnd();$child.WaitForExit()
   if($child.ExitCode -ne 0 -or $token -notmatch '^\d{6}$'){throw 'Token request failed'}
-  [ArkmeLoginControls]::SetText([IntPtr]$controls.Account.Current.NativeWindowHandle,$env:SIMPLYSIGN_ACCOUNT)
-  [ArkmeLoginControls]::SetText([IntPtr]$controls.Token.Current.NativeWindowHandle,$token)
+  Write-Output 'Fresh signing token received through private pipe; submitting login'
+  [ArkmeLoginControls]::SetText([IntPtr]$controls.Account,$env:SIMPLYSIGN_ACCOUNT)
+  [ArkmeLoginControls]::SetText([IntPtr]$controls.Token,$token)
   $token=$null
-  [ArkmeLoginControls]::Click([IntPtr]$controls.Submit.Current.NativeWindowHandle)
+  [ArkmeLoginControls]::Click([IntPtr]$controls.Submit)
   $deadline=(Get-Date).AddSeconds(20)
   while((Get-Date) -lt $deadline){if(Check-Certificate){Write-Output 'SimplySign certificate ready';exit 0};Start-Sleep -Milliseconds 500}
- }catch{if($attempt -eq 2){throw 'SimplySign login failed after two attempts'}}finally{$token=$null}
+ }catch{if($_.Exception.Message -in @('Unexpected certificate publisher','Certificate is not valid for code signing')){throw};if($attempt -eq 2){throw 'SimplySign login failed after two attempts'}}finally{$token=$null}
  $controls=Login-Controls;if(!$controls){throw 'SimplySign login unavailable for retry'}
 }
 throw 'SimplySign certificate unavailable'
