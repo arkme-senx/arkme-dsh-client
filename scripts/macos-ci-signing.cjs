@@ -26,7 +26,7 @@ function createMacCiLogRedactor(env = process.env) {
   // Include the original environment too: the child receives a .p8 path after
   // its Base64 variable is removed, but the parent still needs to mask its body.
   for (const source of [process.env, env]) {
-    for (const name of ["CSC_LINK", "CSC_KEY_PASSWORD", "APPLE_ID", "APPLE_TEAM_ID",
+    for (const name of ["CSC_LINK", "CSC_KEY_PASSWORD", "MAC_INSTALLER_LINK", "MAC_INSTALLER_PASSWORD", "CI_KEYCHAIN_PASSWORD", "APPLE_ID", "APPLE_TEAM_ID",
       "APPLE_APP_SPECIFIC_PASSWORD", "APPLE_API_KEY_BASE64", "APPLE_API_KEY_ID", "APPLE_API_ISSUER"]) {
       add(source[name]);
     }

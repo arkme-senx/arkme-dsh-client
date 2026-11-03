@@ -9,7 +9,7 @@
 | Secrets | ARKME_CI_SECRET、ARKME_MANIFEST_PRIVATE_KEY（PEM Ed25519）、SIMPLYSIGN_ACCOUNT |
 | Variables | ARKME_CI_BACKEND、ARKME_CDN_BASE、ARKME_RUNTIME_SERVICE_BASE_URL |
 | Variables | SIMPLYSIGN_CERTIFICATE_SHA1、SIMPLYSIGN_PUBLISHER、SIMPLYSIGN_INSTALLER_SHA256 |
-| 现有 Apple secrets | MAC_CSC_LINK、MAC_CSC_KEY_PASSWORD、APPLE_TEAM_ID、APPLE_ID、APPLE_APP_SPECIFIC_PASSWORD |
+| 现有 Apple secrets | MAC_CSC_LINK、MAC_CSC_KEY_PASSWORD、MAC_INSTALLER_LINK、MAC_INSTALLER_PASSWORD、APPLE_TEAM_ID、APPLE_ID、APPLE_APP_SPECIFIC_PASSWORD |
 
 CI 公钥仅配置于后端 `arkme-client-ci.manifest-public-key`；不旋转既有插件签名 key。CI 无 OSS 长期密钥。生产与测试凭据必须不同，后端 `cdn-host` 应与既有 release 下载 CDN 一致。
 
@@ -22,3 +22,8 @@ manifest 包含 source/writeback SHA、run/attempt、Electron/ABI、平台签名
 验收还包括：托管 Windows SimplySign 登录与真实签名、macOS 公证、三个目标下载安装重启、运行时兼容、取消/超时/网络丢包恢复。未完成真实验收前不能宣布全链路可用。
 
 发布接口以 `async: true` 提交持久化校验任务，Action 查询状态直到 `published`。HTTP 请求断开不会终止任务；后端进程重启后，状态查询会恢复已过期的任务租约。`failed` 保留原清单，修复原因后重跑原批次；不重建或覆盖已上传文件。
+
+
+macOS CI 发布 PKG + ZIP。prod PKG 调用已有 buildMigrationPackage，包含正式旧版迁移助手、preinstall/postinstall、签名校验及事务恢复；test PKG 仅安装 /Applications/arkme Test.app，使用 cc.jiwo.arkme.test.installer，不发现或迁移正式安装。两种包均以 Developer ID Installer 签名、公证并 stapler/spctl 验证；PKG/ZIP 解包后逐文件、权限及符号链接比对。latest-mac.yml 仅引用 ZIP。
+
+MAC_INSTALLER_LINK 是同团队 Developer ID Installer 的 Base64 PKCS#12，MAC_INSTALLER_PASSWORD 是其密码。仅放对应 GitHub Environment Secret；CI 使用临时钥匙串，结束后恢复原搜索列表并删除临时钥匙串。

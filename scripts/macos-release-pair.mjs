@@ -25,7 +25,7 @@ async function inventory(root) {
   return JSON.stringify(entries);
 }
 
-async function applicationIn(root) {
+async function applicationIn(root, appName = "即我.app") {
   const apps = [];
   async function visit(directory) {
     for (const item of await readdir(directory, { withFileTypes: true })) {
@@ -36,15 +36,15 @@ async function applicationIn(root) {
     }
   }
   await visit(root);
-  if (apps.length !== 1 || path.basename(apps[0]) !== '即我.app') throw new Error('Release must contain exactly one 即我.app');
+  if (apps.length !== 1 || path.basename(apps[0]) !== appName) throw new Error('Release must contain exactly one 即我.app');
   return apps[0];
 }
 
 /** Local build output check; code signing and notarization are separate mandatory pipeline gates. */
-export async function verifyMacReleasePair({ appRoot, releaseDirectory, version, versionCode }) {
+export async function verifyMacReleasePair({ appRoot, releaseDirectory, version, versionCode, test = false }) {
   if (process.platform !== 'darwin') throw new Error('Verify macOS release archives on macOS');
   const info = JSON.parse(run('/usr/bin/plutil', ['-convert', 'json', '-o', '-', path.join(appRoot, 'Contents/Info.plist')]));
-  if (info.CFBundleIdentifier !== 'com.senqisi.Jotmo' || info.CFBundleExecutable !== 'arkme'
+  if (info.CFBundleIdentifier !== (test ? 'cc.jiwo.arkme.test' : 'com.senqisi.Jotmo') || info.CFBundleExecutable !== (test ? 'arkme Test' : 'arkme')
     || info.CFBundleShortVersionString !== version || info.CFBundleVersion !== String(versionCode)) {
     throw new Error('Release application identity/version mismatch');
   }
@@ -53,14 +53,14 @@ export async function verifyMacReleasePair({ appRoot, releaseDirectory, version,
   const artifacts = [];
   try {
     for (const kind of ['pkg', 'zip']) {
-      const filename = `即我-${version}-vc${versionCode}-universal.${kind}`;
+      const filename = `${test ? "arkme Test" : "即我"}-${version}-vc${versionCode}-universal.${kind}`;
       const archive = path.join(releaseDirectory, filename);
       const stat = await lstat(archive);
       if (!stat.isFile()) throw new Error(`Release artifact must be a regular file: ${filename}`);
       const unpacked = path.join(work, kind);
       if (kind === 'pkg') run('/usr/sbin/pkgutil', ['--expand-full', archive, unpacked]);
       else run('/usr/bin/ditto', ['-x', '-k', archive, unpacked]);
-      if (await inventory(await applicationIn(unpacked)) !== expected) {
+      if (await inventory(await applicationIn(unpacked, test ? "arkme Test.app" : "即我.app")) !== expected) {
         throw new Error(`${kind} application content or permissions differ from the signed source`);
       }
       artifacts.push({ kind, filename, size: stat.size, sha512: createHash('sha512').update(await readFile(archive)).digest('hex') });
