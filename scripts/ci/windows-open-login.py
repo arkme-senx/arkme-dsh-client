@@ -1,5 +1,6 @@
 """Open the vendor Desktop tray menu before requesting any account/token data."""
-import time, sys, faulthandler
+import time, sys, faulthandler, json
+from pathlib import Path
 # Bound native accessibility calls before any credential is requested.
 faulthandler.dump_traceback_later(40, exit=True)
 from pywinauto import Application, Desktop
@@ -39,3 +40,22 @@ except Exception:
         raise RuntimeError('SimplySign Connect menu unavailable') from None
     matches[0].click_input()
 print('SimplySign tray Connect selected')
+
+app = Application(backend='win32').connect(path=sys.argv[1])
+found = None
+deadline = time.monotonic() + 10
+while time.monotonic() < deadline:
+    for window in app.windows():
+        children = window.descendants()
+        edits = sorted([c for c in children if c.class_name().startswith('WindowsForms10.EDIT.') and c.is_visible() and c.is_enabled()], key=lambda c:c.rectangle().top)
+        buttons = [c for c in children if c.class_name().startswith('WindowsForms10.BUTTON.') and c.is_visible() and c.is_enabled() and c.window_text().replace('&','').strip().lower() == 'ok']
+        if len(edits) == 2 and len(buttons) == 1 and edits[0].rectangle().top < edits[1].rectangle().top:
+            found = {'account':edits[0].handle,'token':edits[1].handle,'submit':buttons[0].handle}
+            break
+    if found:
+        break
+    time.sleep(.2)
+if not found:
+    raise RuntimeError('Native login fields unavailable')
+Path(sys.argv[2]).write_text(json.dumps(found), encoding='utf-8')
+print('Verified native ID, Token and OK controls; no credentials requested yet')
