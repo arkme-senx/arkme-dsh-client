@@ -1,6 +1,6 @@
 // A publication validates large signed packages behind gateways with short HTTP limits.
 // Submit durably, then poll; never treat an accepted/validating batch as published.
-export async function publishBatch(api,envelope,{timeout=20*60*1000,now=Date.now,wait=ms=>new Promise(r=>setTimeout(r,ms))}={}){
+export async function publishBatch(api,envelope,{timeout=40*60*1000,now=Date.now,wait=ms=>new Promise(r=>setTimeout(r,ms))}={}){
  const identity={batch_id:envelope.batch_id,run_id:envelope.run_id};let status;
  try{status=await api('releases',{...envelope,async:true})}
  catch(error){status=await api('releases/status',identity);if(!['queued','validating','published'].includes(status.status))throw error}
