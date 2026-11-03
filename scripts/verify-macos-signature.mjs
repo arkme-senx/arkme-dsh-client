@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFile, readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { parseArgs } from "node:util";
 import { parse } from "yaml";
 import {
   validateMacCodeSigningDetails,
@@ -11,14 +12,23 @@ import {
   validateMacMainProcessEntitlements
 } from "../dist/macos-signature.js";
 
-const appPath = path.resolve(process.argv[2] ?? "release/mac-universal/即我.app");
+const { values, positionals } = parseArgs({
+  allowPositionals: true,
+  options: {
+    "app-id": { type: "string", default: "com.senqisi.Jotmo" },
+    "team-id": { type: "string" },
+    distribution: { type: "boolean", default: false }
+  }
+});
+if (positionals.length > 1) throw new Error("Expected one macOS application path");
+const appPath = path.resolve(positionals[0] ?? "release/mac-universal/即我.app");
 const { assertAppUpdateConfig } = createRequire(import.meta.url)("./ensure-app-update-config.cjs");
 assertAppUpdateConfig(parse(await readFile(path.join(appPath, "Contents", "Resources", "app-update.yml"), "utf8")));
 const appExecutable = path.join(
   appPath,
   "Contents",
   "MacOS",
-  "arkme"
+  readPlistString(path.join(appPath, "Contents/Info.plist"), "CFBundleExecutable").trim()
 );
 const notificationPermissionModule = path.join(
   appPath,
@@ -53,7 +63,11 @@ if (inspection.error !== undefined || inspection.status !== 0) {
   throw new Error(`Unable to inspect Harness macOS signature: ${detail || inspection.error?.message}`);
 }
 
-const details = validateMacCodeSigningDetails(`${inspection.stdout ?? ""}${inspection.stderr ?? ""}`);
+const details = validateMacCodeSigningDetails(`${inspection.stdout ?? ""}${inspection.stderr ?? ""}`, {
+  identifier: values["app-id"],
+  ...(values["team-id"] ? { teamIdentifier: values["team-id"] } : {}),
+  distribution: values.distribution
+});
 const frameworks = path.join(appPath, "Contents/Frameworks");
 const helperIdentifiers = [];
 for (const entry of await readdir(frameworks, { withFileTypes: true })) {
@@ -68,7 +82,7 @@ for (const entry of await readdir(frameworks, { withFileTypes: true })) {
   helperIdentifiers.push(identifier);
   validateMacHelperProcessEntitlements(`${result.stdout ?? ""}${result.stderr ?? ""}`);
 }
-validateMacHelperIdentifiers(helperIdentifiers);
+validateMacHelperIdentifiers(helperIdentifiers, values["app-id"]);
 const entitlementInspection = spawnSync(
   "/usr/bin/codesign",
   ["-d", "--entitlements", ":-", appPath],
