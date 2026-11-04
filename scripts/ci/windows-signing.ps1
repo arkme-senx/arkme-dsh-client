@@ -22,13 +22,6 @@ if($Operation -eq 'verify'){
   & $tool.FullName verify /pa /all /tw $file.FullName
   if($LASTEXITCODE -ne 0){throw 'SignTool verification failed'}
  }
- # Verify the final ZIP bytes separately, without repacking them.
- $zip=Get-ChildItem release-ci -Filter *.zip -File | Select-Object -First 1
- $dir=Join-Path $env:RUNNER_TEMP ('arkme-zip-'+[guid]::NewGuid())
- try{Expand-Archive $zip.FullName $dir; $exe=Get-ChildItem $dir -Recurse -File | Where-Object {$_.Name -in @('arkme.exe','arkme Test.exe')} | Select-Object -First 1
-  if(!$exe){throw 'ZIP application missing'};$s=Get-AuthenticodeSignature $exe.FullName
-  if($s.Status -ne 'Valid' -or !$s.TimeStamperCertificate -or $s.SignerCertificate.Thumbprint -ne ($env:SIMPLYSIGN_CERTIFICATE_SHA1 -replace '\s','')){throw 'ZIP signature invalid'}
- }finally{Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue}
  @{verified=$true;timestamp=$true;certificate_sha1=$env:SIMPLYSIGN_CERTIFICATE_SHA1} | ConvertTo-Json -Compress | Set-Content release-ci/signing-evidence.json -Encoding utf8NoBOM
  exit 0
 }

@@ -121,7 +121,7 @@ jobs:
           path: |
             release-ci/*.exe
             release-ci/*.pkg
-            release-ci/*.zip
+            release-ci/${{ matrix.platform == 'macos' && '*.zip' || '__no_windows_zip__' }}
             release-ci/*.blockmap
             release-ci/latest*.yml
             release-ci/platform.json
