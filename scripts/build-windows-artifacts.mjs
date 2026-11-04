@@ -101,7 +101,7 @@ try {
 
   const { Arch, Platform, build } = require("electron-builder");
   await build({
-    targets: Platform.WINDOWS.createTarget(["nsis", "zip"], Arch.x64),
+    targets: Platform.WINDOWS.createTarget(process.env.ARKME_CI_ENV ? ["nsis"] : ["nsis", "zip"], Arch.x64),
     config,
     publish: "never"
   });
