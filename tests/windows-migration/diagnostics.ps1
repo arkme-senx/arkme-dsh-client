@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿$ErrorActionPreference='Stop'
 . "$PSScriptRoot\..\..\build\windows-migration.ps1" -Action Library
 $root=Join-Path ([IO.Path]::GetTempPath()) ('jiwo-diagnostic-test-'+[guid]::NewGuid())
 $private="Authorization: Bearer secret-value`nPath=C:\Users\alice\app.exe`n/Users/alice/Documents/file.txt`nemail alice@example.org`ncomputer: private-pc`nAAAA\alice`n192.168.3.231`n{`"token`":`"json-secret`"}`n/mnt/private-owner/file"
@@ -20,6 +20,31 @@ try {
  $report.event_id=[guid]::NewGuid().ToString('N')
  Save-InstallerDiagnostic $report $root {throw 'network unavailable'}
  Assert-True (@(Get-ChildItem $root -Filter '*.json').Count -eq 1) 'transport exception must retain queued report'
+ # Explicit cancellation must neither queue nor send, including historical retries.
+ $cancelRoot=Join-Path $root 'cancelled'
+ $report.result='cancelled';$report.error_code='CANCELLED';$report.event_id=[guid]::NewGuid().ToString('N')
+ $script:cancelCalls=0
+ Save-InstallerDiagnostic $report $cancelRoot {param($json) $script:cancelCalls++;return $true}
+ Assert-True ($script:cancelCalls -eq 0) 'cancelled install must not upload'
+ Assert-True (!(Test-Path $cancelRoot)) 'cancelled install must not enter retry queue'
+ $null=New-Item -ItemType Directory $cancelRoot
+ $legacyFile=Join-Path $cancelRoot ($report.event_id+'.json')
+ $report | ConvertTo-Json | Set-Content -Encoding UTF8 $legacyFile
+ $report.result='failure';$report.error_code='INSTALL_FAILED';$report.event_id=[guid]::NewGuid().ToString('N')
+ Save-InstallerDiagnostic $report $cancelRoot {param($json) $script:cancelCalls++;$sent=$json | ConvertFrom-Json;Assert-True ($sent.result -eq 'failure') 'historical cancellation uploaded';return $true}
+ Assert-True ($script:cancelCalls -eq 1) 'real failure must still upload once'
+ Assert-True (!(Test-Path $legacyFile)) 'historical cancellation must be removed from retry queue'
+ # Complete must stop before touching manifests, log files, or delivery for cancellation.
+ $script:manifestReads=0
+ function Get-ReleaseManifest {$script:manifestReads++;throw 'cancel must not read release manifest'}
+ Complete-InstallerDiagnostic 'cancelled' 'not_needed' 'cancelled' 1
+ Assert-True ($script:manifestReads -eq 0) 'cancel must stop before diagnostics preparation'
+ # Cancellation text cannot hide a genuine rollback failure.
+ function Get-ReleaseManifest {return @{version='3.0.12';versionCode=290}}
+ function Save-InstallerDiagnostic($Report,[string]$Directory,[scriptblock]$Send) {$script:lastReport=$Report}
+ $script:log=Join-Path $root 'not-created.log';$script:Action='Rollback';$script:Scope='current';$script:lastReport=$null
+ Complete-InstallerDiagnostic 'cancelled' 'failed' 'Cancellation rollback failed' 1
+ Assert-True ($null -ne $script:lastReport -and $script:lastReport.result -eq 'failure' -and $script:lastReport.error_code -eq 'INSTALL_FAILED') 'rollback failure must remain reportable'
  Write-Output 'Installer diagnostic fixtures passed'
 } finally {if(Test-Path $root){Remove-Item -LiteralPath $root -Recurse -Force}}
 

@@ -200,3 +200,15 @@ test.skipIf(process.platform !== 'win32')('installer telemetry failures cannot f
  const output=execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/diagnostics.ps1')],{encoding:'utf8'});
  expect(output).toContain('Installer diagnostic fixtures passed');
 });
+
+test.skipIf(process.platform !== 'win32')('Windows cancellation suppresses upload without hiding rollback or ordinary failures', () => {
+ const shell = path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
+ const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/cancel-reporting.ps1')],{encoding:'utf8'});
+ expect(output).toContain('Cancellation reporting integration passed');
+}, 90_000);
+
+test.skipIf(process.platform !== 'win32' || !process.env.ARKME_TEST_MAKENSIS)('real NSIS callbacks keep cancellation separate from failure and rollback', () => {
+ const shell = path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
+ const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/cancel-nsis.ps1'),'-Makensis',process.env.ARKME_TEST_MAKENSIS],{encoding:'utf8'});
+ expect(output).toContain('NSIS cancellation callback integration passed');
+}, 180_000);
