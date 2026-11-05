@@ -1,7 +1,7 @@
 import {EventEmitter} from 'node:events';
 import {beforeEach,afterEach,expect,it,vi} from 'vitest';
-const mocks=vi.hoisted(()=>({handlers:new Map<string,Function>(),windows:[] as any[],permission:vi.fn(),guidance:vi.fn(),openSettings:vi.fn(),sources:vi.fn(),save:vi.fn(),write:vi.fn(),scope:'a',blocked:false,allowed:true,displayEvents:new Map<string,Function>(),displays:[] as any[],nativeWindows:[] as any[],physicalBounds:vi.fn(),load:vi.fn(),construct:vi.fn(),clipboard:vi.fn()}));
-vi.mock('../src/native-screenshot-windows.js',()=>({readScreenshotWindows:()=>mocks.nativeWindows}));
+const mocks=vi.hoisted(()=>({handlers:new Map<string,Function>(),windows:[] as any[],permission:vi.fn(),guidance:vi.fn(),openSettings:vi.fn(),sources:vi.fn(),save:vi.fn(),write:vi.fn(),scope:'a',blocked:false,allowed:true,displayEvents:new Map<string,Function>(),displays:[] as any[],nativeWindows:[] as any[],nativeRead:vi.fn(),physicalBounds:vi.fn(),load:vi.fn(),construct:vi.fn(),clipboard:vi.fn()}));
+vi.mock('../src/native-screenshot-windows.js',()=>({createScreenshotWindowReader:()=>mocks.nativeRead}));
 vi.mock('node:fs/promises',()=>({writeFile:mocks.write}));
 vi.mock('electron',async()=>{
  const {EventEmitter}=await import('node:events');let id=1;
@@ -24,7 +24,7 @@ let owner:any, controller:ReturnType<typeof installScreenshotIpc>;
 const event=(window:any,frame?:any)=>({sender:window.webContents,senderFrame:frame??window.webContents.mainFrame});
 const call=(name:string,e:any,...args:any[])=>mocks.handlers.get('arkme-screenshot:'+name)!(e,...args);
 const png=()=>{const b=Buffer.alloc(33);Buffer.from([137,80,78,71,13,10,26,10]).copy(b);b.writeUInt32BE(13,8);b.write('IHDR',12);b.writeUInt32BE(100,16);b.writeUInt32BE(50,20);return b.toString('base64')};
-beforeEach(()=>{vi.useFakeTimers();mocks.permission.mockReset().mockReturnValue('granted');mocks.guidance.mockReset().mockResolvedValue({response:0});mocks.openSettings.mockReset().mockResolvedValue(undefined);mocks.handlers.clear();mocks.clipboard.mockReset();mocks.windows.length=0;mocks.scope='a';mocks.blocked=false;mocks.allowed=true;mocks.construct.mockReset();mocks.load.mockReset();mocks.nativeWindows=[];mocks.physicalBounds.mockImplementation((_window:any,bounds:any)=>bounds);mocks.write.mockReset();mocks.save.mockReset();mocks.sources.mockReset();
+beforeEach(()=>{vi.useFakeTimers();mocks.permission.mockReset().mockReturnValue('granted');mocks.guidance.mockReset().mockResolvedValue({response:0});mocks.openSettings.mockReset().mockResolvedValue(undefined);mocks.handlers.clear();mocks.clipboard.mockReset();mocks.windows.length=0;mocks.scope='a';mocks.blocked=false;mocks.allowed=true;mocks.construct.mockReset();mocks.load.mockReset();mocks.nativeWindows=[];mocks.nativeRead.mockReset().mockImplementation(async()=>mocks.nativeWindows);mocks.physicalBounds.mockImplementation((_window:any,bounds:any)=>bounds);mocks.write.mockReset();mocks.save.mockReset();mocks.sources.mockReset();
  mocks.displays=[{id:10,bounds:{x:-800,y:0,width:800,height:600},size:{width:800,height:600},scaleFactor:2}];
  owner=new BrowserWindow();mocks.sources.mockResolvedValue([{display_id:'10',thumbnail:{isEmpty:()=>false,getSize:()=>({width:1600,height:1200}),toPNG:()=>Buffer.from('frame')}}]);
  controller=installScreenshotIpc({blocked:()=>mocks.blocked,main:()=>owner,origin:()=> 'http://localhost:1234',scope:()=>mocks.scope,preload:()=>'/preload',editorPreload:()=>'/screenshot-preload',allowed:id=>mocks.allowed && id===owner.webContents.id});
@@ -422,4 +422,41 @@ it.each(['complete','close'])('settles a reusable dual-screen capture after sele
  const next=call('capture',event(owner),'next-selected');await vi.advanceTimersByTimeAsync(1);
  expect(call('ready',event(child),'selected-request')).toBe(false);
  call('close',event(child),'next-selected');await expect(next).resolves.toEqual({status:'cancelled'});
+});
+
+it('releases per-capture load listeners after repeated reusable captures',async()=>{
+ await call('enable-standalone',event(owner),'reset-v1');await vi.advanceTimersByTimeAsync(100);
+ const child=mocks.windows[1];
+ for(let i=0;i<30;i++) {
+  const token=`listener-${i}`,result=call('capture',event(owner),token);
+  await vi.advanceTimersByTimeAsync(1);
+  call('ready',event(child),token);call('close',event(child),token);
+  await expect(result).resolves.toEqual({status:'cancelled'});
+  expect(child.webContents.listenerCount('dom-ready')).toBe(0);
+  expect(child.webContents.listenerCount('did-finish-load')).toBe(0);
+ }
+ expect(mocks.windows).toHaveLength(2);
+});
+
+it('captures pixels while native window enumeration is pending, and discards cancelled results',async()=>{
+ let resolve!:(value:any[])=>void;
+ mocks.nativeRead.mockReturnValue(new Promise<any[]>(done=>{resolve=done}));
+ const result=call('capture',event(owner),'slow-native');
+ await vi.advanceTimersByTimeAsync(1);
+ expect(mocks.sources).toHaveBeenCalledTimes(1);
+ expect(mocks.windows).toHaveLength(1);
+ call('cancel',event(owner),'slow-native');
+ await expect(result).resolves.toEqual({status:'cancelled'});
+ resolve([{x:0,y:0,width:100,height:100}]);await vi.advanceTimersByTimeAsync(1);
+ expect(mocks.windows).toHaveLength(1);
+});
+it('removes unfinished load tracing when a new capture is cancelled before loading completes',async()=>{
+ let loaded!:()=>void;mocks.load.mockReturnValue(new Promise<void>(done=>{loaded=done}));
+ const result=call('capture',event(owner),'cancel-loading');await vi.advanceTimersByTimeAsync(1);
+ const child=mocks.windows[1],contents=child.webContents;
+ call('cancel',event(owner),'cancel-loading');await expect(result).resolves.toEqual({status:'cancelled'});
+ expect(contents.listenerCount('dom-ready')).toBe(0);
+ expect(contents.listenerCount('did-finish-load')).toBe(0);
+ loaded();await vi.advanceTimersByTimeAsync(1);
+ expect(child.destroyed).toBe(true);
 });

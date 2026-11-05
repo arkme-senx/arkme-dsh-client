@@ -5,7 +5,7 @@ $script:requests=0;$script:prompts=0;$script:reads=0
 $app=[pscustomobject]@{Name='jotmo.exe';ProcessId=1;ExecutablePath='C:\owned\jotmo.exe'}
 Invoke-MigrationExit { @() } {throw 'empty process list must not prompt'} {throw 'empty process list must not exit'} {throw 'empty process list must not wait'}
 $failed=$false
-try {Invoke-MigrationExit { @($app) } {$false} { $script:requests++ } {throw 'cancel must not wait'}} catch {$failed=$true}
+try {Invoke-MigrationExit { @($app) } {$false} { $script:requests++ } {throw 'cancel must not wait'}} catch {$failed=$true;Assert-True ($_.Exception -is [OperationCanceledException]) 'cancel must carry an explicit typed outcome'}
 Assert-True ($failed -and $script:requests -eq 0) 'cancel must abort before closing anything'
 Invoke-MigrationExit { $script:reads++;if($script:reads -eq 1){@($app)}else{@()} } {$script:prompts++;$true} {param($items);$script:requests++;Assert-True ($items.Count -eq 1) 'request should include exact observed process'} { @() }
 Assert-True ($script:prompts -eq 1 -and $script:requests -eq 1) 'approved exit must request then recheck processes'

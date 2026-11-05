@@ -13,6 +13,16 @@ export interface HarnessCorePackage {
 }
 export type HarnessCorePackages = Record<string, HarnessCorePackage>;
 
+/** Read the CLI identity before applying the modern-only core policy. */
+export function supportsHarnessCoreDependencyPolicy(dshBinPath: string): boolean {
+  const manifestPath = path.resolve(path.dirname(dshBinPath), "..", "package.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  if (manifest.name !== "@deepseek-ai/dsh" || typeof manifest.version !== "string") {
+    throw new Error("Invalid installed Harness core package: @deepseek-ai/dsh");
+  }
+  return !/^0\.1\./.test(manifest.version);
+}
+
 /** Only core packages actually shipped by this Harness own a shared name. */
 export function readHarnessCorePackages(dshBinPath: string): HarnessCorePackages {
   const modules = path.resolve(path.dirname(dshBinPath), "../../..");
@@ -87,11 +97,11 @@ ${source}`;
 }
 
 export function installHarnessCoreDependencyPolicy(dshBinPath: string): void {
+  if (!supportsHarnessCoreDependencyPolicy(dshBinPath)) return;
   const packages = readHarnessCorePackages(dshBinPath);
   const modules = path.resolve(path.dirname(dshBinPath), "../../..");
   const appBoot = realpathSync(path.join(modules, "@deepseek-ai/dsh-app-boot/lib/index.js"));
   const version = packages["@deepseek-ai/dsh"]!.version;
-  if (/^0\.1\./.test(version)) return;
   const target = pathToFileURL(appBoot).href;
   // A load-only hook keeps Node's native package exports/subpath semantics and
   // DSH's ESM/CJS interception intact. Includes worker loads via execArgv.

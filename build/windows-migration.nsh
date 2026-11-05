@@ -14,10 +14,13 @@ Var JiwoFailureText
 Var JiwoFailureFile
 Var JiwoFailureHandle
 Var JiwoFailureLine
+Var JiwoMigrationCancelled
+Var JiwoFailureContext
 Var JiwoMigrationCommitted
 !endif
 
 !macro customInit
+  StrCpy $JiwoMigrationCancelled "0"
   StrCpy $JiwoMigrationCommitted "0"
   StrCpy $JiwoNativeUpdate "0"
   ${If} ${isUpdated}
@@ -171,6 +174,11 @@ Var JiwoMigrationCommitted
   ClearErrors
   StrCpy $0 "-1"
   ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$PLUGINSDIR\windows-migration.ps1" -Action ${ACTION} -Destination "$INSTDIR" -Scope "$JiwoMigrationScope" -Manifest "$PLUGINSDIR\windows-migration-manifest.json" -Stage "$PLUGINSDIR\jiwo-stage" -UninstallerName "${UNINSTALL_FILENAME}" -InstallerPath "$EXEPATH" -ShortcutPolicyFile "$PLUGINSDIR\jiwo-shortcuts.ini" -CompletionFile "$PLUGINSDIR\jiwo-committed.txt" -ErrorFile "$JiwoFailureFile"' $0
+  ; MSI's cancellation code is emitted only for an explicit user cancellation.
+  ${IfNot} ${Errors}
+  ${AndIf} $0 == 1602
+    StrCpy $JiwoMigrationCancelled "1"
+  ${EndIf}
   ${If} ${Errors}
   ${OrIf} $0 != 0
     SetErrorLevel 1
@@ -247,8 +255,17 @@ Var JiwoMigrationCommitted
 
 !macro customHeader
 !ifndef BUILD_UNINSTALLER
+Function .onUserAbort
+  StrCpy $JiwoMigrationCancelled "1"
+FunctionEnd
+
 Function .onInstFailed
+  StrCpy $JiwoFailureContext "NSIS"
+  ${If} $JiwoMigrationCancelled == "1"
+    StrCpy $JiwoFailureContext "Cancelled"
+  ${EndIf}
   ${If} $JiwoMigrationDestination == ""
+  ${AndIf} $JiwoMigrationCancelled != "1"
     ; Native update failure reporting must never enable manual rollback.
     StrCpy $JiwoMigrationScope current
     ${If} $installMode == "all"
@@ -261,7 +278,7 @@ Function .onInstFailed
     Delete "$JiwoFailureFile"
     ClearErrors
     StrCpy $0 "-1"
-    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$PLUGINSDIR\windows-migration.ps1" -Action Rollback -FailureContext NSIS -Destination "$JiwoMigrationDestination" -Scope "$JiwoMigrationScope" -Manifest "$PLUGINSDIR\windows-migration-manifest.json" -ErrorFile "$JiwoFailureFile"' $0
+    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$PLUGINSDIR\windows-migration.ps1" -Action Rollback -FailureContext "$JiwoFailureContext" -Destination "$JiwoMigrationDestination" -Scope "$JiwoMigrationScope" -Manifest "$PLUGINSDIR\windows-migration-manifest.json" -ErrorFile "$JiwoFailureFile"' $0
     ${If} ${Errors}
     ${OrIf} $0 != 0
       !insertmacro windowsMigrationShowFailure "Rollback" "$0"

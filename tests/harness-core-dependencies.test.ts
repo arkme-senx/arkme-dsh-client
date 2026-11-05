@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
 import { afterEach, expect, test } from "vitest";
-import { enforceHarnessCoreDependencies, readHarnessCorePackages } from "../src/harness-core-dependencies.js";
+import { enforceHarnessCoreDependencies, installHarnessCoreDependencyPolicy, readHarnessCorePackages } from "../src/harness-core-dependencies.js";
 import { coreDependencyConflicts, incompatibleProfileCorePackages, profileCoreRecoveryKey } from "../src/profile-core-compatibility.js";
 import { activateOptionalExtensionRecovery, enforceActiveOptionalExtensionRecoveries, prepareOptionalExtensionRecovery, restoreOptionalExtensionRecovery } from "../src/optional-extension-recovery.js";
 import { patchDshProfileBundleResolution } from "../scripts/patch-dsh-profile-bundle-resolution.mjs";
@@ -219,3 +219,30 @@ test("published 0.2.1 resolver uses installed core for ESM, CommonJS and metadat
   expect(resultData.bad).toEqual({"dependencies.@deepseek-ai/dsh-llm": "0.1.0-rc.6"});
   expect(await readFile(path.join(boot, "lib/index.js"), "utf8")).toBe(original);
 }, 30_000);
+
+
+test("legacy Harness skips modern core checks before reading manifest-less package directories", async () => {
+  const f = await fixture();
+  await pkg(path.dirname(path.dirname(f.dshBinPath)), "@deepseek-ai/dsh", "0.1.5-rc.2");
+  for (const name of ["dsh-client-ui-primitives", "dsh-client-ui-slots"]) {
+    await mkdir(path.join(f.modules, "@deepseek-ai", name), {recursive: true});
+  }
+  // Neither a modern app-boot module nor a Profile is required by this no-op.
+  await rm(f.profile, {recursive: true});
+  await expect(incompatibleProfileCorePackages(f.home, f.dshBinPath)).resolves.toEqual([]);
+  expect(() => installHarnessCoreDependencyPolicy(f.dshBinPath)).not.toThrow();
+});
+
+test("modern Harness still rejects a core package with a missing manifest", async () => {
+  const f = await fixture();
+  await mkdir(path.join(f.modules, "@deepseek-ai/dsh-client-ui-primitives"), {recursive: true});
+  await expect(incompatibleProfileCorePackages(f.home, f.dshBinPath)).rejects.toMatchObject({code: "ENOENT"});
+  expect(() => installHarnessCoreDependencyPolicy(f.dshBinPath)).toThrow(/package\.json/);
+});
+
+test("legacy bypass requires a valid installed Harness identity", async () => {
+  const f = await fixture();
+  await pkg(path.dirname(path.dirname(f.dshBinPath)), "unexpected-package", "0.1.5-rc.2");
+  await expect(incompatibleProfileCorePackages(f.home, f.dshBinPath)).rejects.toThrow("Invalid installed Harness core package");
+  expect(() => installHarnessCoreDependencyPolicy(f.dshBinPath)).toThrow("Invalid installed Harness core package");
+});

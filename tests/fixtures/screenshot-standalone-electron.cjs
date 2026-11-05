@@ -5,7 +5,9 @@ const {createServer}=require('node:http');
 const fs=require('node:fs/promises'),path=require('node:path'),assert=require('node:assert/strict');
 const {pathToFileURL}=require('node:url');
 process.env.ARKME_SCREENSHOT_PROFILE='1';
-const selectionMode=process.argv.includes('--selection'),rounds=selectionMode?4:10;
+const selectionMode=process.argv.includes('--selection'),buttonMode=process.argv.includes('--button');
+const rounds=Number(process.argv.find(arg=>arg.startsWith('--rounds='))?.split('=')[1]??(selectionMode?4:10));
+assert.ok(Number.isInteger(rounds)&&rounds>0&&rounds<=200,'rounds must be 1..200');
 app.setPath('userData',path.join(app.getPath('temp'),'arkme-screenshot-standalone-test'));
 app.whenReady().then(async()=>{
  let server,owner,api;
@@ -31,7 +33,7 @@ app.whenReady().then(async()=>{
   await owner.loadURL(origin);
   assert.equal(await owner.webContents.executeJavaScript('window.screenshotTest.register()'),true);
   let verify;
-  const times=[],errors=[],windowIds=[];
+  const times=[],errors=[],windowIds=[],rssMiB=[];
   app.on('web-contents-created',(_event,contents)=>contents.on('console-message',(_e,level,message)=>{if(level>=3)errors.push(message)}));
   const info=console.info;
   console.info=(...args)=>{
@@ -60,13 +62,16 @@ app.whenReady().then(async()=>{
    })().finally(()=>api.cancel());
   };
   for(let run=1;run<=rounds;run++){
-   if(selectionMode){
+   if(selectionMode||buttonMode){
     const result=await owner.webContents.executeJavaScript('window.screenshotTest.capture(crypto.randomUUID())');
-    assert.equal(result.status,run%2?'captured':'cancelled');
+    assert.equal(result.status,selectionMode&&run%2?'captured':'cancelled');
    }else await api.captureClipboard(owner);
    await verify;
+   rssMiB.push(Math.round(process.memoryUsage().rss/1024/1024));
    for(const window of BrowserWindow.getAllWindows().filter(w=>w!==owner)){
     assert.equal(window.isVisible(),false);
+    assert.equal(window.webContents.listenerCount('dom-ready'),0,'retained capture load listener');
+    assert.equal(window.webContents.listenerCount('did-finish-load'),0,'retained capture load listener');
     const state=await window.webContents.executeJavaScript(`new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve({canvas:document.querySelectorAll('canvas').length,editor:!!document.querySelector('[aria-label="截图编辑"]')}))))`);
     assert.equal(state.canvas,0);assert.equal(state.editor,false);
    }
@@ -74,8 +79,8 @@ app.whenReady().then(async()=>{
   assert.equal(times.length,rounds);assert.deepEqual(errors,[]);
   assert.equal(requests.filter(r=>r.method==='HEAD').length,0);
   assert.ok(requests.every(r=>['/','/arkme-self/screenshot','/arkme-self/screenshot/editor.js'].includes(r.path)));
-  console.log(JSON.stringify({result:'passed',selectionMode,showCalledMs:times,capabilityProbes:0,requests:requests.length,businessBridge:false,harnessBoot:false,reusedWindowIds:windowIds,resetClearedPixels:true}));
+  console.log(JSON.stringify({result:'passed',selectionMode,buttonMode,rssMiB,showCalledMs:times,capabilityProbes:0,requests:requests.length,businessBridge:false,harnessBoot:false,reusedWindowIds:windowIds,resetClearedPixels:true}));
   app.exit(0);
  }catch(error){console.error(error);api?.cancel();app.exit(1);}finally{owner?.destroy();server?.close();}
 });
-setTimeout(()=>app.exit(1),45000).unref();
+setTimeout(()=>app.exit(1),Math.max(45000,rounds*2000)).unref();

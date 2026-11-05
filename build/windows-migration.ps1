@@ -9,7 +9,7 @@ param(
   [string]$UninstallerName,
   [string]$InstallerPath,
   [string]$CompletionFile,
-  [ValidateSet('','NSIS')][string]$FailureContext='',
+  [ValidateSet('','NSIS','Cancelled')][string]$FailureContext='',
   [string]$ShortcutPolicyFile,
   [string]$ErrorFile
 )
@@ -408,7 +408,7 @@ public static class JiwoMigrationExit {
 function Invoke-MigrationExit([scriptblock]$GetProcesses,[scriptblock]$Confirm,[scriptblock]$Request,[scriptblock]$Wait) {
   $remaining=@(& $GetProcesses);$retry=$false
   while($remaining.Count) {
-    if(!(& $Confirm $remaining $retry)) { throw 'Installation cancelled before application exit completed.' }
+    if(!(& $Confirm $remaining $retry)) { throw [OperationCanceledException]::new('Installation cancelled before application exit completed.') }
     & $Request $remaining | Out-Null
     $remaining=@(& $Wait $GetProcesses)
     if(!$remaining.Count) { $remaining=@(& $GetProcesses) }
@@ -1472,6 +1472,8 @@ function Send-InstallerDiagnostic([string]$Json) {
   finally { if($content){$content.Dispose()}; if($client){$client.Dispose()} }
 }
 function Save-InstallerDiagnostic($Report,[string]$Directory,[scriptblock]$Send) {
+  # Cancellation is local-only and must never enter or flush the upload queue.
+  if ($Report.result -eq 'cancelled' -or $Report.error_code -eq 'CANCELLED') { return }
   try {
     # Private local queue, separate from the rollback journal. Reject reparse paths.
     $null=Assert-LocalPath $Directory
@@ -1500,15 +1502,19 @@ function Save-InstallerDiagnostic($Report,[string]$Directory,[scriptblock]$Send)
         $safe.details=Protect-InstallerDiagnosticText ([string]$queued.details) 4096
         $safe.log=Protect-InstallerDiagnosticText ([string]$queued.log) 12000
         if ($safe.event_id -ne $item.BaseName -or $safe.platform -ne 'windows') {continue}
+        # Drop recognized cancellations queued by older installers without sending them.
+        if ($safe.result -eq 'cancelled' -or $safe.error_code -eq 'CANCELLED') {Remove-Item -LiteralPath $item.FullName -Force;continue}
         if (& $Send ($safe | ConvertTo-Json -Depth 4 -Compress)) {Remove-Item -LiteralPath $item.FullName -Force}
       }
     }
   } catch { Write-Output 'Installer diagnostic delivery deferred; installation result unchanged.' }
 }
 function Complete-InstallerDiagnostic([string]$Result,[string]$Recovery,[string]$Details,[long]$Elapsed) {
+  if ($Result -eq 'cancelled' -and $Recovery -ne 'failed') { return }
+  if ($Recovery -eq 'failed') { $Result='failure' }
   try {
     $meta=Get-ReleaseManifest
-    $code=if($Result -eq 'success'){'NONE'}elseif($Details -match '(?i)cancel|取消'){'CANCELLED'}elseif($Details -match '(?i)signature|签名'){'SIGNATURE_CHECK_FAILED'}else{'INSTALL_FAILED'}
+    $code=if($Result -eq 'success'){'NONE'}elseif($Result -eq 'cancelled'){'CANCELLED'}elseif($Details -match '(?i)signature|签名'){'SIGNATURE_CHECK_FAILED'}else{'INSTALL_FAILED'}
     if($code -eq 'CANCELLED'){$Result='cancelled'}
     $diagnosticLog=$Details
     if (Test-Path -LiteralPath $log -PathType Leaf) {
@@ -1529,7 +1535,7 @@ if ($Action -eq 'Library') { return }
 $timer=[Diagnostics.Stopwatch]::StartNew()
 $log=Join-Path ([IO.Path]::GetTempPath()) ('jiwo-install-'+[DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')+'-'+$PID+'.log')
 $transcribing=$false
-$diagnosticResult=if($FailureContext -eq 'NSIS'){'failure'}else{'success'}; $diagnosticRecovery='not_needed'; $diagnosticDetails=if($FailureContext -eq 'NSIS'){'NSIS installation failed; recovery requested.'}else{''}
+$diagnosticResult=if($FailureContext -eq 'Cancelled'){'cancelled'}elseif($FailureContext -eq 'NSIS'){'failure'}else{'success'}; $diagnosticRecovery='not_needed'; $diagnosticDetails=if($FailureContext -eq 'NSIS'){'NSIS installation failed; recovery requested.'}else{''}
 try { Start-Transcript -LiteralPath $log -ErrorAction Stop | Out-Null; $transcribing=$true } catch { Write-Warning 'Could not create installer diagnostic transcript.' }
 try {
   Write-Output "Migration action=$Action scope=$Scope destination=$Destination log=$log"
@@ -1613,11 +1619,13 @@ try {
   $failure = $_
   $message = $failure.Exception.Message
   $failureTrace = $failure.ScriptStackTrace
-  $diagnosticResult='failure'
+  $cancelled=$failure.Exception -is [OperationCanceledException]
+  $diagnosticResult=if($cancelled){'cancelled'}else{'failure'}
   if ($Action -eq 'Rollback') {$diagnosticRecovery='failed'}
   if ($Action -in @('Apply','Commit','Finalize')) {
     try { Recover-Overlay; $diagnosticRecovery='completed' } catch { $diagnosticRecovery='failed'; $message += ' Recovery: '+$_.Exception.Message }
   }
+  if ($diagnosticRecovery -eq 'failed') { $diagnosticResult='failure'; $cancelled=$false }
   $diagnosticDetails=$message+"`n"+$failureTrace
   $report = "完整日志：$log`r`n$message`r`nFailed at: $failureTrace`r`n"
   if ($ErrorFile) {
@@ -1626,6 +1634,7 @@ try {
   }
   Write-Output ('Failed at: '+$failureTrace)
   Write-Error $message -ErrorAction Continue
+  if ($cancelled) { exit 1602 }
   exit 1
 }
 finally {
