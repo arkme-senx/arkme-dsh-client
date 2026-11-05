@@ -27,6 +27,9 @@ SilentInstall silent
 !define UNINSTALL_FILENAME "fixture.exe"
 !include "$(& $escape $include)"
 Var installMode
+!include "MUI2.nsh"
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "English"
 !insertmacro customHeader
 Section
  InitPluginsDir

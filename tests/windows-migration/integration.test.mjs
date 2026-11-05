@@ -212,3 +212,13 @@ test.skipIf(process.platform !== 'win32' || !process.env.ARKME_TEST_MAKENSIS)('r
  const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/cancel-nsis.ps1'),'-Makensis',process.env.ARKME_TEST_MAKENSIS],{encoding:'utf8'});
  expect(output).toContain('NSIS cancellation callback integration passed');
 }, 180_000);
+
+test('migration abort callback composes with MUI instead of redefining its callback', () => {
+ const hooks=readFileSync('build/windows-migration.nsh','utf8');
+ expect(hooks).toContain('!define MUI_CUSTOMFUNCTION_ABORT JiwoMigrationOnUserAbort');
+ expect(hooks).not.toMatch(/Function\s+\.onUserAbort\b/);
+ expect(hooks).toContain('Function JiwoMigrationOnUserAbort');
+ const fixture=readFileSync('scripts/windows-migration-compile-smoke.mjs','utf8');
+ expect(fixture).toContain('!insertmacro MUI_PAGE_INSTFILES');
+ expect(fixture).toContain('!insertmacro MUI_LANGUAGE "English"');
+});

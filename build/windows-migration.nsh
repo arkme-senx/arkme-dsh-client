@@ -4,6 +4,8 @@
 !pragma warning disable 6001
 ; Included only by scripts/build-windows-artifacts.mjs in signed production builds.
 !ifndef BUILD_UNINSTALLER
+; MUI owns .onUserAbort; register before its page/language macros expand.
+!define MUI_CUSTOMFUNCTION_ABORT JiwoMigrationOnUserAbort
 Var JiwoMigrationDestination
 Var JiwoMigrationScope
 Var JiwoMigrationKeepMachine
@@ -255,7 +257,7 @@ Var JiwoMigrationCommitted
 
 !macro customHeader
 !ifndef BUILD_UNINSTALLER
-Function .onUserAbort
+Function JiwoMigrationOnUserAbort
   StrCpy $JiwoMigrationCancelled "1"
 FunctionEnd
 
