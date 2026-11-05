@@ -1,8 +1,10 @@
 import {createRequire} from 'node:module';
 import {validWindowRect,type ScreenshotWindowRect} from './screenshot-window-geometry.js';
-let reader:(()=>ScreenshotWindowRect[])|undefined;
-export function readMacScreenshotWindows():ScreenshotWindowRect[] {return (reader??=createReader())();}
-function createReader():()=>ScreenshotWindowRect[] {
+interface MacWindowReader { read():ScreenshotWindowRect[]; readAsync():Promise<ScreenshotWindowRect[]> }
+let reader:MacWindowReader|undefined;
+export function readMacScreenshotWindows():ScreenshotWindowRect[] {return (reader??=createReader()).read();}
+export function readMacScreenshotWindowsAsync():Promise<ScreenshotWindowRect[]> {return (reader??=createReader()).readAsync();}
+function createReader():MacWindowReader {
  const k=createRequire(import.meta.url)('koffi') as typeof import('koffi').default;
  const cg=k.load('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics');
  const cf=k.load('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation');
@@ -21,10 +23,10 @@ function createReader():()=>ScreenshotWindowRect[] {
   const ref=value(dictionary,keys[key]);if(!ref||typeId(ref)!==numberId())return fallback;
   const out=[0];return number(ref,6,out)?out[0]!:fallback; // kCFNumberFloat64Type
  };
- return ()=>{
+ const decode=(array:unknown):ScreenshotWindowRect[]=>{
   // Quartz coordinates have a top-left origin in logical points, matching Electron macOS display bounds.
   // Snapshot before overlay creation, with only on-screen windows and no desktop elements.
-  const array=list(1|16,0);if(!array)return [];
+  if(!array)return [];
   try{
    const result:ScreenshotWindowRect[]=[];
    for(let i=0,n=Math.min(Number(count(array)),4096);i<n;i++){
@@ -38,5 +40,16 @@ function createReader():()=>ScreenshotWindowRect[] {
    }
    return result;
   }finally{release(array);}
+ };
+ return {
+  read:()=>decode(list(1|16,0)),
+  // CoreGraphics may wait on WindowServer. Koffi runs only this native call on
+  // its worker pool; decoding and releasing the owned CFArray stay together.
+  readAsync:()=>new Promise((resolve,reject)=>{
+   list.async(1|16,0,(error:Error|null,array:unknown)=>{
+    if(error){if(array)release(array);reject(error);return;}
+    try{resolve(decode(array));}catch(error){reject(error);}
+   });
+  }),
  };
 }
