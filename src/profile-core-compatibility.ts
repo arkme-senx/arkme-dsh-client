@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readFile, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import semver from "semver";
-import { CORE_DEPENDENCY_POLICY_REVISION, readHarnessCorePackages, type HarnessCorePackages } from "./harness-core-dependencies.js";
+import { CORE_DEPENDENCY_POLICY_REVISION, readHarnessCorePackages, supportsHarnessCoreDependencyPolicy, type HarnessCorePackages } from "./harness-core-dependencies.js";
 
 export function coreDependencyConflicts(value: unknown, core: HarnessCorePackages): string[] {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return ["invalid plugin manifest"];
@@ -76,8 +76,8 @@ async function dependencyManifests(directories: string[], ownsCore: (name: strin
 
 /** Only selected optional bundles may be quarantined, never a core service. */
 export async function incompatibleProfileCorePackages(dshHome: string, dshBinPath: string): Promise<string[]> {
+  if (!supportsHarnessCoreDependencyPolicy(dshBinPath)) return [];
   const core = readHarnessCorePackages(dshBinPath);
-  if (/^0\.1\./.test(core["@deepseek-ai/dsh"]!.version)) return [];
   const profile = path.join(dshHome, "profiles/web");
   const manifest = JSON.parse(await readFile(path.join(profile, "package.json"), "utf8"));
   const incompatible: string[] = [];
