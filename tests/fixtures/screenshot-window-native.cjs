@@ -5,6 +5,9 @@ app.whenReady().then(async()=>{
  const windows=[];
  try {
   const {readScreenshotWindows}=await import(pathToFileURL(path.resolve(__dirname,'../../dist/native-screenshot-windows.js')).href);
+  const read=process.platform==='darwin'
+   ? (await import(pathToFileURL(path.resolve(__dirname,'../../dist/macos-screenshot-windows.js')).href)).readMacScreenshotWindowsAsync
+   : readScreenshotWindows;
   const display=screen.getPrimaryDisplay();
   const options={show:false,frame:false,resizable:false,alwaysOnTop:true,...(process.platform==='darwin'?{type:'panel'}:{}),webPreferences:{sandbox:true}};
   const back=new BrowserWindow({...options,x:display.bounds.x+100,y:display.bounds.y+100,width:400,height:300});windows.push(back);
@@ -13,11 +16,11 @@ app.whenReady().then(async()=>{
   front.moveTop();await new Promise(r=>setTimeout(r,200));
   const bounds=w=>process.platform==='win32'?screen.dipToScreenRect(null,w.getBounds()):w.getBounds();
   const matches=(a,b)=>['x','y','width','height'].every(k=>Math.abs(a[k]-b[k])<=2);
-  const snapshot=readScreenshotWindows();
+  const snapshot=await read();
   const frontIndex=snapshot.findIndex(r=>matches(r,bounds(front))),backIndex=snapshot.findIndex(r=>matches(r,bounds(back)));
   assert.ok(frontIndex>=0&&backIndex>frontIndex,`Incorrect native bounds/order: front=${frontIndex}, back=${backIndex}`);
   const frontBounds=bounds(front);front.hide();await new Promise(r=>setTimeout(r,100));
-  assert.equal(readScreenshotWindows().some(r=>matches(r,frontBounds)),false,'Hidden window was included');
+  assert.equal((await read()).some(r=>matches(r,frontBounds)),false,'Hidden window was included');
   console.log(JSON.stringify({platform:process.platform,nativeBounds:true,frontToBack:true,hiddenExcluded:true}));
   app.exitCode=0;
  }catch(e){console.error(e);app.exitCode=1;}finally{windows.forEach(w=>w.destroy());app.exit(app.exitCode);}

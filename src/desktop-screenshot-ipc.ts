@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { ScreenshotSession, decodeScreenshotPng } from './desktop-screenshot-session.js';
 import {encodeOpaqueBgraPng} from './screenshot-fast-png.js';
-import {readScreenshotWindows} from './native-screenshot-windows.js';
+import {createScreenshotWindowReader} from './native-screenshot-windows.js';
 import {windowsInFrame} from './screenshot-window-geometry.js';
 const SCREENSHOT_EDITOR_PATH='/arkme-self/screenshot';
 const prefix = 'arkme-screenshot:';
@@ -18,6 +18,7 @@ export function installScreenshotIpc(options: {
  main(): BrowserWindow | null; origin(): string | null; scope(): string; preload(): string;
  allowed(id: number): boolean; blocked?(): boolean; editorPreload?(): string;
 }) {
+ const readWindows=createScreenshotWindowReader();
  let standaloneRegistration: {origin:string;owner:number;reuse:boolean} | undefined;
  type WarmEditor = {window:BrowserWindow;display:number;key:string;load:Promise<void>;context?:((value:unknown)=>void);detach:()=>void};
  const warmEditors=new Map<number,WarmEditor>();
@@ -152,8 +153,7 @@ export function installScreenshotIpc(options: {
     s.reusable=standalone && standaloneRegistration?.reuse===true;
     const displays=screen.getAllDisplays();
     trace('native-windows-start');
-    const nativeWindows=readScreenshotWindows();
-    trace('native-windows-end');
+    const nativeWindowsPromise=readWindows().then(windows=>{trace('native-windows-end');return windows;});
     const captures=new Map<string, ReturnType<typeof desktopCapturer.getSources>>();
     const frames=await Promise.all(displays.map(async d=> {
      // A shared maximum thumbnail size upsamples smaller/differently shaped screens.
@@ -181,6 +181,7 @@ export function installScreenshotIpc(options: {
      trace('png-end',d.id);
      const contentBase64=png.toString('base64');
      trace('base64-end',d.id);
+     const nativeWindows=await nativeWindowsPromise;
      return {display:d,frame:{contentBase64,width:size.width,height:size.height,
       windows:windowsInFrame(nativeWindows,nativeBounds,size)}};
     }));
@@ -198,8 +199,14 @@ export function installScreenshotIpc(options: {
      if(warm){warmEditors.delete(warm.window.webContents.id);warm.detach();}
      const window=warm?.window ?? makeWindow(display,sender.session,preload);
      const id=window.webContents.id; trace(warm?'window-warm':'window-created',id);
-     window.webContents.once('dom-ready',()=>trace('dom-ready',id));
-     window.webContents.once('did-finish-load',()=>trace('did-finish-load',id));
+     // Reused editors never navigate. Load listeners would retain this capture's
+     // closure (and frames) forever; new-load listeners also need cancellation cleanup.
+     if(!warm) {
+      const contents=window.webContents;
+      const domReady=()=>trace('dom-ready',id),loaded=()=>trace('did-finish-load',id);
+      contents.once('dom-ready',domReady);contents.once('did-finish-load',loaded);
+      s.cleanups.push(()=>{contents.removeListener('dom-ready',domReady);contents.removeListener('did-finish-load',loaded);});
+     }
      s.windows.set(id,window); s.lease.add(id,frame);
      warm?.context?.({...frame,requestId:s.lease.requestId,destination:s.destination,...(process.env.ARKME_SCREENSHOT_PROFILE==='1'?{profileEnabled:true}:{})});
      const gone=()=>s.finish(undefined,new Error('截图编辑器异常关闭，请重试'));
