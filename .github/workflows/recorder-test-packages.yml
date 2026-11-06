@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: recorder-test-${{ github.ref }}
+  group: recorder-test-${{ github.sha }}
   cancel-in-progress: true
 jobs:
   package:
@@ -67,7 +67,11 @@ jobs:
         working-directory: client
         env:
           ARKME_RUNTIME_LOCAL_PLUGIN_DIR: ${{ github.workspace }}/plugin
-        run: node scripts/build-recorder-test.mjs
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            ulimit -n 65536
+          fi
+          node scripts/build-recorder-test.mjs
       - uses: actions/upload-artifact@v4
         with:
           name: jiwo-recorder-test-${{ matrix.platform }}-${{ matrix.arch }}
