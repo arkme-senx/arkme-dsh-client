@@ -121,7 +121,7 @@ function runCommand(command, args, env = process.env, capture = false) {
   }
   if (result.error || result.status !== 0) {
     // execFile-style errors include the entire argv, which can contain the Apple password.
-    const detail = capture ? redact((result.stderr || result.stdout || "").trim()) : "";
+    const detail = capture ? redact([result.stdout, result.stderr].filter(Boolean).join("\n").trim()) : "";
     throw new Error(`${command} failed (${result.status ?? result.error?.code ?? "signal"})${detail ? `: ${detail}` : ""}`);
   }
   return capture === "combined" ? (result.stdout || "") + (result.stderr || "") : result.stdout || "";
