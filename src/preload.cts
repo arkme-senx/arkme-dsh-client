@@ -498,6 +498,13 @@ let harnessReadyNotified = false;
 contextBridge.exposeInMainWorld(
   "arkmeDesktop",
   Object.freeze({
+    videoClipboard: Object.freeze({
+      version: 1,
+      supported: process.platform === 'darwin' || process.platform === 'win32',
+      begin: (request: unknown) => ipcRenderer.invoke('arkme-video-clipboard:begin', request),
+      copy: (request: unknown) => ipcRenderer.invoke('arkme-video-clipboard:copy', request),
+      cancel: (requestId: string) => ipcRenderer.invoke('arkme-video-clipboard:cancel', requestId),
+    }),
     recordingImports: Object.freeze({
       version: 1,
       list: (accountKey: string) => ipcRenderer.invoke('arkme-recording-import:list', accountKey),

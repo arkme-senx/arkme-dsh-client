@@ -1,4 +1,4 @@
-import test from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import {canStartFirstBuild,neverProduced} from '../scripts/ci/restore-history.mjs';
 const skipped=[{name:'build',status:'completed',conclusion:'skipped',steps:[]}];

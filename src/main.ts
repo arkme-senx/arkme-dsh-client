@@ -18,6 +18,8 @@ import { installLongArticleWindowIpc } from "./long-article-window-ipc.js";
 import { DesktopSessionSelection } from "./session-selection.js";
 import { DesktopRecordingFiles, type RecordingFilesContext } from './recording-import-files.js';
 import { NativeRecordingPicker } from './recording-file-picker.js';
+import { DesktopVideoClipboard, videoClipboardIdentityAllowed, type VideoClipboardContext } from './video-clipboard.js';
+import { createNativeVideoClipboard } from './video-clipboard-native.js';
 import { harnessCookieHeader, type HarnessAuthSession } from "./harness-auth-session.js";
 import { HarnessCookieInstaller } from "./harness-cookie-install.js";
 import { HarnessPageReadiness, localHarnessMountFailure, settleHarnessPageRendering } from "./harness-page-ready.js";
@@ -353,6 +355,13 @@ const desktopNotifications = new DesktopNotificationCoordinator({
 
 let deviceLockSurfaces: DeviceLockSurfaces | undefined;
 let deviceLockProtected = false;
+let videoClipboard: DesktopVideoClipboard | undefined;
+const videoClipboardSessions = new WeakMap<HarnessAuthSession, string>();
+function videoClipboardSession(session: HarnessAuthSession): string {
+  let key = videoClipboardSessions.get(session);
+  if (!key) { key = randomUUID(); videoClipboardSessions.set(session, key); }
+  return key;
+}
 const desktopDeviceLock = process.platform === "darwin" || process.platform === "win32" ? new DesktopDeviceLockOwner({
   store: new FileDeviceLockStore(path.join(app.getPath("userData"), "device-lock.json")),
   baseURL: runtimeServiceConfig.serviceBaseUrl,
@@ -361,6 +370,7 @@ const desktopDeviceLock = process.platform === "darwin" || process.platform === 
   available: () => runDeviceAuthentication(deviceAuthExecutable(app.isPackaged ? process.resourcesPath : moduleDirectory), "--check"),
   authenticate: signal => runDeviceAuthentication(deviceAuthExecutable(app.isPackaged ? process.resourcesPath : moduleDirectory), "--authenticate", signal),
   changed: snapshot => {
+    if (snapshot.locked || snapshot.sessionEnded) videoClipboard?.invalidate();
     if (snapshot.locked && !deviceLockProtected) desktopNotifications.closeVisibleNotifications();
     deviceLockProtected = snapshot.locked;
     deviceLockSurfaces?.update(snapshot);
@@ -1726,6 +1736,52 @@ ipcMain.handle('arkme-recording-import:stat', (event, token: string) => recordin
 ipcMain.handle('arkme-recording-import:read', (event, token: string, start: number, end: number) => recordingFiles.read(recordingFilesContext(event), token, start, end));
 ipcMain.handle('arkme-recording-import:upload', (event, token: string, request) => recordingFiles.upload(recordingFilesContext(event), token, request));
 ipcMain.handle('arkme-recording-import:cancel', (event, id: string) => recordingFiles.cancel(recordingFilesContext(event), id));
+
+function videoClipboardContext(event: Electron.IpcMainInvokeEvent, accountKey: unknown): VideoClipboardContext {
+  const scope = activeAccountScope, origin = activeHarnessOrigin, authenticated = harnessAuthSession;
+  const frame = event.senderFrame;
+  const valid = () => scope !== null && scope.owner.kind === 'account' && activeAccountScope === scope
+    && origin !== null && activeHarnessOrigin === origin && authenticated !== null && harnessAuthSession === authenticated
+    && !authenticated.signal.aborted && !event.sender.isDestroyed() && event.sender.mainFrame === frame
+    && videoClipboardIdentityAllowed({ accountKey, accountRef: scope.owner.accountRef, environment: runtimeEnvironment,
+      origin, frameUrl: frame?.url ?? '', mainFrame: frame !== null && frame === event.sender.mainFrame,
+      mainOwner: mainWindow?.webContents === event.sender, conversationOwner: conversationWindows.isActive(event.sender.id),
+      ready: accountScopeReady, locked: desktopDeviceLock?.protected === true });
+  if (!valid() || !scope || !origin || !authenticated || !frame || typeof accountKey !== 'string') throw new Error('请在已登录的会话窗口复制视频');
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  if (!owner || owner.isDestroyed()) throw new Error('视频复制窗口已关闭');
+  return { accountKey, directory: path.join(app.getPath('userData'), 'video-clipboard'),
+    origin, cookie: harnessCookieHeader(authenticated), scope: JSON.stringify([scope.dshHome, origin, videoClipboardSession(authenticated)]), sender: frame,
+    windowHandle: owner.getNativeWindowHandle(), valid,
+    watchInvalidation(invalidate) {
+      const navigation = (_event: Electron.Event, _url: string, inPlace: boolean, mainFrame: boolean) => { if (mainFrame && !inPlace) invalidate(); };
+      event.sender.on('did-start-navigation', navigation);
+      event.sender.once('render-process-gone', invalidate); event.sender.once('destroyed', invalidate);
+      authenticated.signal.addEventListener('abort', invalidate, { once: true });
+      return () => {
+        event.sender.off('did-start-navigation', navigation); event.sender.off('render-process-gone', invalidate); event.sender.off('destroyed', invalidate);
+        authenticated.signal.removeEventListener('abort', invalidate);
+      };
+    } };
+}
+const videoRequestAccount = (value: unknown): unknown => value && typeof value === 'object' && 'accountKey' in value ? value.accountKey : undefined;
+ipcMain.handle('arkme-video-clipboard:begin', (event, request: unknown) => {
+  const context = videoClipboardContext(event, videoRequestAccount(request));
+  videoClipboard ??= new DesktopVideoClipboard(createNativeVideoClipboard());
+  videoClipboard.begin(context, request);
+});
+ipcMain.handle('arkme-video-clipboard:copy', (event, request: unknown) => {
+  const context = videoClipboardContext(event, videoRequestAccount(request));
+  if (!videoClipboard) throw new Error('请重新点击复制视频');
+  return videoClipboard.copy(context, request);
+});
+ipcMain.handle('arkme-video-clipboard:cancel', (event, requestId: unknown) => {
+  // Cancel is capability-local: it may only release this trusted frame's click.
+  if (event.senderFrame === null || event.senderFrame !== event.sender.mainFrame) return;
+  const scope = activeAccountScope, origin = activeHarnessOrigin, authenticated = harnessAuthSession;
+  if (!scope || !origin || !authenticated) return;
+  videoClipboard?.cancel({ sender: event.senderFrame, scope: JSON.stringify([scope.dshHome, origin, videoClipboardSession(authenticated)]) }, requestId);
+});
 ipcMain.handle("arkme-desktop:directory-badge", (event, count: unknown) => (
   isCurrentAppUpdateSender(event) && nativeBadges.applyDirectoryCount(count).accepted
 ));

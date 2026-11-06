@@ -46,7 +46,7 @@ macOS、Windows 每个 matrix job 在检出源码后发送开始通知，仅在�
 最终通知覆盖常规失败和取消；源码检出失败、runner 失联、强制终止可能无法发送，
 应以 Actions 页面为准。脚本不输出凭据、请求体、响应正文或原始网络错误。
 
-本地协议测试：`node --test tests/ci-notify.test.mjs`。真实发送需配置上述 Secret，
+本地协议测试：`pnpm exec vitest run tests/ci-notify.test.mjs`。真实发送需配置上述 Secret，
 未配置时不向 Hook 发送请求。
 
 ### 首次构建前失败的重跑
