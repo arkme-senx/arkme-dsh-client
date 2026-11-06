@@ -1,4 +1,4 @@
-import {test} from 'node:test';
+import {test} from 'vitest';
 import assert from 'node:assert/strict';
 import {nextPackageVersion, assertReservedVersion} from '../scripts/ci/package-version.mjs';
 test('increments only package.json, including a new major/minor line', () => {
