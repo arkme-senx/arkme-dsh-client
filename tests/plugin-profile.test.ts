@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -65,6 +65,7 @@ describe("provisionArkmeWebProfile", () => {
     expect(await readFile(path.join(profileDir, "pnpm-workspace.yaml"), "utf8")).toContain(
       "autoInstallPeers: false"
     );
+    expect(await readFile(path.join(profileDir, "pnpm-workspace.yaml"), "utf8")).toContain("packageImportMethod: copy");
     const linkPath = path.join(
       profileDir,
       "node_modules",
@@ -73,6 +74,19 @@ describe("provisionArkmeWebProfile", () => {
     );
     expect((await lstat(linkPath)).isSymbolicLink()).toBe(true);
     expect(await realpath(linkPath)).toBe(await realpath(fixture.pluginDir));
+  });
+
+  test("upgrades the generated workspace without replacing custom settings", async () => {
+    const fixture = await createFixture();
+    const workspace = path.join(fixture.dshHome, "profiles", "web", "pnpm-workspace.yaml");
+    await provisionArkmeWebProfile({ dshHome: fixture.dshHome, pluginDir: fixture.pluginDir });
+    await writeFile(workspace, "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n");
+    await provisionArkmeWebProfile({ dshHome: fixture.dshHome, pluginDir: fixture.pluginDir });
+    expect(await readFile(workspace, "utf8")).toContain("packageImportMethod: copy");
+    const custom = "packages:\n  - .\nnodeLinker: isolated\n";
+    await writeFile(workspace, custom);
+    await provisionArkmeWebProfile({ dshHome: fixture.dshHome, pluginDir: fixture.pluginDir });
+    expect(await readFile(workspace, "utf8")).toBe(custom);
   });
 
   test("writes the complete test environment override after the plugin bundle patch", async () => {
@@ -158,6 +172,7 @@ describe("provisionArkmeWebProfile", () => {
       version: "0.1.17"
     });
     expect((await lstat(installedDir)).isSymbolicLink()).toBe(false);
+    expect((await stat(path.join(installedDir, "lib", "client.js"))).nlink).toBe(1);
     expect((await lstat(installedDir)).isDirectory()).toBe(true);
     const manifest = JSON.parse(
       await readFile(path.join(profileDir, "package.json"), "utf8")
