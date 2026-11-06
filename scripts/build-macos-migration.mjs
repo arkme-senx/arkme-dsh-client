@@ -79,16 +79,17 @@ export async function buildMigrationPackage({ appRoot, outputDirectory, env = pr
   const installerIdentity = env.JIWO_INSTALLER_IDENTITY?.trim();
   const appIdentity = env.CSC_NAME?.trim();
   const notaryProfile = env.JIWO_NOTARY_PROFILE?.trim();
-  const { notarytoolAuthArgs } = await import('./macos-ci-signing.cjs');
+  const { notarytoolAuthArgs, runCommand, validateMacNotarizationTicket } = await import('./macos-ci-signing.cjs');
   const notaryAuth = notaryProfile ? ['--keychain-profile', notaryProfile] : notarytoolAuthArgs(env);
   if (!installerIdentity?.startsWith("Developer ID Installer:") || !appIdentity?.startsWith("Developer ID Application:")) {
     throw new Error("Set CSC_NAME, JIWO_INSTALLER_IDENTITY and JIWO_NOTARY_PROFILE on the release host");
   }
   function run(tool, args) {
-    const result = spawnSync(tool, args, { env, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
-    if (result.error || result.status !== 0) throw new Error(`${path.basename(tool)} failed: ${result.stderr || result.error?.message || result.status}`);
-    return `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    return runCommand(tool, args, env, "combined");
   }
+  const validateTicket = file => validateMacNotarizationTicket(file, env, {
+    run: (_tool, args, childEnv, capture) => runCommand('/usr/bin/xcrun', args, childEnv, capture)
+  });
   const manifest = JSON.parse(await readFile("package.json", "utf8"));
   run("/usr/bin/codesign", ["--verify", "--deep", "--strict", appRoot]);
   const info = JSON.parse(run("/usr/bin/plutil", ["-convert", "json", "-o", "-", path.join(appRoot, "Contents/Info.plist")]));
@@ -98,7 +99,7 @@ export async function buildMigrationPackage({ appRoot, outputDirectory, env = pr
   run("/usr/bin/lipo", [path.join(appRoot, "Contents/Frameworks/Electron Framework.framework/Electron Framework"), "-verify_arch", "arm64", "x86_64"]);
   const requirement = `=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "${teamID}"`;
   run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "-R", requirement, appRoot]);
-  run("/usr/bin/xcrun", ["stapler", "validate", appRoot]);
+  validateTicket(appRoot);
   run("/usr/sbin/spctl", ["--assess", "--type", "execute", appRoot]);
   if (!appIdentity.endsWith(`(${teamID})`) || !installerIdentity.endsWith(`(${teamID})`)) throw new Error("App and Installer signing teams must match");
   const work = await mkdtemp(path.join(os.tmpdir(), "jiwo-migration-build-"));
@@ -156,7 +157,7 @@ export async function buildMigrationPackage({ appRoot, outputDirectory, env = pr
     const notarization = JSON.parse(run("/usr/bin/xcrun", ["notarytool", "submit", artifact, ...notaryAuth, "--wait", "--output-format", "json"]));
     if (notarization.status !== "Accepted") throw new Error("Migration PKG notarization was not accepted");
     run("/usr/bin/xcrun", ["stapler", "staple", artifact]);
-    run("/usr/bin/xcrun", ["stapler", "validate", artifact]);
+    validateTicket(artifact);
     run("/usr/sbin/pkgutil", ["--check-signature", artifact]);
     run("/usr/sbin/spctl", ["--assess", "--type", "install", artifact]);
     const destination = path.join(outputDirectory, filename);
