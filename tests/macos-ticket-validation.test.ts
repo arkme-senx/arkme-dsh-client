@@ -61,3 +61,44 @@ describe('Apple notarization ticket validation', () => {
     expect(output).toHaveBeenCalledWith('Validated for [REDACTED]\n');
   });
 });
+
+describe.skipIf(process.platform !== 'darwin')('migration PKG preflight ticket validation', () => {
+  async function preflight(ticketError: string) {
+    const { buildMigrationPackage } = await import('../scripts/build-macos-migration.mjs');
+    const manifest = require('../package.json');
+    let tickets = 0;
+    const spawn = vi.spyOn(childProcess, 'spawnSync').mockImplementation(((tool: string, args: string[]) => {
+      let status = 0, stdout = '', stderr = '';
+      const command = tool.split('/').at(-1);
+      if (command === 'plutil') stdout = JSON.stringify({ CFBundleIdentifier: manifest.build.mac.appId, CFBundleName: '即我',
+        CFBundleExecutable: 'arkme', CFBundleShortVersionString: manifest.version, CFBundleVersion: String(manifest.versionCode),
+        LSMinimumSystemVersion: manifest.build.mac.minimumSystemVersion });
+      else if (command === 'codesign' && args[0] === '-dv') stdout = 'TeamIdentifier=ABCDE12345\nAuthority=Developer ID Application: Fixture (ABCDE12345)\n';
+      else if (command === 'xcrun' && args[0] === 'stapler' && args[1] === 'validate') {
+        if (tickets++ === 0) { status = 68; stdout = ticketError; stderr = 'Additional ticket diagnostic'; }
+      } else if (command === 'spctl') { status = 1; stderr = 'Gatekeeper fixture rejection'; }
+      else if (command !== 'codesign' && command !== 'lipo') throw new Error(`Unexpected fixture command: ${command}`);
+      return { pid: 1, status, signal: null, stdout, stderr, output: [null, stdout, stderr] };
+    }) as typeof childProcess.spawnSync);
+    const operation = buildMigrationPackage({ appRoot: '/signed/即我.app', outputDirectory: '/unused', env: {
+      CSC_NAME: 'Developer ID Application: Fixture (ABCDE12345)', JIWO_INSTALLER_IDENTITY: 'Developer ID Installer: Fixture (ABCDE12345)',
+      JIWO_NOTARY_PROFILE: 'fixture-profile'
+    } });
+    return { operation, spawn, ticketCount: () => tickets };
+  }
+
+  it('recovers a preflight connection loss while still enforcing the following Gatekeeper check', async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const fixture = await preflight('Error Domain=NSURLErrorDomain Code=-1005 "The network connection was lost."');
+    await expect(fixture.operation).rejects.toThrow('Gatekeeper fixture rejection');
+    expect(fixture.ticketCount()).toBe(2);
+    expect(fixture.spawn.mock.calls.some(call => String(call[0]).endsWith('/spctl'))).toBe(true);
+  });
+
+  it('retains stdout diagnostics and rejects an invalid ticket without retrying or reaching packaging', async () => {
+    const fixture = await preflight('Invalid notarization ticket');
+    await expect(fixture.operation).rejects.toThrow('Invalid notarization ticket');
+    expect(fixture.ticketCount()).toBe(1);
+    expect(fixture.spawn.mock.calls.some(call => String(call[0]).endsWith('/spctl'))).toBe(false);
+  });
+});
