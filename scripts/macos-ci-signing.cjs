@@ -147,24 +147,32 @@ function runLoggedCommand(command, args, env = process.env) {
 
 // Retry only the observed transient Apple ticket-delivery connection loss.
 // The same signed bytes must still pass stapler; ticket/signature errors fail.
-function validateMacNotarizationTicket(file, env = process.env, {
+function runMacTicketAction(action, file, env = process.env, {
   run = runCommand,
   wait = milliseconds => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
 } = {}) {
   const redact = createMacCiLogRedactor(env);
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const output = run("xcrun", ["stapler", "validate", file], env, true);
+      const output = run("xcrun", ["stapler", action, file], env, true);
       if (output) process.stdout.write(redact(output));
       return;
     } catch (error) {
       const temporaryNetworkLoss = error instanceof Error
         && /NSURLErrorDomain Code=-1005\b|The network connection was lost\b/i.test(error.message);
       if (!temporaryNetworkLoss || attempt === 3) throw error;
-      process.stderr.write(`Apple ticket connection interrupted; retrying validation (${attempt + 1}/3)\n`);
+      process.stderr.write(`Apple ticket connection interrupted; retrying ${action} (${attempt + 1}/3)\n`);
       wait(attempt * 1000);
     }
   }
+}
+
+function validateMacNotarizationTicket(file, env, options) {
+  return runMacTicketAction("validate", file, env, options);
+}
+
+function stapleMacNotarizationTicket(file, env, options) {
+  return runMacTicketAction("staple", file, env, options);
 }
 
 function notarytoolAuthArgs(env) {
@@ -177,7 +185,7 @@ function notarytoolAuthArgs(env) {
 }
 
 module.exports = { validateMacCiCredentials, withMacCiSigningEnvironment, runCommand, runLoggedCommand,
-  createMacCiLogRedactor, notarytoolAuthArgs, validateMacNotarizationTicket };
+  createMacCiLogRedactor, notarytoolAuthArgs, validateMacNotarizationTicket, stapleMacNotarizationTicket };
 
 if (require.main === module) {
   try {
