@@ -672,9 +672,11 @@ describe("independent APP update preload UI", () => {
     findByText(f.document.documentElement, '下载最新版本')?.click();
     expect(f.invokeCalls).toContainEqual({ channel: 'arkme-app-update:open-website', args: [] });
   });
-  it('shows Linux website action and removes the whole notice after closing', async () => {
+  it('shows the manual website action and removes the whole notice after closing', async () => {
     const f = await executePreload(undefined, { appSnapshot: state('available', { canAutoInstall: false }) });
-    await vi.waitFor(() => expect(findByText(f.document.documentElement, '下载最新版本')).toBeDefined());
+    await vi.waitFor(() => expect(findByText(f.document.documentElement, '前往官网下载')).toBeDefined());
+    findByText(f.document.documentElement, '前往官网下载')?.click();
+    expect(f.invokeCalls).toContainEqual({ channel: 'arkme-app-update:open-website', args: [] });
     f.emit('arkme-app-update:changed', { ...state('available'), revision: 2, expanded: false });
     expect(f.document.getElementById('arkme-app-update-notice')).toBeNull();
     expect(findByText(f.document.documentElement, 'APP 更新')).toBeUndefined();
