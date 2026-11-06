@@ -1,12 +1,16 @@
-const {build}=require('./package.json');
+const {build,versionCode}=require('./package.json');
+const shared=require('./electron-builder.cjs');
 const fs=require('node:fs/promises');
 const path=require('node:path');
 const arch=process.env.ARKME_RUNTIME_ARCH || process.arch;
 if(!['arm64','x64'].includes(arch))throw new Error('Unsupported recorder test architecture');
 module.exports={
   ...build,
+  // electron-builder deep-merges function objects across extends, including their
+  // readonly length property. Compose the shared hook below instead.
+  extends:null,publish:shared.publish,
   appId:'cc.jiwo.arkme.local-test',productName:'arkme Local Test',executableName:'arkme Local Test',
-  artifactName:'Jiwo-Recorder-Test-${version}-${os}-${arch}.${ext}',
+  artifactName:`Jiwo-Recorder-Test-\${version}-vc${versionCode}-\${os}-\${arch}.\${ext}`,
   protocols:[{name:'Arkme Recorder Test',schemes:['arkme-local-test']}],
   directories:{output:'release-recorder-test'},
   mac:{...build.mac,appId:'cc.jiwo.arkme.local-test',executableName:'arkme Local Test',forceCodeSigning:false,identity:'-',
@@ -24,6 +28,7 @@ module.exports={
     const plugin=path.join(resources,'app.asar.unpacked','node_modules','@senguoyun','dsh-arkme');
     const manifest=JSON.parse(await fs.readFile(path.join(plugin,'package.json'),'utf8'));
     await fs.writeFile(path.join(resources,'ARKME_TEST_PLUGIN.json'),JSON.stringify({schemaVersion:1,source:'bundled',
-      packageName:manifest.name,packageVersion:manifest.version,pluginCommit:process.env.ARKME_RECORDER_PLUGIN_COMMIT},null,2)+'\n');
+      packageName:manifest.name,packageVersion:manifest.version,pluginCommit:process.env.ARKME_RECORDER_PLUGIN_COMMIT,
+      clientVersion:context.packager.appInfo.version,clientVersionCode:versionCode,clientCommit:process.env.GITHUB_SHA},null,2)+'\n');
   },
 };

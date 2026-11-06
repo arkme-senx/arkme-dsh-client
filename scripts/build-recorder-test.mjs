@@ -1,4 +1,4 @@
-import {spawn} from 'node:child_process';
+import {spawn,execFileSync} from 'node:child_process';
 import {access,mkdir,readFile,readdir,writeFile,stat} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import path from 'node:path';
@@ -7,13 +7,15 @@ import {createRequire} from 'node:module';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const require=createRequire(import.meta.url);
+const clientMetadata=JSON.parse(await readFile(path.join(root,'package.json'),'utf8'));
+const clientCommit=process.env.GITHUB_SHA || execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim();
 const plugin=path.resolve(process.env.ARKME_RUNTIME_LOCAL_PLUGIN_DIR || '../plugin');
 const arch=process.env.ARKME_RUNTIME_ARCH || process.arch;
 if(!['darwin','win32'].includes(process.platform) || arch!==process.arch)throw new Error('Build each recorder test package on its matching native OS/architecture');
 const metadata=JSON.parse(await readFile(path.join(plugin,'package.json'),'utf8'));
 if(metadata.name!=='@senguoyun/dsh-arkme')throw new Error('Wrong recorder plugin');
 await access(path.join(plugin,'lib','index.js'));await access(path.join(plugin,'lib','client.js'));
-const env={...process.env,ARKME_RUNTIME_LOCAL_PLUGIN_DIR:plugin,ARKME_RUNTIME_ARCH:arch,ARKME_SKIP_PREPARE_BUILD:'true',
+const env={...process.env,GITHUB_SHA:clientCommit,ARKME_RUNTIME_LOCAL_PLUGIN_DIR:plugin,ARKME_RUNTIME_ARCH:arch,ARKME_SKIP_PREPARE_BUILD:'true',
   CSC_IDENTITY_AUTO_DISCOVERY:'false',ARKME_RUNTIME_SERVICE_BASE_URL:'https://api.jotmo.cc'};
 for(const key of ['CSC_LINK','CSC_KEY_PASSWORD','CSC_NAME','CSC_INSTALLER_LINK','CSC_INSTALLER_KEY_PASSWORD','APPLE_ID','APPLE_APP_SPECIFIC_PASSWORD','APPLE_TEAM_ID'])delete env[key];
 await run('pnpm',['run','build']);
@@ -34,6 +36,7 @@ for(const name of await readdir(out)){
 }
 await writeFile(path.join(out,`recorder-test-${process.platform}-${arch}.json`),JSON.stringify({schemaVersion:1,
   app:'arkme Local Test',environment:'prod',dataDirectory:'Arkme Recorder Test',independentLogin:true,
+  clientVersion:clientMetadata.version,clientVersionCode:clientMetadata.versionCode,clientCommit,
   pluginVersion:metadata.version,pluginCommit:process.env.ARKME_RECORDER_PLUGIN_COMMIT,platform:process.platform,arch,files},null,2)+'\n');
 console.log(JSON.stringify({output:out,files}));
 

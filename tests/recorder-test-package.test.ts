@@ -42,4 +42,15 @@ describe('portable recorder test packages',()=>{
   expect(config.mac.identity).toBe('-');
   expect(config.extraResources).toContainEqual(expect.objectContaining({to:'app.asar.unpacked/node_modules'}));
  });
+ it('loads through the actual builder configuration merger',async()=>{
+  const require=createRequire(import.meta.url);
+  const builderRequire=createRequire(require.resolve('electron-builder'));
+  const {getConfig}=builderRequire('app-builder-lib/out/util/config/config.js');
+  const config=await getConfig(process.cwd(),'electron-builder.recorder-test.cjs',null);
+  expect(config.appId).toBe('cc.jiwo.arkme.local-test');
+  expect(typeof config.afterPack).toBe('function');
+  expect(config.nsis.include).toBeUndefined();
+  expect(config.win.signtoolOptions).toBeUndefined();
+  expect(config.publish[0].provider).toBe('generic');
+ });
 });
