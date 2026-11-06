@@ -72,6 +72,7 @@ import { DesktopController } from "./desktop-controller.js";
 import { resolveArkmePreloadPath } from "./desktop-capabilities.js";
 import { AppUpdateNoticeCoordinator, registerAppUpdateNoticeIpc, installAppUpdateNoticeStyles } from "./app-update-notice.js";
 import { createElectronAppUpdater } from "./electron-app-updater.js";
+import { inspectWindowsUpdateEligibility } from "./windows-update-admission.js";
 import {
   startDesktopCapabilityBridge,
   type DesktopAccountScopeIdentity,
@@ -1503,6 +1504,17 @@ async function installAppUpdateController(currentVersionCode: number): Promise<v
     ...(reconciliation.outcome === "incomplete"
       ? { previousInstallFailure: reconciliation.target }
       : {}),
+    ...(inAppInstallSupported && target.platform === "win32" && appIdentity.appId === "cc.jiwo.arkme" ? {
+      checkInstallEligibility: async (installTarget: { version: string; versionCode: number }) => {
+        const result = await inspectWindowsUpdateEligibility({
+          executablePath: app.getPath("exe"),
+          scriptPath: path.join(process.resourcesPath, "app.asar.unpacked", "dist", "windows-update-admission.ps1"),
+          target: installTarget,
+        });
+        logDiagnostic("app-update-admission", { ...result, versionCode: installTarget.versionCode });
+        return result.eligible;
+      },
+    } : {}),
     ...(inAppInstallSupported ? {
       createUpdater: (feedURL: string, targetVersion: string) => createElectronAppUpdater(
         target.platform as "darwin" | "win32",

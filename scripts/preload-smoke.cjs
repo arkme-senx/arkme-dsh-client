@@ -62,12 +62,20 @@ app.whenReady().then(async () => {
       event.returnValue = true;
     });
     ipcMain.handle("arkme:runtime-update-notice:snapshot", () => null);
+    const manualUpdate = process.env.ARKME_TEST_MANUAL_UPDATE === "1";
+    const updateActions = [];
+    if (manualUpdate) {
+      for (const action of ["open-website", "collapse"]) {
+        ipcMain.handle(`arkme-app-update:${action}`, () => { updateActions.push(action); return true; });
+      }
+    }
     ipcMain.handle("arkme-app-update:notice", () => ({
       schemaVersion: 1,
       revision: 1,
-      expanded: false,
+      expanded: manualUpdate,
       state: {
-        status: "current",
+        status: manualUpdate ? "available" : "current",
+        ...(manualUpdate ? { latestVersion: "3.0.26", latestVersionCode: 304, error: "当前安装需要使用完整安装包更新。请前往官网下载后运行安装程序。" } : {}),
         currentVersion: "1.2.3-smoke",
         currentVersionCode: 1,
         canAutoInstall: false
@@ -135,6 +143,26 @@ app.whenReady().then(async () => {
       throw new Error(`Arkme desktop capability was not exposed: ${JSON.stringify(result)}${details}`);
     }
 
+    if (manualUpdate) {
+      const { APP_UPDATE_NOTICE_CSS } = await import(pathToFileURL(path.join(path.dirname(preloadPath), "app-update-notice.js")).href);
+      await window.webContents.insertCSS(APP_UPDATE_NOTICE_CSS);
+      await window.webContents.executeJavaScript(`new Promise((resolve, reject) => {
+        let attempts = 0;
+        const poll = () => document.querySelector('#arkme-app-update-notice button') ? resolve() : ++attempts > 100 ? reject(new Error('manual notice missing')) : setTimeout(poll, 20);
+        poll();
+      })`);
+      const notice = await window.webContents.executeJavaScript(`({
+        text: document.getElementById('arkme-app-update-notice').textContent,
+        buttons: [...document.querySelectorAll('#arkme-app-update-notice button')].map(b => b.textContent)
+      })`);
+      if (!notice.text.includes("完整安装包") || JSON.stringify(notice.buttons) !== JSON.stringify(["稍后处理", "前往官网下载"])) {
+        throw new Error(`Manual installer notice mismatch: ${JSON.stringify(notice)}`);
+      }
+      await window.webContents.executeJavaScript(`document.querySelectorAll('#arkme-app-update-notice button')[1].click(); document.querySelectorAll('#arkme-app-update-notice button')[0].click()`);
+      for (let i=0; i<100 && updateActions.length<2; i++) await new Promise(resolve => setTimeout(resolve, 20));
+      if (updateActions.join(',') !== 'open-website,collapse') throw new Error('Manual notice actions did not reach their existing IPC routes');
+      console.log('manual installer notice passed: '+JSON.stringify(notice));
+    }
     console.log(`preload smoke passed: ${JSON.stringify(result)}`);
   } catch (error) {
     exitCode = 1;
