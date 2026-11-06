@@ -5,6 +5,8 @@ dist/
 release/
 release-universal/
 release-test/
+release-recorder-test/
+.build/
 .runtime/
 coverage/
 *.log

@@ -72,6 +72,7 @@ type ArkmeAppUpdateControllerOptions = {
   appId?: string;
   fetchImpl?: typeof fetch;
   createUpdater?: (feedURL: string, targetVersion: string) => AppUpdaterPort;
+  checkInstallEligibility?: (target: PendingAppUpdateInstall) => Promise<boolean>;
   installUpdate?: (
     target: PendingAppUpdateInstall,
     launchInstaller: () => void,
@@ -86,6 +87,8 @@ interface AppUpdateRelease {
   releaseNotes?: string;
   updateFeedURL?: string;
 }
+
+const FULL_INSTALLER_MESSAGE = "当前安装需要使用完整安装包更新。请前往官网下载后运行安装程序。";
 
 function origin(raw: string): string {
   const value = new URL(raw);
@@ -287,7 +290,9 @@ export class ArkmeAppUpdateController {
           : {}),
       };
       let canAutoInstall = false;
-      if (release.updateFeedURL !== undefined && this.options.platform !== "linux" && this.options.createUpdater !== undefined) {
+      const supportsUpdater = release.updateFeedURL !== undefined && this.options.platform !== "linux" && this.options.createUpdater !== undefined;
+      const eligible = supportsUpdater && await this.checkInstallEligibility(release);
+      if (eligible && release.updateFeedURL !== undefined && this.options.platform !== "linux" && this.options.createUpdater !== undefined) {
         const updater = this.options.createUpdater(release.updateFeedURL, release.version);
         candidateUpdater = updater;
         let candidateError: Error | undefined;
@@ -333,7 +338,7 @@ export class ArkmeAppUpdateController {
         currentVersion: this.options.currentVersion,
         currentVersionCode: this.options.currentVersionCode,
         canAutoInstall,
-        ...(!canAutoInstall ? { error: "当前更新无法自动安装，请前往官网下载最新版本" } : {}),
+        ...(!canAutoInstall ? { error: supportsUpdater && !eligible ? FULL_INSTALLER_MESSAGE : "当前更新无法自动安装，请前往官网下载最新版本" } : {}),
         latestVersion: release.version,
         latestVersionCode: release.versionCode,
         ...(this.options.previousInstallFailure?.versionCode === release.versionCode
@@ -467,6 +472,11 @@ export class ArkmeAppUpdateController {
     const { error: _error, failureStage: _failureStage, ...installSnapshot } = this.snapshot;
     this.snapshot = { ...installSnapshot, status: "installing" };
     try {
+      // Do this before the callback writes a receipt, shuts down services or quits.
+      if (this.options.checkInstallEligibility !== undefined && !(await this.checkInstallEligibility(release))) {
+        const { downloadedFilePath: _file, downloadedBytes: _bytes, totalBytes: _total, ...manual } = this.snapshot;
+        return this.snapshot = { ...manual, status: "available", canAutoInstall: false, error: FULL_INSTALLER_MESSAGE };
+      }
       await this.options.installUpdate(
         { version: release.version, versionCode: release.versionCode },
         () => updater.quitAndInstall(true, true),
@@ -474,6 +484,15 @@ export class ArkmeAppUpdateController {
       return this.snapshotNow();
     } catch (error) {
       return this.fail("install", error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async checkInstallEligibility(target: PendingAppUpdateInstall): Promise<boolean> {
+    if (this.options.checkInstallEligibility === undefined) return true;
+    try {
+      return await this.options.checkInstallEligibility({ version: target.version, versionCode: target.versionCode }) === true;
+    } catch {
+      return false;
     }
   }
 

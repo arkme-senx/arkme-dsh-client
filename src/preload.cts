@@ -261,7 +261,7 @@ function installAppUpdateNoticeRenderer(documentRef: Document = document): () =>
     content.append(title);
     const detail = documentRef.createElement("p");
     detail.textContent = status === "failed" ? state.error ?? "请重试或前往官网下载最新版本"
-      : status === "available" ? state.canAutoInstall ? "正在准备更新包" : "请前往官网下载最新版本"
+      : status === "available" ? state.canAutoInstall ? "正在准备更新包" : state.error ?? "请前往官网下载最新版本"
       : status === "downloading" ? "正在后台下载" : "";
     content.append(detail);
     if (status === "downloading" && typeof state.totalBytes === "number" && Number.isFinite(state.totalBytes) && state.totalBytes > 0) {
@@ -293,7 +293,7 @@ function installAppUpdateNoticeRenderer(documentRef: Document = document): () =>
     const actions = documentRef.createElement("div");
     actions.className = "arkme-app-update-actions";
     if (status === "available" && !state.canAutoInstall) {
-      actions.append(button("稍后", "collapse"), button("下载最新版本", "open-website", true));
+      actions.append(button("稍后处理", "collapse"), button("前往官网下载", "open-website", true));
     } else if (status === "downloaded") {
       if (state.installWarning) actions.append(button("下载最新版本", "open-website"));
       actions.append(button("稍后安装", "collapse"), button("重启并安装", "install", true));

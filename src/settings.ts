@@ -14,9 +14,10 @@ export async function ensureDefaultWorkspace(userDataPath: string): Promise<stri
 
 export function resolveUserDataPath(
   appDataPath: string,
-  environment: RuntimeEnvironment = "prod"
+  environment: RuntimeEnvironment = "prod",
+  localTest = false
 ): string {
-  return path.join(appDataPath, environment === "test" ? "Arkme Harness Test" : "Arkme Harness");
+  return path.join(appDataPath, localTest ? "Arkme Recorder Test" : environment === "test" ? "Arkme Harness Test" : "Arkme Harness");
 }
 
 export function resolveAppUpdateInstallReceiptPath(userDataPath: string): string {

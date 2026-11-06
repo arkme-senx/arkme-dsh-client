@@ -9,6 +9,7 @@ const source = path.resolve("src", "ui");
 const destination = path.resolve("dist", "ui");
 
 await mkdir(destination, { recursive: true });
+await cp(path.resolve("build/windows-migration.ps1"), path.resolve("dist/windows-update-admission.ps1"));
 await cp(source, destination, { recursive: true, force: true });
 const serviceBaseUrl = resolveRuntimeServiceOrigin(process.env.ARKME_RUNTIME_SERVICE_BASE_URL);
 const migrationTest = process.env.ARKME_MIGRATION_TEST === "1";

@@ -213,6 +213,12 @@ test.skipIf(process.platform !== 'win32' || !process.env.ARKME_TEST_MAKENSIS)('r
  expect(output).toContain('NSIS cancellation callback integration passed');
 }, 180_000);
 
+test.skipIf(process.platform !== 'win32')('app update eligibility rejects unsupported identity without recovery or telemetry mutations', () => {
+ const shell = path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
+ const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/update-eligibility.ps1')],{encoding:'utf8'});
+ expect(output).toContain('Read-only update eligibility fixtures passed');
+}, 60_000);
+
 test('migration abort callback composes with MUI instead of redefining its callback', () => {
  const hooks=readFileSync('build/windows-migration.nsh','utf8');
  expect(hooks).toContain('!define MUI_CUSTOMFUNCTION_ABORT JiwoMigrationOnUserAbort');

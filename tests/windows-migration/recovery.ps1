@@ -221,6 +221,19 @@ try {
     Assert-Fails { Recover-Overlay } 'nonempty directory without metadata must abort'
     Assert-True ([IO.File]::ReadAllText((Join-Path (Get-JournalDirectory) 'foreign.db')) -eq 'precious data') 'unknown data is retained'
   }
+  Test-Case 'read-only update preflight permits committed recovery and preserves all bytes' {
+    Start-Fixture
+    $directory=Get-JournalDirectory
+    Assert-True (!(Test-CommittedUpdateJournal $directory)) 'active records require full recovery'
+    Complete-Overlay
+    $before=@(Get-ChildItem $directory -File | Sort-Object Name | ForEach-Object { $_.Name+':'+(Get-FileHash $_.FullName).Hash }) -join ','
+    Assert-True (Test-CommittedUpdateJournal $directory) 'trusted committed records must still permit automatic updates'
+    $after=@(Get-ChildItem $directory -File | Sort-Object Name | ForEach-Object { $_.Name+':'+(Get-FileHash $_.FullName).Hash }) -join ','
+    Assert-True ($before -eq $after) 'preflight must not clean any committed bytes'
+    [IO.File]::WriteAllText((Join-Path $directory 'foreign.db'),'unknown')
+    Assert-True (!(Test-CommittedUpdateJournal $directory)) 'unknown committed contents cannot be accepted'
+    Assert-True ([IO.File]::ReadAllText((Join-Path $directory 'foreign.db')) -eq 'unknown') 'unknown contents remain intact'
+  }
   Test-Case 'committed cleanup accepts later installed bytes without changing them' {
     Start-Fixture; Complete-Overlay; Use-LaterManifest
     [IO.File]::WriteAllText((Join-Path $Destination 'arkme.exe'),'later executable')

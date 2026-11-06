@@ -37,7 +37,8 @@ describe("standalone Harness runtime", () => {
       "pnpm": "11.19.0",
       "qrcode-generator": "2.0.4",
       "react": "18.3.1",
-      "react-dom": "18.3.1"
+      "react-dom": "18.3.1",
+      "serialport": "13.0.0"
     });
     expect(manifest.scripts).toBeUndefined();
   });

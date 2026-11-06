@@ -1,8 +1,10 @@
-﻿# Executed only by the signed production NSIS installer. Windows PowerShell 5.1.
+﻿# Production NSIS helper and read-only app update preflight. Windows PowerShell 5.1.
 [CmdletBinding()]
 param(
-  [ValidateSet('Prepare','Apply','Commit','Finalize','Rollback','Check','UpdateCheck','Report','Library')][string]$Action,
+  [ValidateSet('Prepare','Apply','Commit','Finalize','Rollback','Check','UpdateCheck','Report','InspectUpdate','Library')][string]$Action,
   [string]$Destination,
+  [string]$UpdateVersion,
+  [long]$UpdateVersionCode,
   [ValidateSet('current','all')][string]$Scope = 'current',
   [string]$Manifest,
   [string]$Stage,
@@ -46,6 +48,12 @@ function Get-DiskRequirements([string]$TargetDrive,[string]$StageDrive,[long]$Pa
   return $requirements
 }
 function Get-ReleaseManifest {
+  # Read-only app preflight has a target release identity, not a signed payload.
+  # It never authorizes an install; the installer still validates its own manifest.
+  if ($Action -eq 'InspectUpdate') {
+    if ($UpdateVersion -notmatch '^\d+\.\d+\.\d+$' -or $UpdateVersionCode -le 0 -or $UpdateVersionCode -gt 2147483647) { throw 'Invalid update identity.' }
+    return [pscustomobject]@{version=$UpdateVersion;versionCode=$UpdateVersionCode}
+  }
   $release=Get-Content -LiteralPath $Manifest -Raw -Encoding UTF8 | ConvertFrom-Json
   if (!$release.version -or $release.versionCode -le 0 -or @($release.files).Count -lt 2) { throw 'Invalid signed release manifest.' }
   return $release
@@ -1314,7 +1322,7 @@ function Restore-OverlayFiles($Directory,$Entries,[string]$Root) {
     } elseif (Test-Path -LiteralPath $target -PathType Leaf) { Remove-Item -LiteralPath $target -Force }
   }
 }
-function Remove-CommittedLegacyRetirements($Journal) {
+function Assert-CommittedLegacyRetirements($Journal) {
   if ($Journal.State -ne 'committed') { throw 'Legacy cleanup requires a committed installation.' }
   # Validate the entire inventory before deleting anything. Active paths can
   # belong to a subsequently reinstalled Flutter and must never be touched.
@@ -1322,6 +1330,9 @@ function Remove-CommittedLegacyRetirements($Journal) {
     $retired=$entry.Path+$RetiredSuffix
     if (Test-Path -LiteralPath $retired) { Assert-OwnedFile $retired @($entry.Hash) }
   }
+}
+function Remove-CommittedLegacyRetirements($Journal) {
+  Assert-CommittedLegacyRetirements $Journal
   foreach ($entry in $Journal.LegacyFiles) {
     $retired=$entry.Path+$RetiredSuffix
     if (Test-Path -LiteralPath $retired) {
@@ -1433,6 +1444,64 @@ function Assert-NativeUpdate {
   if (!(Test-RegularUpdate $existing $legacy)) { throw 'This installation requires the full manual migration installer.' }
 }
 
+# Validate the same committed cleanup scene as Recover-Overlay, without deleting it.
+function Test-CommittedUpdateJournal([string]$Directory) {
+  try {
+    Assert-JournalTrust $Directory
+    $file=Join-Path $Directory 'journal.json'
+    if (!(Test-Path -LiteralPath $file -PathType Leaf)) { return $false }
+    $journal=Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-JournalMetadata $journal
+    if ($journal.State -ne 'committed') { return $false }
+    Assert-RecoveryScene $Directory $journal
+    Assert-CommittedLegacyRetirements $journal
+    return $true
+  } catch { return $false }
+}
+
+# App-side preflight. Never recover a journal, close a process, write registration,
+# create a transcript or send telemetry. The actual installer remains authoritative.
+function Get-NativeUpdateEligibility {
+  try {
+    $Destination=Assert-LocalPath $Destination
+    $owners=@()
+    foreach ($hive in @('CurrentUser','LocalMachine')) {
+      $base=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]$hive,[Microsoft.Win32.RegistryView]::Registry64)
+      try {
+        $key=$base.OpenSubKey($ElectronKeys[0])
+        if ($key) {
+          try {
+            if ([string]$key.GetValue('InstallLocation') -ieq $Destination) { $owners+=@($hive) }
+          } finally { $key.Dispose() }
+        }
+      } finally { $base.Dispose() }
+    }
+    if ($owners.Count -ne 1) { return @{eligible=$false;reason='registration-missing-or-ambiguous'} }
+    $Scope=if ($owners[0] -eq 'LocalMachine') {'all'} else {'current'}
+    Initialize-JournalLocation $null
+    $journalDirectory=Get-JournalDirectory
+    if ((Test-Path -LiteralPath $journalDirectory) -and !(Test-CommittedUpdateJournal $journalDirectory)) {
+      return @{eligible=$false;reason='recovery-required'}
+    }
+    $legacy=Resolve-MigrationLegacy (Select-MigrationLegacy (Get-LegacyInstall))
+    if ($legacy) { return @{eligible=$false;reason='legacy-migration-required'} }
+    $existing=Assert-ElectronDestination
+    if (!(Test-RegularUpdate $existing $legacy)) { return @{eligible=$false;reason='legacy-identity'} }
+    if (!$script:PreservedLegacy) {
+      foreach ($location in @(Get-ShortcutLocations)) {
+        $link=Read-ManagedShortcut $location.Path
+        if ($link.Exists -and ($link.Target -ine (Join-Path $Destination 'arkme.exe') -or $link.Arguments -ne '')) {
+          return @{eligible=$false;reason='shortcut-migration-required'}
+        }
+      }
+    }
+    return @{eligible=$true;reason='eligible'}
+  } catch {
+    # Do not expose local paths or exception text across the app/renderer boundary.
+    return @{eligible=$false;reason='inspection-failed'}
+  }
+}
+
 # Best-effort diagnostics. Never throw through an installer/rollback boundary.
 function Protect-InstallerDiagnosticText([string]$Text,[int]$Limit=12000) {
   $rules=@(
@@ -1532,6 +1601,13 @@ function Complete-InstallerDiagnostic([string]$Result,[string]$Recovery,[string]
 }
 
 if ($Action -eq 'Library') { return }
+if ($Action -eq 'InspectUpdate') {
+  [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
+  $ProgressPreference='SilentlyContinue'
+  Get-NativeUpdateEligibility 6>$null | ConvertTo-Json -Compress
+  exit 0
+}
+
 $timer=[Diagnostics.Stopwatch]::StartNew()
 $log=Join-Path ([IO.Path]::GetTempPath()) ('jiwo-install-'+[DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')+'-'+$PID+'.log')
 $transcribing=$false
