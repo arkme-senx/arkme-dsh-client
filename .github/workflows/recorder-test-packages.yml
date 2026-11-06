@@ -31,7 +31,7 @@ jobs:
     env:
       ARKME_SKIP_PREPARE_BUILD: 'true'
       ARKME_RUNTIME_ARCH: ${{ matrix.arch }}
-      ARKME_RECORDER_PLUGIN_COMMIT: 981ef605f27f67d140d0d6d07eae8c05bdb356b3
+      ARKME_RECORDER_PLUGIN_COMMIT: 65ce10c946dd6de909ab4206a6b7d9a92e4da3a7
     steps:
       - name: Preserve source bytes for checked helper manifests
         run: git config --global core.autocrlf false
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: arkme-senx/arkme-dsh-plugin
-          ref: 981ef605f27f67d140d0d6d07eae8c05bdb356b3
+          ref: 65ce10c946dd6de909ab4206a6b7d9a92e4da3a7
           path: plugin
       - uses: actions/setup-node@v4
         with:
