@@ -216,7 +216,7 @@ app.setAppUserModelId(appIdentity.appId);
 const appDataPath = masChannel ? app.getPath("appData") : resolveArkmeAppDataPath(app.getPath("appData"), process.env.ARKME_APP_DATA_PATH);
 app.setPath("appData", appDataPath);
 // Share directory naming/layout; MAS keeps the OS-provided sandbox appData root.
-app.setPath("userData", resolveUserDataPath(appDataPath, runtimeEnvironment));
+app.setPath("userData", resolveUserDataPath(appDataPath, runtimeEnvironment, packagedLocalTest));
 const masBookmarks = masChannel ? new MasBookmarks(path.join(app.getPath("userData"), "directory-bookmarks.json"), bookmark => { const stop = app.startAccessingSecurityScopedResource(bookmark); return () => stop(); }) : null;
 app.once("will-quit", () => masBookmarks?.close());
 const diagnosticLogPath = path.join(
@@ -1309,9 +1309,9 @@ async function initializeHarnessRuntime(
     appVersion: app.getVersion(),
     ...(dshVersion === undefined ? {} : { dshVersion }),
     runtimeManaged: runtime.runtimeManaged,
-    ...(masChannel ? { forceEmbedded: true } : {}),
+    ...(masChannel || packagedLocalTest ? { forceEmbedded: true } : {}),
     ...(runtime.release === undefined ? {} : { runtimeReleaseId: runtime.release.releaseId }),
-    ...(runtime.runtimeManaged || masChannel ? {} : { packageManager: {
+    ...(runtime.runtimeManaged || masChannel || packagedLocalTest ? {} : { packageManager: {
       executable: process.execPath,
       prefixArgs: [runtime.packageManagerCliPath],
       installArgs: ["--frozen-lockfile=false"],
@@ -1352,7 +1352,7 @@ async function initializeHarnessRuntime(
     inheritedEnv: {
       ...packageManagerEnvironment,
       ARKME_APP_VERSION: app.getVersion(),
-      ...pluginHostEnvironment(masChannel, app.isPackaged ? undefined : paths.userDataPath),
+      ...pluginHostEnvironment(masChannel, !app.isPackaged || packagedLocalTest ? paths.userDataPath : undefined),
       ...(paths.localSessionStore ? {ARKME_LOCAL_SESSION_ROOT: paths.localSessionStore.root} : {}),
       ...(paths.accountScopeRequired ? {
         ARKME_ACCOUNT_SCOPE_REQUIRED: "1",

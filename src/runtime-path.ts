@@ -52,7 +52,11 @@ export async function readPackagedTestPluginPath(
   try {
     const marker = JSON.parse(
       await readFile(path.join(resourcesPath, TEST_PLUGIN_MARKER), "utf8")
-    ) as { schemaVersion?: unknown; source?: unknown; pluginPath?: unknown };
+    ) as { schemaVersion?: unknown; source?: unknown; pluginPath?: unknown; packageName?: unknown };
+    if (marker.schemaVersion === 1 && marker.source === "bundled"
+      && marker.packageName === "@senguoyun/dsh-arkme" && marker.pluginPath === undefined) {
+      return packagedArkmePluginPath(resourcesPath);
+    }
     if (
       marker.schemaVersion !== 1
       || marker.source !== "local"
