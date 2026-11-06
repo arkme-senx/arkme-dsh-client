@@ -67,6 +67,9 @@ ${shortcutMacros}
   StrCpy $newStartMenuLink "$INSTDIR\\fixture-menu.lnk"
   StrCpy $newDesktopLink "$INSTDIR\\fixture-desktop.lnk"
 !macroend
+!include "MUI2.nsh"
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "English"
 !insertmacro customHeader
 Function .onInit
   StrCpy $installMode CurrentUser

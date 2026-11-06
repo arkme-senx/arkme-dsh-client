@@ -57,6 +57,7 @@ const PROFILE_WORKSPACE_TEMPLATE = `packages:
 
 nodeLinker: hoisted
 autoInstallPeers: false
+packageImportMethod: copy
 `;
 const LEGACY_MIGRATION_BACKUP_PREFIX = "legacy-managed-link-";
 const RUNTIME_PROFILE_TRANSACTION_FILE = ".arkme-runtime-profile-transaction.json";
@@ -262,10 +263,11 @@ export async function provisionArkmeWebProfile(
     if (options.environment === "test") await writeTextAtomically(profilePatchPath, TEST_PROFILE_PATCH);
     else await writeIfMissing(profilePatchPath, PROFILE_PATCH_TEMPLATE);
   }
-  await writeIfMissing(
-    path.join(profileDir, "pnpm-workspace.yaml"),
-    PROFILE_WORKSPACE_TEMPLATE
-  );
+  const workspacePath = path.join(profileDir, "pnpm-workspace.yaml");
+  await writeIfMissing(workspacePath, PROFILE_WORKSPACE_TEMPLATE);
+  if (await readFile(workspacePath, "utf8") === PROFILE_WORKSPACE_TEMPLATE.replace("packageImportMethod: copy\n", "")) {
+    await writeTextAtomically(workspacePath, PROFILE_WORKSPACE_TEMPLATE);
+  }
   const expectedPluginSpecifier = selection.spec;
   const embeddedInstallationAligned = embeddedPlugin.kind === "directory"
     ? await managedPluginLinkMatches(profileDir, embeddedPlugin.path)
@@ -1310,7 +1312,8 @@ async function synchronizeProfileDependencies(
       [
         ...(packageManager.prefixArgs ?? []),
         "install",
-        ...(packageManager.installArgs ?? [])
+        ...(packageManager.installArgs ?? []),
+        "--package-import-method=copy"
       ],
       {
         cwd: profileDir,

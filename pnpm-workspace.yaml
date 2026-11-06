@@ -8,6 +8,9 @@ catalogs:
 
 verifyDepsBeforeRun: false
 
+# Shared hardlink metadata changes can trigger Harness hot reloads in another client.
+packageImportMethod: copy
+
 supportedArchitectures:
   os:
     - darwin
@@ -20,6 +23,7 @@ supportedArchitectures:
     - glibc
 
 allowBuilds:
+  '@serialport/bindings-cpp@13.0.0': true
   '@arkme/macos-notification-permission@file:native/macos-notification-permission': true
   '@deepseek-ai/dsh-subprocess-local': true
   '@google/genai': false

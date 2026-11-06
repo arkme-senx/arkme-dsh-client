@@ -1,0 +1,84 @@
+name: Recorder desktop test packages
+on:
+  push:
+    branches: ['codex/ts1106-02-录音器跨平台迁移']
+    paths: ['src/**','scripts/**','electron-builder.recorder-test.cjs','package.json','pnpm-lock.yaml','pnpm-workspace.yaml','runtime/**','.github/workflows/recorder-test-packages.yml']
+permissions:
+  contents: read
+concurrency:
+  group: recorder-test-${{ github.sha }}
+  cancel-in-progress: true
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            platform: macos
+            arch: arm64
+          - runner: macos-15-intel
+            platform: macos
+            arch: x64
+          - runner: windows-2022
+            platform: windows
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      ARKME_SKIP_PREPARE_BUILD: 'true'
+      ARKME_RUNTIME_ARCH: ${{ matrix.arch }}
+      ARKME_RECORDER_PLUGIN_COMMIT: 65ce10c946dd6de909ab4206a6b7d9a92e4da3a7
+    steps:
+      - name: Preserve source bytes for checked helper manifests
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          path: client
+      - uses: actions/checkout@v4
+        with:
+          repository: arkme-senx/arkme-dsh-plugin
+          ref: 65ce10c946dd6de909ab4206a6b7d9a92e4da3a7
+          path: plugin
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.0'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.19.0'
+          run_install: false
+          package_json_file: client/package.json
+      - name: Install and build pinned recorder plugin
+        working-directory: plugin
+        run: |
+          pnpm install --ignore-scripts --frozen-lockfile --config.manage-package-manager-versions=false
+          pnpm --config.manage-package-manager-versions=false run build
+      - name: Install desktop dependencies
+        working-directory: client
+        run: |
+          git config --global --add url."https://github.com/".insteadOf 'ssh://git@github.com/'
+          git config --global --add url."https://github.com/".insteadOf 'git@github.com:'
+          pnpm install --ignore-scripts --frozen-lockfile
+          pnpm run postinstall
+      - name: Build self-contained test installers
+        working-directory: client
+        env:
+          ARKME_RUNTIME_LOCAL_PLUGIN_DIR: ${{ github.workspace }}/plugin
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            ulimit -n 65536
+          fi
+          node scripts/build-recorder-test.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jiwo-recorder-test-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            client/release-recorder-test/*.dmg
+            client/release-recorder-test/*.exe
+            client/release-recorder-test/*.zip
+            client/release-recorder-test/recorder-test-*.json
+          if-no-files-found: error
+          retention-days: 14
