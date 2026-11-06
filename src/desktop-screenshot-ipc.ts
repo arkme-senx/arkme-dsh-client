@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, nativeImage, screen, shell, systemPreferences, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, nativeImage, screen, session, shell, systemPreferences, type IpcMainInvokeEvent } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { ScreenshotSession, decodeScreenshotPng } from './desktop-screenshot-session.js';
@@ -10,7 +10,7 @@ const prefix = 'arkme-screenshot:';
 type ScreenshotTrace = (stage: string, windowId?: number) => void;
 type Result = {status:'cancelled'} | {status:'captured'; contentBase64:string; mimeType:'image/png'; fileName:string};
 interface Active {
- reusable:boolean; cleanups:Array<()=>void>; trace: ScreenshotTrace; destination: 'attachment' | 'clipboard'; lease: ScreenshotSession; owner: BrowserWindow; windows: Map<number,BrowserWindow>; ready: Set<number>;
+ reusable:boolean; cleanups:Array<()=>void>; trace: ScreenshotTrace; destination: 'attachment' | 'clipboard'; lease: ScreenshotSession; owner: BrowserWindow; windows: Map<number,BrowserWindow>; parked: Map<number,BrowserWindow>; ready: Set<number>;
  cancelAsk?: (()=>void) | undefined; askAttempt?: {digest:string;id:string};
  finish(result?: Result, error?: Error): void; timer: ReturnType<typeof setTimeout> | undefined; saving: boolean;
 }
@@ -19,6 +19,17 @@ export function installScreenshotIpc(options: {
  allowed(id: number): boolean; blocked?(): boolean; editorPreload?(): string;
 }) {
  const readWindows=createScreenshotWindowReader();
+ // Static standalone editors need neither business cookies nor its HTTP pool.
+ // One ephemeral session per installer keeps repeated captures bounded.
+ let isolatedSession:Electron.Session|undefined;
+ const screenshotSession=()=>{
+  if(!isolatedSession) {
+   isolatedSession=session.fromPartition(`arkme-screenshot-editor-${randomUUID()}`,{cache:false});
+   isolatedSession.setPermissionRequestHandler((_contents,_permission,callback)=>callback(false));
+   isolatedSession.setPermissionCheckHandler(()=>false);
+  }
+  return isolatedSession;
+ };
  let standaloneRegistration: {origin:string;owner:number;reuse:boolean} | undefined;
  type WarmEditor = {window:BrowserWindow;display:number;key:string;load:Promise<void>;context?:((value:unknown)=>void);detach:()=>void};
  const warmEditors=new Map<number,WarmEditor>();
@@ -50,7 +61,7 @@ export function installScreenshotIpc(options: {
    ||registration.owner!==main.webContents.id||registration.origin!==options.origin())return;
   for(const display of screen.getAllDisplays()) {
    if([...warmEditors.values()].some(w=>w.key===geometryKey(display)))continue;
-   const window=makeWindow(display,main.webContents.session,options.editorPreload());
+   const window=makeWindow(display,screenshotSession(),options.editorPreload());
    const id=window.webContents.id;
    const warm:WarmEditor={window,display:display.id,key:geometryKey(display),load:Promise.resolve(),detach:()=>{window.removeListener('closed',discard);window.webContents.removeListener('render-process-gone',discard);}};
    warmEditors.set(id,warm);
@@ -92,7 +103,7 @@ export function installScreenshotIpc(options: {
    const ownerId=sender.id;
    const abort=()=>s.finish();
    const watch=setInterval(()=> { if (!valid(s)) s.finish(); },250);
-   const s: Active = { reusable:false,cleanups:[],trace, destination, lease:new ScreenshotSession(ownerId,requestId,options.scope()), owner, windows:new Map(), ready:new Set(), timer:undefined, saving:false,
+   const s: Active = { reusable:false,cleanups:[],trace, destination, lease:new ScreenshotSession(ownerId,requestId,options.scope()), owner, windows:new Map(), parked:new Map(), ready:new Set(), timer:undefined, saving:false,
     finish(result={status:'cancelled'},error) {
      if (active!==s) return;
      const current=valid(s);
@@ -101,7 +112,7 @@ export function installScreenshotIpc(options: {
      active=undefined; s.lease.close(); clearInterval(watch); clearTimeout(s.timer);
      sender.removeListener('destroyed',abort); sender.removeListener('did-start-navigation',abort);
      for(const cleanup of s.cleanups)cleanup();
-     for(const window of s.windows.values()) if(!window.isDestroyed()) {
+     for(const window of [...s.windows.values(),...s.parked.values()]) if(!window.isDestroyed()) {
       if(s.reusable && current && !quitting && standaloneRegistration?.origin===options.origin()) {
        const display=screen.getAllDisplays().find(d=>(['x','y','width','height'] as const).every(key=>d.bounds[key]===window.getBounds()[key]));
        if(display) {
@@ -116,7 +127,7 @@ export function installScreenshotIpc(options: {
       }
       window.destroy();
      }
-     s.windows.clear();
+     s.windows.clear();s.parked.clear();
      scheduleWarm();
      // On macOS, activating the opener can switch Spaces on another display.
      // Closing the non-activating panel lets macOS restore focus naturally.
@@ -197,7 +208,7 @@ export function installScreenshotIpc(options: {
      trace('window-create-start',display.id);
      const warm=standalone?[...warmEditors.values()].find(w=>w.key===geometryKey(display)&&!w.window.isDestroyed()):undefined;
      if(warm){warmEditors.delete(warm.window.webContents.id);warm.detach();}
-     const window=warm?.window ?? makeWindow(display,sender.session,preload);
+     const window=warm?.window ?? makeWindow(display,standalone?screenshotSession():sender.session,preload);
      const id=window.webContents.id; trace(warm?'window-warm':'window-created',id);
      // Reused editors never navigate. Load listeners would retain this capture's
      // closure (and frames) forever; new-load listeners also need cancellation cleanup.
@@ -209,11 +220,14 @@ export function installScreenshotIpc(options: {
      }
      s.windows.set(id,window); s.lease.add(id,frame);
      warm?.context?.({...frame,requestId:s.lease.requestId,destination:s.destination,...(process.env.ARKME_SCREENSHOT_PROFILE==='1'?{profileEnabled:true}:{})});
-     const gone=()=>s.finish(undefined,new Error('截图编辑器异常关闭，请重试'));
+     const gone=()=>{
+      if(s.windows.has(id))s.finish(undefined,new Error('截图编辑器异常关闭，请重试'));
+      else if(s.parked.delete(id)&&!window.isDestroyed())window.destroy();
+     };
      const closed=()=>{if(s.windows.has(id))s.finish();};
      window.webContents.on('render-process-gone',gone);window.on('closed',closed);
      s.cleanups.push(()=>{
-      // Selecting one display destroys its peers before the capture finishes.
+      // Legacy peers or crashed parked editors may already be destroyed.
       // Electron rejects webContents access on those destroyed BrowserWindows.
       if(!window.isDestroyed())window.webContents.removeListener('render-process-gone',gone);
       window.removeListener('closed',closed);
@@ -289,7 +303,12 @@ export function installScreenshotIpc(options: {
  });
  ipcMain.handle(prefix+'select',(e,token:unknown)=> {
   const s=editor(e,token); if(!s || !s.lease.select(e.sender.id,options.scope())) return false;
-  for(const [id,window] of s.windows) if(id!==e.sender.id) { s.windows.delete(id); window.destroy(); }
+  for(const [id,window] of s.windows) if(id!==e.sender.id) {
+   s.windows.delete(id);
+   // The lease has revoked this peer. Keep its renderer until finish resets
+   // all pixels, rather than forcing a new HTTP load on the next capture.
+   if(s.reusable){window.hide();s.parked.set(id,window);}else window.destroy();
+  }
   return true;
  });
  ipcMain.handle(prefix+'close',(e,token:unknown)=> { editor(e,token)?.finish(); });
