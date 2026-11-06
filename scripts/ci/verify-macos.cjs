@@ -1,8 +1,8 @@
 const path=require('node:path');
-const {runCommand,validateMacNotarizationTicket}=require('../macos-ci-signing.cjs');
+const {runCommand}=require('../macos-ci-signing.cjs');
 function verifyMacApp(app,env){
  runCommand('codesign',['--verify','--deep','--strict',app],env);
- validateMacNotarizationTicket(app,env);
+ runCommand('xcrun',['stapler','validate',app],env);
  runCommand('spctl',['--assess','--type','exec',app],env);
  const details=runCommand('codesign',['-d','--verbose=4',app],env,'combined');
  if(!env.APPLE_TEAM_ID||!details.split(/\r?\n/).includes(`TeamIdentifier=${env.APPLE_TEAM_ID}`))throw new Error('Unexpected signing team');

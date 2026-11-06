@@ -121,7 +121,7 @@ function runCommand(command, args, env = process.env, capture = false) {
   }
   if (result.error || result.status !== 0) {
     // execFile-style errors include the entire argv, which can contain the Apple password.
-    const detail = capture ? redact([result.stdout, result.stderr].filter(Boolean).join("\n").trim()) : "";
+    const detail = capture ? redact((result.stderr || result.stdout || "").trim()) : "";
     throw new Error(`${command} failed (${result.status ?? result.error?.code ?? "signal"})${detail ? `: ${detail}` : ""}`);
   }
   return capture === "combined" ? (result.stdout || "") + (result.stderr || "") : result.stdout || "";
@@ -145,28 +145,6 @@ function runLoggedCommand(command, args, env = process.env) {
   });
 }
 
-// Retry only the observed transient Apple ticket-delivery connection loss.
-// The same signed bytes must still pass stapler; ticket/signature errors fail.
-function validateMacNotarizationTicket(file, env = process.env, {
-  run = runCommand,
-  wait = milliseconds => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
-} = {}) {
-  const redact = createMacCiLogRedactor(env);
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const output = run("xcrun", ["stapler", "validate", file], env, true);
-      if (output) process.stdout.write(redact(output));
-      return;
-    } catch (error) {
-      const temporaryNetworkLoss = error instanceof Error
-        && /NSURLErrorDomain Code=-1005\b|The network connection was lost\b/i.test(error.message);
-      if (!temporaryNetworkLoss || attempt === 3) throw error;
-      process.stderr.write(`Apple ticket connection interrupted; retrying validation (${attempt + 1}/3)\n`);
-      wait(attempt * 1000);
-    }
-  }
-}
-
 function notarytoolAuthArgs(env) {
   if (env.APPLE_API_KEY) {
     return ["--key", required(env, "APPLE_API_KEY"), "--key-id", required(env, "APPLE_API_KEY_ID"),
@@ -177,7 +155,7 @@ function notarytoolAuthArgs(env) {
 }
 
 module.exports = { validateMacCiCredentials, withMacCiSigningEnvironment, runCommand, runLoggedCommand,
-  createMacCiLogRedactor, notarytoolAuthArgs, validateMacNotarizationTicket };
+  createMacCiLogRedactor, notarytoolAuthArgs };
 
 if (require.main === module) {
   try {
