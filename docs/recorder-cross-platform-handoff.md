@@ -6,7 +6,7 @@
 
 - 2026-11-06 查询正式更新接口，macOS arm64/x64 和 Windows x64 均为 **3.0.27 / vc305**；本机已安装版本相同。
 - 客户端功能分支同时包含 `origin/dev` 的 `36a3376f4dde7d3545fa76164acc96de0782d589` 和正式版 `origin/master` 的 `00b7bdbdb0ad40dfa8d35f7c0fe5227d4bc84309`。合并时保留两边的 Windows 更新/安装回归测试。
-- 插件功能提交：`442dcf16d89c64de9d83b1a962253bdb5db4a66b`，基于最新 `dev` 的 `9927c3aa56034eda79539d3224729a34ee40f278`，已包含 master v3.0.54。完整协议、缓存、权限和验收合同见插件的 `docs/local-recorder.md`。
+- 插件功能提交：`9d29e94d71052be6e2ce32c4f2f2829195d1999a`，基于最新 `dev` 的 `9927c3aa56034eda79539d3224729a34ee40f278`，已包含 master v3.0.54。完整协议、缓存、权限和验收合同见插件的 `docs/local-recorder.md`。
 - 两个仓库均使用 `codex/ts1106-02-录音器跨平台迁移`，PR 目标为 `dev`；正式合并、版本分配和发布交由同事执行。
 
 ## 测试包
