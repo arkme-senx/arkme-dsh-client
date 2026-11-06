@@ -46,7 +46,7 @@ jobs:
       matrix:
         include:
           - platform: macos
-            runner: macos-14
+            runner: macos-15-intel
           - platform: windows
             runner: windows-2022
     runs-on: ${{ matrix.runner }}
