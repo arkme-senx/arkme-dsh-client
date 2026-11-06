@@ -1,4 +1,4 @@
-const path=require('node:path');const {readdir,writeFile}=require('node:fs/promises');const {withMacCiSigningEnvironment,runCommand,runLoggedCommand,createMacCiLogRedactor,validateMacNotarizationTicket}=require('../macos-ci-signing.cjs');
+const path=require('node:path');const {readdir,writeFile}=require('node:fs/promises');const {withMacCiSigningEnvironment,runCommand,runLoggedCommand,createMacCiLogRedactor}=require('../macos-ci-signing.cjs');
 const {verifyMacApp:verify}=require('./verify-macos.cjs');
 withMacCiSigningEnvironment(process.env,async(env,temp)=>{
  await runLoggedCommand('pnpm',['exec','electron-builder','--config','electron-builder.ci-config.cjs','--mac','zip','--universal','--publish','never'],env);
@@ -7,7 +7,7 @@ withMacCiSigningEnvironment(process.env,async(env,temp)=>{
  const pkg=await buildCIMacPackage(path.join('release-ci','mac-universal',name),env,temp);
  const signature=runCommand('pkgutil',['--check-signature',pkg],env,true);
  if(!signature.includes('Developer ID Installer:')||!signature.includes(`(${env.APPLE_TEAM_ID})`))throw new Error('Unexpected PKG signing identity');
- validateMacNotarizationTicket(pkg,env);runCommand('spctl',['--assess','--type','install',pkg],env);
+ runCommand('xcrun',['stapler','validate',pkg],env);runCommand('spctl',['--assess','--type','install',pkg],env);
  const {verifyMacReleasePair,verifyPairedMacUpdateMetadata}=await import('../macos-release-pair.mjs');
  const manifest=require('../../package.json');const report=await verifyMacReleasePair({appRoot:path.join('release-ci','mac-universal',name),releaseDirectory:'release-ci',version:manifest.version,versionCode:manifest.versionCode,test:env.ARKME_CI_ENV==='test'});
  const {readFile}=require('node:fs/promises');const YAML=require('yaml');verifyPairedMacUpdateMetadata(YAML.parse(await readFile('release-ci/latest-mac.yml','utf8')),report);
