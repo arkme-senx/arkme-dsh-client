@@ -88,6 +88,55 @@ describe('native video copy reservation and bounded staging', () => {
     f.fetcher.mockImplementation(async (url, init) => String(url).includes('/team/media') ? new Response(null, { status: 403 }) : originalFetch(url, init));
     f.begin(); await expect(f.copy(media)).rejects.toThrow(); expect(f.native.write).toHaveBeenCalledTimes(2);
   });
+  it('rechecks source-bound ordinary media after warm reuse without reading the full local file again', async () => {
+    const f = await fixture(), media = 'arkme-media-v1.source-bound';
+    let revoked = false;
+    const original = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async (url, init) => {
+      const response = await original(url, init);
+      if (String(url).includes('/files/local')) response.headers.set('X-Arkme-File-Origin', 'received');
+      if (String(url).includes('/api/media?')) return new Response(null, { status: revoked ? 404 : 206 });
+      return response;
+    });
+    f.begin(); await f.copy(media); f.begin(); await f.copy(media);
+    expect(f.requests.filter(request => request.url.includes('/api/media?'))).toEqual([
+      { url: `http://127.0.0.1:3102/arkme-self/api/media?ref=${media}`, method: 'HEAD', range: 'bytes=0-0' },
+      { url: `http://127.0.0.1:3102/arkme-self/api/media?ref=${media}`, method: 'HEAD', range: 'bytes=0-0' },
+    ]);
+    expect(f.requests.filter(request => request.method === 'POST')).toHaveLength(2);
+    expect(f.requests.filter(request => request.method === 'GET')).toHaveLength(1);
+    const previous = f.native.files()[0]!;
+    revoked = true; f.begin(); await expect(f.copy(media)).rejects.toThrow('暂不可访问');
+    expect(f.native.write).toHaveBeenCalledTimes(2);
+    expect(f.requests.filter(request => request.method === 'GET')).toHaveLength(1);
+    expect(await readFile(previous, 'utf8')).toBe('synthetic video');
+  });
+  it('rejects source-bound ordinary media revoked while the cold local stream is still preparing', async () => {
+    const f = await fixture(), media = 'arkme-media-v1.source-bound';
+    let revoked = false, opened!: () => void, stream!: ReadableStreamDefaultController<Uint8Array>;
+    const reading = new Promise<void>(resolve => { opened = resolve; });
+    const original = f.fetcher.getMockImplementation()!;
+    f.fetcher.mockImplementation(async (url, init) => {
+      const response = await original(url, init);
+      if (String(url).includes('/api/media?')) {
+        expect(revoked).toBe(true);
+        expect(init?.method).toBe('HEAD'); expect(new Headers(init?.headers).get('Range')).toBe('bytes=0-0');
+        return new Response(null, { status: 403 });
+      }
+      if (String(url).includes('/files/local')) {
+        response.headers.set('X-Arkme-File-Origin', 'received');
+        if (!init?.method) return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+          stream = controller; controller.enqueue(Buffer.from('synthetic')); opened();
+        } }));
+      }
+      return response;
+    });
+    f.begin(); const copying = f.copy(media); await reading;
+    revoked = true; stream.enqueue(Buffer.from(' video')); stream.close();
+    await expect(copying).rejects.toThrow('暂不可访问');
+    expect(f.native.write).not.toHaveBeenCalled();
+    expect(await readdir(f.directory)).toEqual([]);
+  });
   it('rejects a Team grant for a different cached file and never commits', async () => {
     const f = await fixture(); const originalFetch = f.fetcher.getMockImplementation()!;
     f.fetcher.mockImplementation(async (url, init) => init?.method === 'POST'

@@ -132,9 +132,10 @@ export class DesktopVideoClipboard {
     const result = await response.json() as { ok?: boolean; value?: { state?: string; file?: { fileRef?: string } } };
     this.assert(pending);
     if (!result.ok || result.value?.state !== 'ready' || result.value.file?.fileRef !== fileRef) throw new Error('视频原件与当前消息不匹配');
-    if (mediaRef.startsWith('team-app-media.')) {
-      await this.request(pending, `/team/media?ref=${encodeURIComponent(mediaRef)}`, { method: 'HEAD', headers: { Range: 'bytes=0-0' } });
-    }
+    // Ordinary opaque references can also carry a revocable source admission.
+    // The existing media owner, not the renderer or a cached file, authorizes it.
+    const route = mediaRef.startsWith('team-app-media.') ? '/team/media' : '/media';
+    await this.request(pending, `${route}?ref=${encodeURIComponent(mediaRef)}`, { method: 'HEAD', headers: { Range: 'bytes=0-0' } });
   }
   private async cleanup(root: string, keep: string[] = []): Promise<void> {
     const protectedFiles = new Set([...this.native.files(), ...keep]);
@@ -191,7 +192,7 @@ export class DesktopVideoClipboard {
         if (received !== size) throw new Error('视频读取不完整');
         stage = { key, file, directory: created, size };
       }
-      // Local bytes are not a Team grant: bind and authorize immediately before
+      // Received bytes are not a live grant: bind and authorize immediately before
       // native commit, including the warm path, using the existing Host owners.
       await this.authorize(pending, fileRef, local && !mediaRef?.startsWith('team-app-media.') ? undefined : mediaRef);
       this.assert(pending);
