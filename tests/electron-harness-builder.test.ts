@@ -113,6 +113,15 @@ async function writeBuildFixture(root: string) {
   ];
   for (const target of targets) await writeNativeFixture(source, target);
 
+  await writePackage(source, "serialport", { version: "13.0.0" });
+  const serialBindings = await writePackage(source, "@serialport/bindings-cpp", { version: "13.0.0" });
+  for (const target of targets) {
+    const name = target.os === "darwin" ? "darwin-x64+arm64" : target.suffix;
+    const directory = path.join(serialBindings, "prebuilds", name);
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, `@serialport+bindings-cpp${target.os === "linux" ? ".glibc" : ""}.node`), name);
+  }
+
   const nodePty = await writePackage(source, "node-pty");
   for (const target of targets) {
     const prebuild = path.join(nodePty, "prebuilds", target.suffix);

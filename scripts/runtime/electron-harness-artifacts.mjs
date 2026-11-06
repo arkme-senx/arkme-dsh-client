@@ -185,6 +185,9 @@ function nativeRequirements(target) {
       : `${platform}-${target.arch}`;
   const prebuild = `${platform}-${target.arch}`;
   const files = [
+    "serialport/package.json",
+    "@serialport/bindings-cpp/package.json",
+    `@serialport/bindings-cpp/prebuilds/${target.os === "darwin" ? "darwin-x64+arm64" : `${platform}-${target.arch}`}/@serialport+bindings-cpp${target.os === "linux" ? ".glibc" : ""}.node`,
     `node-addon-require-builtin-${suffix}/package.json`,
     `@koromix/koffi-${platform}-${target.arch}/package.json`,
     `@koromix/koffi-${platform}-${target.arch}/${platform}_${target.arch}/koffi.node`,
