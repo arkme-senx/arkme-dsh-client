@@ -14,7 +14,7 @@ vi.mock('electron',async()=>{
   async loadURL(url:string){this.webContents.mainFrame.url=url;this.visible=false;await mocks.load(this)}
   destroy(){this.destroyed=true;this.emit('closed')}
  }
- return {app:{getName:()=>'即我',on:vi.fn()},systemPreferences:{getMediaAccessStatus:mocks.permission},shell:{openExternal:mocks.openSettings},BrowserWindow:Window,ipcMain:{handle:(k:string,v:Function)=>mocks.handlers.set(k,v)},desktopCapturer:{getSources:mocks.sources},dialog:{showSaveDialog:mocks.save,showMessageBox:mocks.guidance},
+ return {session:{fromPartition:()=>({setPermissionRequestHandler:()=>{},setPermissionCheckHandler:()=>{}})},app:{getName:()=>'即我',on:vi.fn()},systemPreferences:{getMediaAccessStatus:mocks.permission},shell:{openExternal:mocks.openSettings},BrowserWindow:Window,ipcMain:{handle:(k:string,v:Function)=>mocks.handlers.set(k,v)},desktopCapturer:{getSources:mocks.sources},dialog:{showSaveDialog:mocks.save,showMessageBox:mocks.guidance},
  clipboard:{writeImage:mocks.clipboard},nativeImage:{createFromBuffer:(bytes:Buffer)=>({isEmpty:()=>false,toPNG:()=>bytes})},screen:{on:(k:string,v:Function)=>mocks.displayEvents.set(k,v),
  dipToScreenRect:mocks.physicalBounds,getAllDisplays:()=>mocks.displays,getCursorScreenPoint:()=>({x:0,y:0}),getDisplayNearestPoint:()=>({id:10}),getDisplayMatching:()=>({id:10})}};
 });
@@ -407,20 +407,25 @@ it('destroys a reusable editor on account invalidation rather than retaining its
  expect(child.webContents.send).not.toHaveBeenCalled();
 });
 
-it.each(['complete','close'])('settles a reusable dual-screen capture after selection destroys the other native window (%s)',async action=>{
+it.each(['complete','close'])('reuses both dual-screen editors after selection hides the other native window (%s)',async action=>{
  mocks.displays.push({id:20,bounds:{x:0,y:0,width:1000,height:700},size:{width:1000,height:700},scaleFactor:2});
  mocks.sources.mockResolvedValue([10,20].map(id=>({display_id:String(id),thumbnail:{isEmpty:()=>false,getSize:()=>({width:1600,height:1200}),toPNG:()=>Buffer.from('frame')}})));
  await call('enable-standalone',event(owner),'reset-v1');await vi.advanceTimersByTimeAsync(100);
  const child=mocks.windows[1],other=mocks.windows[2],contents=other.webContents;
  Object.defineProperty(other,'webContents',{get(){if(other.destroyed)throw new Error('Object has been destroyed');return contents;}});
  const result=call('capture',event(owner),'selected-request');await vi.advanceTimersByTimeAsync(1);
- expect(call('select',event(child),'selected-request')).toBe(true);expect(other.destroyed).toBe(true);
+ expect(call('select',event(child),'selected-request')).toBe(true);expect(other.destroyed).toBe(false);expect(other.visible).toBe(false);
+ expect(call('context',event(other))).toBeNull();
+ expect(call('ready',event(other),'selected-request')).toBe(false);
+ expect(call('complete',event(other),png(),'selected-request')).toBe(false);
  if(action==='complete')expect(call('complete',event(child),png(),'selected-request')).toBe(true);
  else call('close',event(child),'selected-request');
  await expect(result).resolves.toMatchObject({status:action==='complete'?'captured':'cancelled'});
  expect(child.visible).toBe(false);
  const next=call('capture',event(owner),'next-selected');await vi.advanceTimersByTimeAsync(1);
  expect(call('ready',event(child),'selected-request')).toBe(false);
+ expect(call('context',event(other))).toHaveProperty('requestId','next-selected');
+ expect(mocks.windows).toHaveLength(3);expect(mocks.load).toHaveBeenCalledTimes(2);
  call('close',event(child),'next-selected');await expect(next).resolves.toEqual({status:'cancelled'});
 });
 
@@ -459,4 +464,35 @@ it('removes unfinished load tracing when a new capture is cancelled before loadi
  expect(contents.listenerCount('did-finish-load')).toBe(0);
  loaded();await vi.advanceTimersByTimeAsync(1);
  expect(child.destroyed).toBe(true);
+});
+
+it.each([true,false])('isolates standalone editor connections on warm and cold creation (warm=%s)',async warm=>{
+ await call('enable-standalone',event(owner),'reset-v1');
+ if(warm)await vi.advanceTimersByTimeAsync(100);
+ const result=call('capture',event(owner),'isolated');await vi.advanceTimersByTimeAsync(1);
+ const child=mocks.windows[1];
+ expect(child.options.webPreferences.session).not.toBe(owner.webContents.session);
+ call('close',event(child),'isolated');await result;
+});
+it('retires hidden peer editors on account invalidation',async()=>{
+ mocks.displays.push({id:20,bounds:{x:0,y:0,width:1000,height:700},size:{width:1000,height:700},scaleFactor:2});
+ mocks.sources.mockResolvedValue([10,20].map(id=>({display_id:String(id),thumbnail:{isEmpty:()=>false,getSize:()=>({width:1600,height:1200}),toPNG:()=>Buffer.from('frame')}})));
+ await call('enable-standalone',event(owner),'reset-v1');await vi.advanceTimersByTimeAsync(100);
+ const result=call('capture',event(owner),'invalidate-peers');await vi.advanceTimersByTimeAsync(1);
+ const child=mocks.windows[1],other=mocks.windows[2];
+ call('select',event(child),'invalidate-peers');expect(other.destroyed).toBe(false);
+ mocks.scope='different';await vi.advanceTimersByTimeAsync(250);await result;
+ expect(child.destroyed).toBe(true);expect(other.destroyed).toBe(true);
+});
+
+it('discards a crashed hidden peer without cancelling the selected editor',async()=>{
+ mocks.displays.push({id:20,bounds:{x:0,y:0,width:1000,height:700},size:{width:1000,height:700},scaleFactor:2});
+ mocks.sources.mockResolvedValue([10,20].map(id=>({display_id:String(id),thumbnail:{isEmpty:()=>false,getSize:()=>({width:1600,height:1200}),toPNG:()=>Buffer.from('frame')}})));
+ await call('enable-standalone',event(owner),'reset-v1');await vi.advanceTimersByTimeAsync(100);
+ const result=call('capture',event(owner),'peer-crash');await vi.advanceTimersByTimeAsync(1);
+ const child=mocks.windows[1],other=mocks.windows[2];
+ call('select',event(child),'peer-crash');other.webContents.emit('render-process-gone');
+ expect(other.destroyed).toBe(true);
+ expect(call('complete',event(child),png(),'peer-crash')).toBe(true);
+ await expect(result).resolves.toMatchObject({status:'captured'});
 });
