@@ -23,6 +23,7 @@ module.exports={
   extraResources:[...(build.extraResources||[]),
     {from:`.runtime/dsh-${arch}/node_modules`,to:'app.asar.unpacked/node_modules'}],
   async afterPack(context){
+    if(context.electronPlatformName==='darwin')require('./scripts/recorder-test-signing.cjs').installBoundedSigningWalk();
     await require('./scripts/ensure-app-update-config.cjs')(context);
     const resources=process.platform==='darwin'?path.join(context.appOutDir,'arkme Local Test.app','Contents','Resources'):path.join(context.appOutDir,'resources');
     const plugin=path.join(resources,'app.asar.unpacked','node_modules','@senguoyun','dsh-arkme');
