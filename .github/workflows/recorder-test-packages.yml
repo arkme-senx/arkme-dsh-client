@@ -33,6 +33,8 @@ jobs:
       ARKME_RUNTIME_ARCH: ${{ matrix.arch }}
       ARKME_RECORDER_PLUGIN_COMMIT: e935890dcb4aec70a3c2d638ce95d5039e0ad684
     steps:
+      - name: Preserve source bytes for checked helper manifests
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
         with:
           path: client
