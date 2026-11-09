@@ -14,6 +14,7 @@ export function notification({ env, phase, version, started, now = Date.now() })
   const label = { start: '🚀 开始构建', success: '✅ 发布成功', failure: '❌ 构建失败', cancelled: '⏹ 构建已取消' }[result] ?? 'ℹ️ 构建已结束（状态未知）'
   const statusLabel = phase === 'release' ? label.replaceAll('构建', '发布') : label
   const lines = [`arkme-dsh-client ${platform} ${statusLabel}`, `环境：${clean(env.ARKME_CI_ENV)}`, `分支：${clean(env.GITHUB_REF_NAME)}`]
+  lines.push(`构建创建人：${clean(env.ARKME_BUILD_CREATOR || env.GITHUB_ACTOR || '未知')}`)
   if (version?.version && version?.version_code) lines.push(`版本：${clean(version.version)} / vc${clean(version.version_code)}`)
   if (phase !== 'start' && Number.isFinite(started) && now >= started) {
     const seconds = Math.floor((now - started) / 1000)

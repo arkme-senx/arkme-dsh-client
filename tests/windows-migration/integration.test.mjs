@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { execFileSync, spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { patchInstallSection, patchShortcutMacros } from '../../scripts/windows-migration-policy.mjs';
+import { patchInstallSection, patchShortcutMacros, patchUninstallerDesktop } from '../../scripts/windows-migration-policy.mjs';
 const require = createRequire(import.meta.url);
 const builderRequire = createRequire(require.resolve('electron-builder'));
 const { nsisTemplatesDir } = builderRequire('app-builder-lib/out/targets/nsis/nsisUtil.js');
@@ -59,6 +59,11 @@ test.skipIf(process.platform !== 'win32' && !process.env.ARKME_TEST_PWSH)('Windo
  const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/transaction.ps1')],{encoding:'utf8'});
  expect(output).toContain('transaction tests passed');
 });
+test.skipIf(process.platform !== 'win32')('manual repair preserves ownership and downgrade checks when the launcher is missing', () => {
+ const shell = path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
+ const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/missing-launcher.ps1')],{encoding:'utf8'});
+ expect(output).toContain('Missing launcher safeguards passed.');
+}, 60_000);
 test.skipIf(process.platform !== 'win32')('real Windows short paths verify signed payloads without weakening path safety', () => {
  const shell = path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
  const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/short-path.ps1')],{encoding:'utf8'});
@@ -171,7 +176,7 @@ test('manual installer verifies final payload before retirement and durable comp
 
  test('shared Flutter preservation guards stock shortcut writers and final AUMID writes', () => {
  const patched=patchInstallSection(readFileSync(path.join(nsisTemplatesDir,'installSection.nsh'),'utf8'));
- expect(patched).toContain('${If} $JiwoPreserveShortcuts != "1"\n!insertmacro addStartMenuLink $keepShortcuts\n!insertmacro addDesktopLink $keepShortcuts\n${EndIf}');
+ expect(patched).toContain('${If} $JiwoPreserveShortcuts != "1"\n${AndIf} $JiwoPreserveAndrowsDesktop != "1"\n!insertmacro addStartMenuLink $keepShortcuts\n!insertmacro addDesktopLink $keepShortcuts\n${EndIf}');
  const hooks=readFileSync('build/windows-migration.nsh','utf8');
  expect(hooks).toContain('${If} $JiwoPreserveShortcuts != "1"\n  ${If} ${FileExists} "$newStartMenuLink"');
  expect(hooks).toContain('ShortcutName "$oldShortcutName"');
@@ -227,4 +232,14 @@ test('migration abort callback composes with MUI instead of redefining its callb
  const fixture=readFileSync('scripts/windows-migration-compile-smoke.mjs','utf8');
  expect(fixture).toContain('!insertmacro MUI_PAGE_INSTFILES');
  expect(fixture).toContain('!insertmacro MUI_LANGUAGE "English"');
+});
+
+test('Androws updates select the transaction before invoking an older uninstaller', () => {
+ const section=patchInstallSection(readFileSync(path.join(nsisTemplatesDir,'installSection.nsh'),'utf8'));
+ const route=section.indexOf('${If} $JiwoPreserveAndrowsDesktop == "1"\n    StrCpy $JiwoNativeUpdate "0"');
+ expect(route).toBeGreaterThan(section.indexOf('!insertmacro windowsMigrationRun UpdateCheck'));
+ expect(route).toBeLessThan(section.indexOf('!insertmacro uninstallOldVersion SHELL_CONTEXT'));
+ const uninstall=patchUninstallerDesktop(readFileSync(path.join(nsisTemplatesDir,'uninstaller.nsh'),'utf8'));
+ expect(uninstall).toContain('!insertmacro windowsMigrationRemoveOwnedDesktopLink');
+ expect(uninstall).not.toContain('Delete "$oldDesktopLink"');
 });

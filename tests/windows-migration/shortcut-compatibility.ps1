@@ -23,5 +23,11 @@ try {
  Remove-Item (Join-Path $root 'flutter_windows.dll'); Must-Fail {Get-ShortcutCompatibility $location $link}
  $link.Target=Join-Path $root 'other.exe'; Must-Fail {Get-ShortcutCompatibility $location $link}
  $link.Target='\\unknown\share\jotmo.exe'; Must-Fail {Get-ShortcutCompatibility $location $link}
+ $desktop=@{Role='Desktop';Canonical=$true}
+ $androws=@{Exists=$true;Target=(Join-Path ${env:ProgramFiles(x86)} 'Tencent\Androws\Application\AndrowsLauncher.exe');Arguments='--from "2" --launch-pkg-name "com.senqisi.jotmo" --launch-proc-name "Androws.exe"'}
+ if (!(Test-AndrowsDesktop $desktop $androws)) { throw 'Observed Android shortcut must be preserved' }
+ if (Test-AndrowsDesktop $location $androws) { throw 'Start menu must not inherit the desktop exception' }
+ $androws.Arguments+=' --extra'
+ if (Test-AndrowsDesktop $desktop $androws) { throw 'Unexpected launcher arguments accepted' }
  Write-Output 'Shortcut compatibility fixtures passed'
 } finally {Remove-Item -LiteralPath $root -Recurse -Force}

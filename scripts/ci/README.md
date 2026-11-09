@@ -46,7 +46,7 @@ macOS、Windows 每个 matrix job 在检出源码后发送开始通知，仅在�
 最终通知覆盖常规失败和取消；源码检出失败、runner 失联、强制终止可能无法发送，
 应以 Actions 页面为准。脚本不输出凭据、请求体、响应正文或原始网络错误。
 
-本地协议测试：`node --test tests/ci-notify.test.mjs`。真实发送需配置上述 Secret，
+本地协议测试：`pnpm exec vitest run tests/ci-notify.test.mjs`。真实发送需配置上述 Secret，
 未配置时不向 Hook 发送请求。
 
 ### 首次构建前失败的重跑
@@ -64,3 +64,7 @@ reserve 失败或恢复步骤自身失败、此前从未开始产物生成的同
 先部署支持 target_version 的后端，再合入新 Action。旧 Action 不带该字段时保留旧分配规则；新 Action 校验返回版本，不接受旧后端静默升版。构建成功后继续回写源码。新提交若仍使用同一源码版本会算出相同目标；已上传 OSS 对象禁止不同内容覆盖，此时需要显式提高 package.json 版本或恢复原批次。
 
 Windows CI 只生成并上传签名 NSIS EXE、EXE blockmap、latest.yml 和发布清单，不再生成或上传 ZIP。macOS ZIP 仍用于应用内更新。后端需先部署允许 Windows 无 ZIP 的校验变更，再合入客户端工作流；历史 ZIP 不删除，旧清单仍兼容。
+
+### 正式发布后同步 dev
+
+后端确认 master 批次已发布后，sync-dev 用普通 merge PR 将该批次的版本回写提交合回 dev；pre-release 不参与。同步不会覆盖 dev 在构建期间新增的提交，也不会带入 master 上尚未发布的后续改动。仓库须允许 Actions 创建 PR、使用 merge commit。遇到冲突或保护规则时查看同步 PR，保留双方历史解决后用 merge commit 合并，勿 squash。可重跑原工作流，已包含该发布提交则跳过。
