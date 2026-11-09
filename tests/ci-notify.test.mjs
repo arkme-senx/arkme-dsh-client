@@ -18,6 +18,15 @@ test('release success requires publication success; failures never claim uploade
   }
 })
 
+test('every notification shows the original creator immediately after the branch', () => {
+  const source = { GITHUB_REF_NAME: 'master', ARKME_BUILD_CREATOR: 'imanai666', GITHUB_ACTOR: 'push-account', GITHUB_TRIGGERING_ACTOR: 'rerun-account' }
+  for (const [phase, result] of [['start', 'start'], ['finish', 'failure'], ['finish', 'cancelled'], ['release', 'success']]) {
+    const { message } = make({ ...source, ARKME_BUILD_RESULT: result }, phase)
+    assert.ok(message.includes('分支：master\n构建创建人：imanai666\n'))
+  }
+  assert.ok(make({ ...source, ARKME_BUILD_CREATOR: '' }).message.includes('构建创建人：push-account\n'))
+})
+
 test('deduplication isolates platforms, phases and run attempts', () => {
   const ids = [make(), make({ ARKME_BUILD_PLATFORM: 'windows' }), make({}, 'start'), make({ GITHUB_RUN_ATTEMPT: '2' })].map(p => p.external_message_id)
   assert.equal(new Set(ids).size, 4)
