@@ -1010,3 +1010,17 @@ contextBridge.exposeInMainWorld('arkmeScreenshotShortcut', Object.freeze({
  onChanged:(listener:(value:unknown)=>void)=>{const handler=(_event:Electron.IpcRendererEvent,value:unknown)=>listener(value);ipcRenderer.on('arkme-screenshot:shortcut-changed',handler);return ()=>ipcRenderer.removeListener('arkme-screenshot:shortcut-changed',handler);},
  onTrigger:(listener:()=>void)=>{const handler=()=>listener();ipcRenderer.on('arkme-screenshot:shortcut-trigger',handler);return ()=>ipcRenderer.removeListener('arkme-screenshot:shortcut-trigger',handler);}
 }));
+
+if (window.top === window && (process.platform === 'darwin' || process.platform === 'win32')) {
+  contextBridge.exposeInMainWorld('arkmeCallWindow', {
+    sync: (id: string, basePath: string, visible: boolean, compact: boolean, fullscreen: boolean, error: string) =>
+      ipcRenderer.send('arkme-call:sync', id, basePath, visible, compact, fullscreen, error),
+    release: (id: string) => ipcRenderer.send('arkme-call:release', id),
+    command: (id: string, type: string, payload: unknown) => ipcRenderer.send('arkme-call:command', id, type, payload),
+    listen: (callback: (id: string, event: string, value: string) => void) => {
+      const listener = (_: Electron.IpcRendererEvent, id: string, event: string, value: string) => callback(id, event, value);
+      ipcRenderer.on('arkme-call:event', listener);
+      return () => { ipcRenderer.removeListener('arkme-call:event', listener); };
+    }
+  });
+}

@@ -1,3 +1,4 @@
+import { installCallWindow } from './call-window.js';
 import { isOptionalExtensionProfileFailure } from "./optional-extension-recovery.js";
 import { profileCoreRecoveryKey } from "./profile-core-compatibility.js";
 import { DesktopDeviceLockOwner } from "./device-lock-owner.js";
@@ -1667,6 +1668,12 @@ registerDesktopBrandingIpc<Electron.IpcMainInvokeEvent | Electron.IpcMainEvent>(
   return isCurrentHarnessSender(sender.webContentsId, sender.url) || (!write && sender.url.split("?")[0] === statusPageUrl);
 }, error => { logDiagnostic("desktop-branding-failed", error); });
 
+const callWindow = installCallWindow({
+  main: () => mainWindow,
+  origin: () => activeHarnessOrigin,
+  preload: path.join(path.dirname(resolveArkmePreloadPath(moduleDirectory, app.isPackaged, process.resourcesPath)), 'call-preload.cjs'),
+});
+
 const conversationWindows = installConversationWindowIpc({
   main: () => mainWindow,
   origin: () => activeHarnessOrigin,
@@ -1856,6 +1863,9 @@ function createMainWindow(): void {
 
   lockWindowTitle(mainWindow, appName);
   mainWindow.on('close', event => { if (!conversationQuitPrepared) { event.preventDefault(); app.quit(); } });
+  mainWindow.on('closed', () => callWindow.dispose());
+  mainWindow.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) callWindow.dispose(); });
+  mainWindow.webContents.on('render-process-gone', () => callWindow.dispose());
   mainWindow.on('closed', () => conversationWindows.closeAll());
   mainWindow.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) conversationWindows.closeAll(); });
   mainWindow.webContents.on('render-process-gone', () => conversationWindows.closeAll());
