@@ -232,3 +232,22 @@ jobs:
           ARKME_BUILD_RESULT: ${{ job.status }}
           ARKME_RELEASE_RESULT: ${{ steps.release.outcome }}
         run: node scripts/ci/notify.mjs release
+  sync-dev:
+    needs: [reserve, publish]
+    if: >-
+      !cancelled() && github.ref == 'refs/heads/master' &&
+      needs.reserve.result == 'success' &&
+      (needs.publish.result == 'success' || needs.reserve.outputs.published == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: 将已发布的版本回写提交合并回 dev
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_BATCH: ${{ needs.reserve.outputs.batch }}
+        run: bash scripts/ci/sync-release-dev.sh
