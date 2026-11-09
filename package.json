@@ -94,6 +94,7 @@
       "dist/preload.cjs",
       "dist/windows-update-admission.ps1",
       "dist/screenshot-preload.cjs",
+      "dist/call-preload.cjs",
       "dist/harness-process-lifetime.js",
       "dist/harness-core-dependencies.js",
       "node_modules/@arkme/macos-notification-permission/build/Release/*.node",
