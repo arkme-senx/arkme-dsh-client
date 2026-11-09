@@ -48,6 +48,7 @@ async function createHarness(overrides: {
   coreDependencyPolicy?: {modulePath: string};
   dshBinPath?: string;
   realAuthentication?: boolean;
+  validateRecoveredPage?: (session: import("../src/harness-auth-session.js").HarnessAuthSession) => Promise<void>;
   onAuthenticated?: (session: import("../src/harness-auth-session.js").HarnessAuthSession) => Promise<void>;
   health?: (context: { spawnCount: number; children: FakeChild[] }) => Promise<boolean>;
   apiReady?: () => Promise<boolean>;
@@ -92,6 +93,7 @@ async function createHarness(overrides: {
   const supervisor = new HarnessProcessSupervisor(
     {
       ...(overrides.startupTimeoutMs === undefined ? {} : {startupTimeoutMs: overrides.startupTimeoutMs}),
+      ...(overrides.validateRecoveredPage && {validateRecoveredPage: overrides.validateRecoveredPage}),
       ...(overrides.onAuthenticated === undefined ? {} : {onAuthenticated: overrides.onAuthenticated}),
       ...(overrides.coreDependencyPolicy === undefined ? {} : {coreDependencyPolicy: overrides.coreDependencyPolicy}),
       execPath: "/Applications/arkme.app/Contents/MacOS/arkme",
@@ -890,6 +892,49 @@ describe("HarnessProcessSupervisor", () => {
     expect(spawn).toHaveBeenCalledTimes(2);
     expect(states.some((state) => state.kind === "failed")).toBe(false);
     expect(states.at(-1)).toMatchObject({ kind: "ready" });
+  });
+
+  test.each([true, false])("ordinary Web activation failure targets the named bundle and verifies the retry (healthy=%s)", async healthy => {
+    let session!: import("../src/harness-auth-session.js").HarnessAuthSession;
+    const validation = vi.fn(async () => { if (!healthy) throw new Error("retry Web boot failed"); });
+    const harness = await createHarness({
+      optionalExtensionRecovery: {environment: "test"},
+      onAuthenticated: async authenticated => { session = authenticated; },
+      validateRecoveredPage: validation
+    });
+    const profile = await writeBrokenOptionalExtensionProfile(harness.dshHome);
+    const plugin = "@local/arkme-arrangement-line";
+    const manifest = JSON.parse(profile.originalText);
+    manifest.dependencies[plugin] = "file:../arrangement";
+    manifest.dsh.profile.bundles.push(plugin);
+    const original = JSON.stringify(manifest);
+    await writeFile(profile.profilePath, original);
+    await harness.supervisor.start(harness.root);
+    const header = "web boot: 1 entry did not activate\n";
+    for (const name of ["@deepseek-ai/dsh-base", "@local/unknown", "@senguoyun/dsh-arkme"]) {
+      await harness.supervisor.recoverWebBootFailure(session, header + name + ": loading");
+    }
+    expect(harness.spawn).toHaveBeenCalledTimes(1);
+    const previous = session;
+    const recovery = harness.supervisor.recoverWebBootFailure(previous, header + plugin + ": loading");
+    await harness.supervisor.recoverWebBootFailure(previous, header + plugin + ": loading");
+    if (healthy) await recovery;
+    else await expect(recovery).rejects.toThrow("retry Web boot failed");
+    expect(validation).toHaveBeenCalledOnce();
+    expect(harness.spawn).toHaveBeenCalledTimes(2);
+    const current = await readFile(profile.profilePath, "utf8");
+    if (healthy) {
+      expect(JSON.parse(current).dsh.profile.bundles).toEqual(manifest.dsh.profile.bundles.slice(0, -1));
+      expect(JSON.parse(current).dependencies).toEqual(manifest.dependencies);
+    } else expect(current).toBe(original);
+    const directory = path.join(harness.dshHome, "arkme-self", "desktop-extension-quarantine");
+    const receipts = await readdir(directory);
+    expect(receipts).toHaveLength(1);
+    expect(JSON.parse(await readFile(path.join(directory, receipts[0]!, "receipt.json"), "utf8"))).toMatchObject({
+      phase: healthy ? "active" : "restored", source: "web-activation", entries: [{packageName: plugin}]
+    });
+    expect(harness.states.at(-1)?.kind).toBe(healthy ? "ready" : "failed");
+    await harness.supervisor.stop("quit");
   });
 
   test("quarantines one optional extension and retries the same Harness once", async () => {

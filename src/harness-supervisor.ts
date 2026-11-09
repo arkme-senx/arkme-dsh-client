@@ -1,3 +1,4 @@
+import { activationFailurePackages } from "./web-boot-failure.js";
 import { incompatibleProfileCorePackages } from "./profile-core-compatibility.js";
 import { clearExitedHarnessProcessReceipt, writeHarnessProcessReceipt } from "./harness-process-lifetime.js";
 import { pathToFileURL } from "node:url";
@@ -15,6 +16,7 @@ import { allocateLoopbackPort } from "./port.js";
 import { prepareManagedRestartPlan } from "./managed-restart-plan.js";
 import {
   activateOptionalExtensionRecovery,
+  areEnabledOptionalExtensions,
   enforceActiveOptionalExtensionRecoveries,
   extendPreflightOptionalExtensionRecovery,
   OptionalExtensionRecoveryFailure,
@@ -82,6 +84,7 @@ interface SupervisorConfig {
   startupTimeoutMs?: number;
   coreDependencyPolicy?: {modulePath: string};
   processGuard?: {modulePath: string; receiptPath: string};
+  validateRecoveredPage?: (session: HarnessAuthSession) => Promise<void>;
   onAuthenticated?: (session: HarnessAuthSession) => Promise<void>;
   execPath: string;
   dshBinPath: string;
@@ -226,10 +229,39 @@ export class HarnessProcessSupervisor {
     finally { if (this.startupAbort === abort) this.startupAbort = null; }
   }
 
+  async recoverWebBootFailure(session: HarnessAuthSession, message: string): Promise<void> {
+    const running = this.current;
+    const packages = activationFailurePackages(message);
+    if (!packages || !running || running.auth !== session || session.signal.aborted ||
+        this.state?.kind !== "ready" || !this.config.optionalExtensionRecovery || this.startupAbort) return;
+    const abort = new AbortController();
+    this.startupAbort = abort;
+    try {
+      if (!await areEnabledOptionalExtensions(this.config.dshHome, packages)) return;
+      abort.signal.throwIfAborted();
+      if (running !== this.current || session.signal.aborted) return;
+      this.emit({kind: "stopping", workspacePath: running.workspacePath});
+      try {
+        await this.stopRunningProcess(running, true);
+      } catch (error) {
+        if (!abort.signal.aborted) this.emit({
+          kind: "failed", workspacePath: running.workspacePath, logPath: this.config.logPath,
+          message: this.failureMessage(error, "")
+        });
+        throw error;
+      }
+      abort.signal.throwIfAborted();
+      await this.startInternal(running.workspacePath, {}, abort.signal, {message, packages});
+    } finally {
+      if (this.startupAbort === abort) this.startupAbort = null;
+    }
+  }
+
   private async startInternal(
     workspacePath: string,
     options: StartOptions,
-    signal = new AbortController().signal
+    signal = new AbortController().signal,
+    webFailure?: {message: string; packages: string[]}
   ): Promise<void> {
     options = { ...options, timeoutMs: options.timeoutMs ?? this.config.startupTimeoutMs ?? DEFAULT_START_TIMEOUT_MS };
     let optionalRecovery: OptionalExtensionRecoveryTransaction | undefined;
@@ -254,6 +286,17 @@ export class HarnessProcessSupervisor {
       optionalRecovery = this.config.optionalExtensionRecovery === undefined
         ? undefined
         : await loadPendingOptionalExtensionRecovery(this.config.optionalExtensionRecovery);
+      if (webFailure && this.config.optionalExtensionRecovery) {
+        if (optionalRecovery) throw new Error(webFailure.message);
+        optionalRecovery = await prepareOptionalExtensionRecovery({
+          ...this.config.optionalExtensionRecovery, source: "web-activation",
+          failedWebPackages: webFailure.packages, failureText: webFailure.message
+        });
+        if (!optionalRecovery) throw new Error(webFailure.message);
+        await this.recordSupervisorLifecycle("optional-extension-recovery-quarantined", {
+          quarantineId: optionalRecovery.receipt.quarantineId, packages: webFailure.packages
+        });
+      }
       if (optionalRecovery === undefined && this.config.optionalExtensionRecovery !== undefined
         && this.config.coreDependencyPolicy !== undefined) {
         const packages = await incompatibleProfileCorePackages(this.config.dshHome, this.config.dshBinPath);
@@ -349,6 +392,10 @@ export class HarnessProcessSupervisor {
           options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
           signal
         );
+        if (optionalRecovery?.receipt.source === "web-activation") {
+          if (!launched.running.auth || !this.config.validateRecoveredPage) throw new Error("Harness Web recovery validation unavailable");
+          await this.config.validateRecoveredPage(launched.running.auth);
+        }
         this.assertRunningBeforeReady(launched.running);
       } catch (error) {
         await this.stopRunningProcess(launched.running, false);

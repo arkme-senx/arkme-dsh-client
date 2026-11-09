@@ -45,7 +45,7 @@ export interface DesktopExtensionQuarantineReceipt {
   failureSummary: string;
   failureLogTail: string;
   entries: DesktopExtensionQuarantineEntry[];
-  source?: "core-preflight";
+  source?: "core-preflight" | "web-activation";
   runtimeRetryAttempted?: true;
 }
 
@@ -58,7 +58,8 @@ export interface OptionalExtensionRecoveryConfig {
 export interface PrepareOptionalExtensionRecoveryInput extends OptionalExtensionRecoveryConfig {
   failureText: string;
   incompatiblePackages?: string[];
-  source?: "core-preflight";
+  failedWebPackages?: string[];
+  source?: "core-preflight" | "web-activation";
 }
 
 export interface OptionalExtensionRecoveryTransaction {
@@ -85,9 +86,10 @@ export async function prepareOptionalExtensionRecovery(
   const profilePath = profileManifestPath(input.dshHome);
   const originalText = await readFile(profilePath, "utf8");
   const parsed = parseProfile(originalText, path.dirname(profilePath));
-  const selection = input.incompatiblePackages === undefined
+  const targets = input.failedWebPackages ?? input.incompatiblePackages;
+  const selection = targets === undefined
     ? selectCandidates(parsed.candidates, input.failureText)
-    : selectIncompatibleCandidates(parsed.candidates, input.incompatiblePackages);
+    : selectTargetCandidates(parsed.candidates, targets);
   if (selection === undefined) return undefined;
 
   const now = Date.now();
@@ -336,7 +338,13 @@ export async function enforceActiveOptionalExtensionRecoveries(
   return removed;
 }
 
-function selectIncompatibleCandidates(candidates: ProfileCandidate[], names: string[]): {mode: "targeted"; entries: ProfileCandidate[]} | undefined {
+export async function areEnabledOptionalExtensions(dshHome: string, names: string[]): Promise<boolean> {
+  const file = profileManifestPath(dshHome);
+  const profile = parseProfile(await readFile(file, "utf8"), path.dirname(file));
+  return selectTargetCandidates(profile.candidates, names) !== undefined;
+}
+
+function selectTargetCandidates(candidates: ProfileCandidate[], names: string[]): {mode: "targeted"; entries: ProfileCandidate[]} | undefined {
   const requested = new Set(names);
   const entries = candidates.filter(candidate => requested.has(candidate.packageName));
   // Preflight must never turn an unknown/protected package into a broad safe mode.
@@ -444,7 +452,7 @@ function parseReceipt(text: string): DesktopExtensionQuarantineReceipt {
   }
   return {
     schemaVersion: 1,
-    ...(value.source === "core-preflight" ? {source: "core-preflight" as const} : {}),
+    ...(value.source === "core-preflight" || value.source === "web-activation" ? {source: value.source} : {}),
     ...(value.runtimeRetryAttempted === true ? {runtimeRetryAttempted: true as const} : {}),
     quarantineId: value.quarantineId,
     environment: value.environment,
