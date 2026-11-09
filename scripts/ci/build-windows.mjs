@@ -1,3 +1,4 @@
+import './log-packaging-http.cjs';
 // Preserve production migration hooks; test identity must never run production migration.
 if(process.env.ARKME_CI_ENV==='prod')await import('../build-windows-artifacts.mjs');
 else if(process.env.ARKME_CI_ENV==='test'){
