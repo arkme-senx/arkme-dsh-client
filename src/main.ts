@@ -1,4 +1,5 @@
 import { installCallWindow } from './call-window.js';
+import { activationFailurePackages, observeWebBootFailure } from "./web-boot-failure.js";
 import { isOptionalExtensionProfileFailure } from "./optional-extension-recovery.js";
 import { profileCoreRecoveryKey } from "./profile-core-compatibility.js";
 import { DesktopDeviceLockOwner } from "./device-lock-owner.js";
@@ -272,6 +273,8 @@ let runtimeResetInProgress = false;
 let runtimeFailureVisible = false;
 let runtimeRecoveryRequired = false;
 let bufferedHarnessReadyState: Extract<HarnessState, {kind: "ready"}> | null = null;
+const reportedWebBootFailures = new WeakSet<HarnessAuthSession>();
+let webBootSupervisor: HarnessProcessSupervisor | null = null;
 let controller: DesktopController | null = null;
 let conversationQuitPrepared = false;
 let activeHarnessOrigin: string | null = null;
@@ -1377,6 +1380,7 @@ async function initializeHarnessRuntime(
       paths.dshHome,
       runtime.release?.releaseId
     ),
+    validateRecoveredPage: authenticated => validateCandidateHarnessPage(runtime, authenticated, true),
     optionalExtensionRecovery: {
       dshHome: paths.dshHome,
       environment: runtimeEnvironment,
@@ -1386,6 +1390,7 @@ async function initializeHarnessRuntime(
     ...(directoryPickerBridge === null ? {} : { directoryPickerBridge }),
     ...(desktopCapabilityBridge === null ? {} : { desktopCapabilityBridge })
   });
+  webBootSupervisor = supervisor;
   controller = new DesktopController(supervisor, {
     chooseWorkspace,
     ensureDefaultWorkspace: () => ensureDefaultWorkspace(paths.userDataPath),
@@ -1410,7 +1415,7 @@ async function releaseCandidateHarnessNavigation(): Promise<void> {
   }
 }
 
-async function validateCandidateHarnessPage(runtime: LaunchRuntime, authenticated: HarnessAuthSession): Promise<void> {
+async function validateCandidateHarnessPage(runtime: LaunchRuntime, authenticated: HarnessAuthSession, recoveringWebBoot = false): Promise<void> {
   const pkg = JSON.parse(await readFile(path.join(runtime.arkmePluginPath, "package.json"), "utf8")) as {
     arkme?: {desktopHarnessReady?: {version?: unknown}}
   };
@@ -1466,6 +1471,12 @@ async function validateCandidateHarnessPage(runtime: LaunchRuntime, authenticate
       trial.webContents.id, authenticated.url, activeAccountScope, false
     )) throw new Error("DSH trial session selection was superseded");
     await Promise.all([trial.loadURL(authenticated.url), probe.ready]);
+    if (recoveringWebBoot) {
+      const failure: unknown = await trial.webContents.executeJavaScriptInIsolatedWorld(1001, [
+        {code: `(${observeWebBootFailure.toString()})(true)`}
+      ]);
+      if (typeof failure === "string") throw new Error(failure);
+    }
     const verifiedGeneration = documentGeneration;
     await settleHarnessPageRendering(script => trial.webContents.executeJavaScript(script), trialSignal);
     if (documentGeneration !== verifiedGeneration) throw new Error("Harness page changed during validation");
@@ -1964,6 +1975,24 @@ function installNavigationPolicy(window: BrowserWindow): void {
   });
 }
 
+async function monitorWebBoot(window: BrowserWindow, session: HarnessAuthSession): Promise<void> {
+  const supervisor = webBootSupervisor;
+  const frame = window.webContents.mainFrame;
+  const scope = activeAccountScope;
+  if (new URL(frame.url).origin !== new URL(session.url).origin) return;
+  const message: unknown = await window.webContents.executeJavaScriptInIsolatedWorld(1001, [
+    {code: `(${observeWebBootFailure.toString()})()`}
+  ]);
+  if (typeof message !== "string" || !activationFailurePackages(message) ||
+      session !== harnessAuthSession || session.signal.aborted || scope?.dshHome !== activeAccountScope?.dshHome ||
+      window.isDestroyed() || frame !== window.webContents.mainFrame || supervisor !== webBootSupervisor ||
+      reportedWebBootFailures.has(session)) return;
+  reportedWebBootFailures.add(session);
+  startupDiagnostics.begin("plugin-load");
+  startupDiagnostics.fail(message);
+  await supervisor?.recoverWebBootFailure(session, message);
+}
+
 async function renderState(state: HarnessState | RuntimeInstallProgress): Promise<void> {
   if (state.kind === "starting") startupDiagnostics.starting();
   if (state.kind === "stopping") startupDiagnostics.cancel();
@@ -2001,6 +2030,9 @@ async function renderState(state: HarnessState | RuntimeInstallProgress): Promis
     await window.loadURL(intent === undefined ? state.url : createExtensionShareHarnessUrl(state.url, intent));
     if (intent !== undefined) deepLinks.markDelivered(intent);
     startupDiagnostics.cancel();
+    if (authenticated && !authenticated.signal.aborted) {
+      void monitorWebBoot(window, authenticated).catch(error => logDiagnostic("web-boot-observer-failed", error));
+    }
   } else if (state.kind === "runtime-installing" && renderRuntimeProgressPage !== null) {
     desktopSessionSelection.invalidate();
     activeHarnessOrigin = null;
