@@ -1,3 +1,4 @@
+import { focusWindowsUpdateWindow } from "./windows-update-window.js";
 import { installCallWindow } from './call-window.js';
 import { activationFailurePackages, observeWebBootFailure } from "./web-boot-failure.js";
 import { isOptionalExtensionProfileFailure } from "./optional-extension-recovery.js";
@@ -597,7 +598,12 @@ ipcMain.on("arkme-runtime:harness-version", event => {
   event.returnValue = activeHarnessVersion ?? null;
 });
 
-const hasSingleInstanceLock = app.requestSingleInstanceLock();
+let installingUpdate = false;
+if (process.platform === "win32" && app.isPackaged && appIdentity.appId === "cc.jiwo.arkme") {
+  try { installingUpdate = focusWindowsUpdateWindow(); }
+  catch (error) { logDiagnostic("update-window-detection-failed", error); }
+}
+const hasSingleInstanceLock = !installingUpdate && app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {

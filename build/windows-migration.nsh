@@ -22,12 +22,19 @@ Var JiwoFailureContext
 Var JiwoMigrationCommitted
 !endif
 
+!ifdef JIWO_VISIBLE_UPDATE_INCLUDE
+!include "${JIWO_VISIBLE_UPDATE_INCLUDE}"
+!endif
+
 !macro customInit
   StrCpy $JiwoMigrationCancelled "0"
   StrCpy $JiwoMigrationCommitted "0"
   StrCpy $JiwoNativeUpdate "0"
   ${If} ${isUpdated}
     StrCpy $JiwoNativeUpdate "1"
+    !ifmacrodef jiwoShowUpdateProgress
+      !insertmacro jiwoShowUpdateProgress
+    !endif
   ${Else}
     !insertmacro windowsMigrationResolveInstallMode
   ${EndIf}
@@ -131,6 +138,11 @@ Var JiwoMigrationCommitted
 !macroend
 
 !macro windowsMigrationInstallMode
+  !ifdef JIWO_VISIBLE_UPDATE_INCLUDE
+    ${If} $JiwoVisibleUpdate == "1"
+      Abort
+    ${EndIf}
+  !endif
   ${If} $JiwoMigrationKeepMachine == "1"
     !insertmacro setInstallModePerAllUsers
     Abort
@@ -163,7 +175,13 @@ Var JiwoMigrationCommitted
     DetailPrint "安装脚本未返回错误文件（可能未能启动）。请检查系统拦截记录。"
     StrCpy $JiwoFailureText "$JiwoFailureText安装脚本未返回错误文件（可能未能启动）。请检查系统拦截记录。"
   ${EndIf}
+  !ifdef JIWO_VISIBLE_UPDATE_INCLUDE
+    ${If} $JiwoVisibleUpdate != "1"
+  !endif
   MessageBox MB_OK|MB_ICONSTOP "$JiwoFailureText" /SD IDOK
+  !ifdef JIWO_VISIBLE_UPDATE_INCLUDE
+    ${EndIf}
+  !endif
 !macroend
 
 !macro windowsMigrationRun ACTION
@@ -260,6 +278,9 @@ Var JiwoMigrationCommitted
 
 !macro customHeader
 !ifndef BUILD_UNINSTALLER
+!ifmacrodef jiwoUpdateFunctions
+  !insertmacro jiwoUpdateFunctions
+!endif
 Function JiwoMigrationOnUserAbort
   StrCpy $JiwoMigrationCancelled "1"
 FunctionEnd
@@ -292,6 +313,11 @@ Function .onInstFailed
     ${EndIf}
     SetErrorLevel 1
   ${EndIf}
+  !ifdef JIWO_VISIBLE_UPDATE_INCLUDE
+    ${If} $JiwoMigrationCancelled != "1"
+      Call JiwoUpdateFailureActions
+    ${EndIf}
+  !endif
 FunctionEnd
 !endif
 !macroend
