@@ -975,7 +975,29 @@ function Get-OverlayEntries([string]$Stage, [string]$UninstallerName) {
     [pscustomobject]@{ Path=$relative; Existed=$exists; Hash=$(if ($exists) {(Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash} else {''}); NewHash=(Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash; NewSize=(Get-Item -LiteralPath $source).Length }
   }
 }
-function Assert-ElectronDestination {
+# A manual per-user installer can restore a missing launcher. Require independent
+# ownership evidence before allowing an overlay on any remaining program files.
+function Get-RepairWitness($UninstallKey,[string]$OldVersion,[long]$OldCode) {
+  $dir=Assert-LocalPath $Destination
+  $uninstaller=Join-Path $dir 'Uninstall arkme.exe'
+  if (!(Test-PathWithin $dir ([Environment]::GetFolderPath('UserProfile'))) -or
+      $OldVersion -notmatch '^3\.\d+\.\d+$' -or $OldCode -le 0 -or
+      [string]$UninstallKey.GetValue('DisplayName') -cne ('即我 '+$OldVersion) -or
+      [string]$UninstallKey.GetValue('UninstallString') -ine ('"'+$uninstaller+'" /currentuser')) {
+    throw 'Incomplete Arkme registration; cannot verify the damaged installation.'
+  }
+  if (!(Test-Path -LiteralPath $dir) -or
+      ((Test-Path -LiteralPath $dir -PathType Container) -and !(Get-ChildItem -LiteralPath $dir -Force | Select-Object -First 1))) {
+    return # Empty destination: apply the existing fresh-install collision checks.
+  }
+  Assert-Publisher $uninstaller
+  $info=[Diagnostics.FileVersionInfo]::GetVersionInfo($uninstaller)
+  if ($info.ProductName -cne '即我' -or $info.FileVersion -ne $OldVersion) {
+    throw 'The signed uninstaller does not match the registered Arkme release.'
+  }
+  return $info
+}
+function Assert-ElectronDestination([switch]$AllowManualRepair) {
   $found = $false
   $expectedHive = if ($Scope -eq 'all') { 'LocalMachine' } else { 'CurrentUser' }
   foreach ($hive in @('CurrentUser','LocalMachine')) {
@@ -986,17 +1008,21 @@ function Assert-ElectronDestination {
         try {
           if ($hive -ne $expectedHive -or [string]$key.GetValue('InstallLocation') -ine $Destination) { throw 'Existing Arkme installation must keep its original scope and directory.' }
           if ([string]$key.GetValue('ShortcutName') -notin @('arkme','即我') -or [string]$key.GetValue('MenuDirectory') -ne '') { throw 'Unknown existing Arkme shortcut layout.' }
-          Assert-Publisher (Join-Path $Destination 'arkme.exe')
+          $launcher=Join-Path $Destination 'arkme.exe'
+          $repair=$AllowManualRepair -and $Scope -eq 'current' -and !(Test-Path -LiteralPath $launcher)
+          if (!$repair) { Assert-Publisher $launcher }
           $uninstallKey=$base.OpenSubKey($ElectronKeys[1])
           if (!$uninstallKey) { throw 'Incomplete existing Arkme registration.' }
           try {
             $oldCode=[long]$uninstallKey.GetValue('JiwoVersionCode',0)
-            $fileVersion=[Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $Destination 'arkme.exe'))
-            $oldCode=[Math]::Max($oldCode,[long]$fileVersion.FilePrivatePart)
+            $oldVersion=[string]$uninstallKey.GetValue('DisplayVersion')
+            $fileVersion=if ($repair) { Get-RepairWitness $uninstallKey $oldVersion $oldCode }
+                         else { [Diagnostics.FileVersionInfo]::GetVersionInfo($launcher) }
+            if ($fileVersion) { $oldCode=[Math]::Max($oldCode,[long]$fileVersion.FilePrivatePart) }
             $incoming=Get-ReleaseManifest
-            Assert-UpgradeAllowed ([string]$uninstallKey.GetValue('DisplayVersion')) $oldCode $incoming.version $incoming.versionCode
+            Assert-UpgradeAllowed $oldVersion $oldCode $incoming.version $incoming.versionCode
           } finally { $uninstallKey.Dispose() }
-          $found = $true
+          $found = $null -ne $fileVersion
         } finally { $key.Dispose() }
       }
     } finally { $base.Dispose() }
@@ -1028,7 +1054,7 @@ function Select-OverlayEntries($Entries,[bool]$RegularUpdate) {
   }
 }
 function Test-RegularUpdate([bool]$Existing,$Legacy) {
-  if (!$Existing -or $Legacy) { return $false }
+  if (!$Existing -or $Legacy -or !(Test-Path -LiteralPath (Join-Path $Destination 'arkme.exe') -PathType Leaf)) { return $false }
   $info=[Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $Destination 'arkme.exe'))
   return $info.ProductName -ceq '即我' -and $info.FileMajorPart -ge 3
 }
@@ -1036,7 +1062,7 @@ function Begin-Overlay([string]$Stage, [string]$UninstallerName, $Legacy) {
   $phaseTimer=[Diagnostics.Stopwatch]::StartNew()
   Assert-Payload $Stage $Manifest
   Write-Output ("Phase=validate-stage elapsedMs="+$phaseTimer.ElapsedMilliseconds); $phaseTimer.Restart()
-  $existing = Assert-ElectronDestination
+  $existing = Assert-ElectronDestination -AllowManualRepair
   $directory = Get-JournalDirectory
   if (Test-Path -LiteralPath $directory) { throw 'Unresolved migration recovery directory.' }
   $regular=Test-RegularUpdate $existing $Legacy
@@ -1652,7 +1678,7 @@ try {
     Assert-Legacy $legacy $Destination $Scope
     $roots += $legacy.Root
   }
-  if ($Action -in @('Check','Prepare')) { $null=Assert-ElectronDestination }
+  if ($Action -in @('Check','Prepare')) { $null=Assert-ElectronDestination -AllowManualRepair }
   Stop-Normally $roots
   if ($Action -in @('Prepare','Check')) { Assert-DiskCapacity }
   if ($Action -eq 'Apply') {
