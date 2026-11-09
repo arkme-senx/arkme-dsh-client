@@ -39,12 +39,12 @@ export function patchInstallSection(source) {
   const anchors = [uninstall, shortcuts, commit, icon, '!insertmacro installApplicationFiles', '!macro doStartApp'];
   if (anchors.some(anchor => source.split(anchor).length !== 2) || source.split('!insertmacro CHECK_APP_RUNNING').length !== 3) throw new Error('Unsupported electron-builder NSIS template');
   const route = (native, migration) => '${If} $JiwoNativeUpdate == "1"\n' + native + '\n${Else}\n' + migration + '\n${EndIf}';
-  return source.replace('!insertmacro setLinkVars', '!insertmacro setLinkVars\n${If} $JiwoNativeUpdate == "1"\n  !insertmacro windowsMigrationRun UpdateCheck\n${EndIf}')
+  return source.replace('!insertmacro setLinkVars', '!insertmacro setLinkVars\n${If} $JiwoNativeUpdate == "1"\n  !insertmacro windowsMigrationRun UpdateCheck\n  ${If} $JiwoPreserveAndrowsDesktop == "1"\n    StrCpy $JiwoNativeUpdate "0"\n  ${EndIf}\n${EndIf}')
     .replace(icon, route(icon, ''))
     .replace(uninstall, route(uninstall, '!insertmacro windowsMigrationPrepare'))
     .replace('!insertmacro installApplicationFiles', '!insertmacro windowsMigrationStage')
     .replace(shortcuts, '')
-    .replace(commit, commit+'\n${If} $JiwoPreserveShortcuts != "1"\n'+shortcuts+'\n${EndIf}\n!insertmacro windowsMigrationFinalize')
+    .replace(commit, commit+'\n${If} $JiwoPreserveShortcuts != "1"\n${AndIf} $JiwoPreserveAndrowsDesktop != "1"\n'+shortcuts+'\n${EndIf}\n!insertmacro windowsMigrationFinalize')
     .replaceAll('!insertmacro CHECK_APP_RUNNING', route('!insertmacro CHECK_APP_RUNNING', '!insertmacro windowsMigrationGracefulCheck'))
     .replace('!macro doStartApp', '!macro doStartApp\n  $' + '{If} $JiwoMigrationCommitted != "1"\n    SetErrorLevel 1\n    Quit\n  $' + '{EndIf}');
 }
@@ -72,4 +72,12 @@ export function patchInstallModePage(source) {
       !endif
     !endif
 `);
+}
+
+// Only the uninstaller that owns the desktop link may unregister or delete it.
+// Use its embedded helper even after the application directory has been removed.
+export function patchUninstallerDesktop(source) {
+  const remove = 'WinShell::UninstShortcut "$oldDesktopLink"\n      Delete "$oldDesktopLink"';
+  if (source.split(remove).length !== 2) throw new Error('Unsupported uninstaller desktop shortcut template');
+  return source.replace(remove, '!insertmacro windowsMigrationRemoveOwnedDesktopLink');
 }

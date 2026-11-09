@@ -1,7 +1,7 @@
 ﻿# Production NSIS helper and read-only app update preflight. Windows PowerShell 5.1.
 [CmdletBinding()]
 param(
-  [ValidateSet('Prepare','Apply','Commit','Finalize','Rollback','Check','UpdateCheck','Report','InspectUpdate','Library')][string]$Action,
+  [ValidateSet('Prepare','Apply','Commit','Finalize','Rollback','Check','UpdateCheck','Report','InspectUpdate','CheckDesktopOwnership','Library')][string]$Action,
   [string]$Destination,
   [string]$UpdateVersion,
   [long]$UpdateVersionCode,
@@ -13,6 +13,7 @@ param(
   [string]$CompletionFile,
   [ValidateSet('','NSIS','Cancelled')][string]$FailureContext='',
   [string]$ShortcutPolicyFile,
+  [string]$DesktopShortcut,
   [string]$ErrorFile
 )
 Set-StrictMode -Version Latest
@@ -726,7 +727,7 @@ function Assert-RegistryTransition($Current,$Original,$Expected,[bool]$AllowEsti
     Assert-RegistryTransition $child.Node $old[0].Node @()
   }
 }
-function Invoke-ShortcutReconciliation($Snapshots,[string]$NewExecutable,[string]$LegacyExecutable,[bool]$HadExistingInstall,[scriptblock]$ReadShortcut,[scriptblock]$WriteShortcut,[scriptblock]$RemoveShortcut) {
+function Invoke-ShortcutReconciliation($Snapshots,[string]$NewExecutable,[string]$LegacyExecutable,[bool]$HadExistingInstall,[scriptblock]$ReadShortcut,[scriptblock]$WriteShortcut,[scriptblock]$RemoveShortcut,[bool]$PreserveAndrowsDesktop=$false) {
   $allowed=@($NewExecutable)
   if ($LegacyExecutable) { $allowed += $LegacyExecutable }
   $current=@{}
@@ -738,12 +739,14 @@ function Invoke-ShortcutReconciliation($Snapshots,[string]$NewExecutable,[string
     $current[$entry.Path]=$link
   }
   foreach ($group in @($Snapshots | Group-Object Role)) {
+    if ($PreserveAndrowsDesktop -and $group.Name -eq 'Desktop') { continue }
     $entries=@($group.Group)
     $canonical=@($entries | Where-Object { $_.Canonical })
     if ($canonical.Count -ne 1) { throw 'Invalid shortcut snapshot layout.' }
     $desired=$canonical[0]
     $wanted=@($entries | Where-Object { $_.Existed -and !($_.PSObject.Properties['Compatibility'] -and $_.Compatibility -eq 'stale-flutter' -and $_.Role -eq 'Startup') }).Count -gt 0
     if (!$HadExistingInstall -and $group.Name -ne 'Startup') { $wanted=$current[$desired.Path].Exists }
+    if ($PreserveAndrowsDesktop -and $group.Name -eq 'Programs') { $wanted=$true }
     if ($wanted) {
       if (!$current[$desired.Path].Exists -or $current[$desired.Path].Target -ine $NewExecutable) { $null=& $WriteShortcut $desired.Path $NewExecutable }
       $verified=& $ReadShortcut $desired.Path
@@ -782,6 +785,14 @@ function Read-ManagedShortcut([string]$Path) {
   $link=$shell.CreateShortcut($Path)
   return [pscustomobject]@{Exists=$true;Target=$link.TargetPath;Arguments=$link.Arguments}
 }
+# Recognize only the observed Tencent Android launcher in the canonical desktop slot.
+# This grants permission to skip that slot, never to execute or overwrite its target.
+function Test-AndrowsDesktop($Location,$Link) {
+  if (!$Link.Exists -or !${env:ProgramFiles(x86)}) { return $false }
+  $launcher=Join-Path ${env:ProgramFiles(x86)} 'Tencent\Androws\Application\AndrowsLauncher.exe'
+  return ($Link.Target -ieq $launcher -and $Location.Role -eq 'Desktop' -and $Location.Canonical -and
+    $Link.Arguments -cmatch '^\s*--from\s+(?:"2"|2)\s+--launch-pkg-name\s+(?:"com\.senqisi\.jotmo"|com\.senqisi\.jotmo)\s+--launch-proc-name\s+(?:"Androws\.exe"|Androws\.exe)\s*$')
+}
 function Get-ShortcutTargetVersion([string]$Target) { return [Diagnostics.FileVersionInfo]::GetVersionInfo($Target) }
 function Get-ShortcutCompatibility($Location,$Link) {
   if (!$Location.Canonical -or $Link.Arguments -ne '' -or !$Link.Target -or [IO.Path]::GetFileName($Link.Target) -ine 'jotmo.exe') { throw 'Unknown shortcut identity or arguments.' }
@@ -817,17 +828,18 @@ function Assert-PreservedShortcuts($Legacy,[scriptblock]$ReadShortcut) {
     }
   }
 }
-function Write-ShortcutPolicy {
+function Write-ShortcutPolicy([bool]$PreserveAndrowsDesktop=$false) {
   $preserve=[bool]$script:PreservedLegacy
   if ($preserve) { Assert-PreservedShortcuts $script:PreservedLegacy {param($p) Read-ManagedShortcut $p} }
   if ($ShortcutPolicyFile) {
-    [IO.File]::WriteAllText($ShortcutPolicyFile,"[Shortcuts]`r`nPreserve="+[int]$preserve+"`r`n",[Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText($ShortcutPolicyFile,"[Shortcuts]`r`nPreserve="+[int]$preserve+"`r`nPreserveAndrowsDesktop="+[int]$PreserveAndrowsDesktop+"`r`n",[Text.Encoding]::ASCII)
   }
 }
 function Reconcile-InstalledShortcuts {
   $journal=Get-Content -LiteralPath (Join-Path (Get-JournalDirectory) 'journal.json') -Raw -Encoding UTF8 | ConvertFrom-Json
   $legacyExecutable=if ($journal.Legacy) {Join-Path $journal.Legacy.Root 'jotmo.exe'} else {''}
   $newExecutable=Join-Path $Destination 'arkme.exe'
+  $preserveDesktop=$journal.PSObject.Properties['PreserveAndrowsDesktop'] -and $journal.PreserveAndrowsDesktop
   Invoke-ShortcutReconciliation $journal.Shortcuts $newExecutable $legacyExecutable $journal.HadExistingInstall {
     param($file) Read-ManagedShortcut $file
   } {
@@ -848,7 +860,7 @@ function Reconcile-InstalledShortcuts {
     param($file)
     $null=Assert-LocalPath $file
     Remove-Item -LiteralPath $file -Force
-  }
+  } $preserveDesktop
 }
 function Get-ProtectedJournalBase { return (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Jiwo Installer Transactions') }
 function Get-ProtectedJournalDirectory {
@@ -1073,6 +1085,7 @@ function Begin-Overlay([string]$Stage, [string]$UninstallerName, $Legacy) {
   Write-Output ("Phase=plan-and-lock-check elapsedMs="+$phaseTimer.ElapsedMilliseconds); $phaseTimer.Restart()
   if (!$existing -and @($entries | Where-Object { $_.Existed }).Count) { throw 'Unregistered files occupy the destination. Choose a separate empty program directory.' }
   $shortcuts = @()
+  $preserveDesktop=$false
   $preserveShortcuts=[bool]$script:PreservedLegacy
   if ($preserveShortcuts) { Assert-PreservedShortcuts $script:PreservedLegacy {param($p) Read-ManagedShortcut $p} }
   foreach ($location in @(Get-ShortcutLocations $Legacy | Where-Object { !$preserveShortcuts })) {
@@ -1084,6 +1097,7 @@ function Begin-Overlay([string]$Stage, [string]$UninstallerName, $Legacy) {
       $null = Assert-LocalPath $file
       if ($Scope -eq 'all' -and $location.Role -ne 'Startup' -and $file -in @(Get-ShortcutPaths)) { Assert-ProtectedObject $file $false -AllowShortcutDeletion }
       $link=Read-ManagedShortcut $file
+      if (Test-AndrowsDesktop $location $link) { $preserveDesktop=$true; continue }
       $target = $link.Target
       $allowed = @((Join-Path $Destination 'arkme.exe'))
       if ($Legacy) { $allowed += (Join-Path $Legacy.Root 'jotmo.exe') }
@@ -1105,8 +1119,9 @@ function Begin-Overlay([string]$Stage, [string]$UninstallerName, $Legacy) {
       $legacyFiles += [pscustomobject]@{Path=$file;Hash=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash}
     }
   }
-  $journal = [pscustomobject]@{ Schema=2; HadExistingInstall=([bool]($existing -or $Legacy)); InstallerVersion=$incoming.version; InstallerVersionCode=$incoming.versionCode; RegistryMetadata=$incoming.registryMetadata; Destination=$Destination; Scope=$Scope; State='preparing'; PreserveShortcuts=$preserveShortcuts; Files=$entries; Shortcuts=$shortcuts; Registry=@(Get-RegistrySnapshots $Legacy); Legacy=$Legacy; LegacyFiles=$legacyFiles }
+  $journal = [pscustomobject]@{ Schema=2; HadExistingInstall=([bool]($existing -or $Legacy)); InstallerVersion=$incoming.version; InstallerVersionCode=$incoming.versionCode; RegistryMetadata=$incoming.registryMetadata; Destination=$Destination; Scope=$Scope; State='preparing'; PreserveShortcuts=$preserveShortcuts; PreserveAndrowsDesktop=$preserveDesktop; Files=$entries; Shortcuts=$shortcuts; Registry=@(Get-RegistrySnapshots $Legacy); Legacy=$Legacy; LegacyFiles=$legacyFiles }
   Assert-JournalMetadata $journal
+  Write-ShortcutPolicy $preserveDesktop
   New-JournalDirectory
   Assert-JournalTrust $directory
   Save-Journal $journal
@@ -1197,7 +1212,14 @@ function Assert-JournalMetadata($Journal) {
   $locations=@(Get-ShortcutLocations)
   # Previously shipped schema-2 records used LegacyFiles for external links.
   # Accept that complete original inventory or the complete expanded inventory.
-  if(@($Journal.Shortcuts).Count -ne $locations.Count){$locations=@(Get-ShortcutLocations $Journal.Legacy)}
+  $preserveDesktop=$false
+  if ($Journal.PSObject.Properties['PreserveAndrowsDesktop']) {
+    if ($Journal.PreserveAndrowsDesktop -isnot [bool]) { throw 'Invalid desktop preservation policy.' }
+    $preserveDesktop=$Journal.PreserveAndrowsDesktop
+  }
+  $expectedCount=$locations.Count-[int]$preserveDesktop
+  if(@($Journal.Shortcuts).Count -ne $expectedCount){$locations=@(Get-ShortcutLocations $Journal.Legacy)}
+  if ($preserveDesktop) { $locations=@($locations | Where-Object { !($_.Canonical -and $_.Role -eq 'Desktop') }) }
   if ($Journal.PSObject.Properties['PreserveShortcuts']) {
     if ($Journal.PreserveShortcuts -isnot [bool]) { throw 'Invalid shortcut preservation policy.' }
     if ($Journal.PreserveShortcuts) {
@@ -1516,6 +1538,7 @@ function Get-NativeUpdateEligibility {
     if (!$script:PreservedLegacy) {
       foreach ($location in @(Get-ShortcutLocations)) {
         $link=Read-ManagedShortcut $location.Path
+        if (Test-AndrowsDesktop $location $link) { continue }
         if ($link.Exists -and ($link.Target -ine (Join-Path $Destination 'arkme.exe') -or $link.Arguments -ne '')) {
           return @{eligible=$false;reason='shortcut-migration-required'}
         }
@@ -1627,6 +1650,11 @@ function Complete-InstallerDiagnostic([string]$Result,[string]$Recovery,[string]
 }
 
 if ($Action -eq 'Library') { return }
+if ($Action -eq 'CheckDesktopOwnership') {
+  $link=Read-ManagedShortcut $DesktopShortcut
+  if ($link.Exists -and $link.Target -ieq (Join-Path $Destination 'arkme.exe') -and $link.Arguments -eq '') { exit 0 }
+  exit 2
+}
 if ($Action -eq 'InspectUpdate') {
   [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
   $ProgressPreference='SilentlyContinue'
@@ -1645,13 +1673,15 @@ try {
   if ($Action -eq 'Report') { exit 0 }
   if ($Action -eq 'UpdateCheck') {
     Assert-NativeUpdate
-    Write-ShortcutPolicy
+    $preserveDesktop=$false
     if (!$script:PreservedLegacy) {
       foreach ($location in @(Get-ShortcutLocations)) {
         $link=Read-ManagedShortcut $location.Path
+        if (Test-AndrowsDesktop $location $link) { $preserveDesktop=$true; continue }
         if ($link.Exists -and ($link.Target -ine (Join-Path $Destination 'arkme.exe') -or $link.Arguments -ne '')) { throw 'Shortcut migration requires the full installer; automatic update preserved the existing entry.' }
       }
     }
+    Write-ShortcutPolicy $preserveDesktop
     Write-Output 'Install route=native-update admission=passed'
     exit 0
   }
@@ -1670,7 +1700,7 @@ try {
   Write-Host ("Legacy discovery="+$(if($discovered){"scope=$($discovered.Scope) root=$($discovered.Root) hive=$($discovered.Hive) view=$($discovered.View)"}else{'none'})+" targetScope=$Scope target=$Destination")
   $legacy = Resolve-MigrationLegacy (Select-MigrationLegacy $discovered)
   Initialize-JournalLocation $legacy
-  Write-ShortcutPolicy
+  if ($script:PreservedLegacy -or $Action -in @('Check','Prepare')) { Write-ShortcutPolicy }
   $roots = @($Destination)
   if ($script:DetachedLegacy) { $roots += $script:DetachedLegacy.Root }
   if ($script:PreservedLegacy) { $roots += $script:PreservedLegacy.Root }

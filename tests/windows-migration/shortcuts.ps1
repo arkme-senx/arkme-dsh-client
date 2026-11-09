@@ -29,6 +29,13 @@ Assert-True (!$links.ContainsKey('Desktop/jiwo.lnk')) 'upgrade must preserve int
 $script:links=@{}; & $write 'Desktop/jiwo.lnk' $new
 Invoke-ShortcutReconciliation @(Snapshot Desktop $false $false) $new '' $false $read $write $remove
 Assert-True ($links.ContainsKey('Desktop/jiwo.lnk')) 'fresh install must retain builder default entry'
+# An external desktop slot is omitted from the transaction. Even without any
+# prior Arkme link, the menu must offer a working native entry after an upgrade.
+$script:links=@{}; & $write 'Desktop/jiwo.lnk' 'C:\Tencent\AndrowsLauncher.exe'
+$snap=@(Snapshot Programs $false $false)+@(Snapshot Desktop $false $false | Where-Object { !$_.Canonical })
+Invoke-ShortcutReconciliation $snap $new '' $true $read $write $remove $true
+Assert-True ($links['Programs/jiwo.lnk'].Target -eq $new) 'coexistence must create the native menu entry'
+Assert-True ($links['Desktop/jiwo.lnk'].Target -eq 'C:\Tencent\AndrowsLauncher.exe') 'external desktop slot changed'
 # Startup is migrated only when it already existed.
 $script:links=@{}; & $write 'Startup/jiwo.lnk' $legacy
 Invoke-ShortcutReconciliation @(Snapshot Startup $false $true) $new $legacy $true $read $write $remove

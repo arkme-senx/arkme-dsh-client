@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { patchInstallSection, patchShortcutMacros, patchInstallModePage, validateReleaseIdentity } from "./windows-migration-policy.mjs";
+import { patchInstallSection, patchShortcutMacros, patchUninstallerDesktop, patchInstallModePage, validateReleaseIdentity } from "./windows-migration-policy.mjs";
 
 const require = createRequire(import.meta.url);
 const electronBuilderEntry = require.resolve("electron-builder");
@@ -38,6 +38,8 @@ try {
   );
   const shortcutsPath = path.join(patchedTemplatesDir, 'include/installer.nsh');
   await writeFile(shortcutsPath, patchShortcutMacros(await readFile(shortcutsPath, 'utf8')));
+  const uninstallerPath = path.join(patchedTemplatesDir, 'uninstaller.nsh');
+  await writeFile(uninstallerPath, patchUninstallerDesktop(await readFile(uninstallerPath, 'utf8')));
   const modePath = path.join(patchedTemplatesDir, 'multiUserUi.nsh');
   await writeFile(modePath, patchInstallModePage(await readFile(modePath, 'utf8')));
   nsisUtil.nsisTemplatesDir = patchedTemplatesDir;

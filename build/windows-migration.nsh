@@ -10,6 +10,7 @@ Var JiwoMigrationDestination
 Var JiwoMigrationScope
 Var JiwoMigrationKeepMachine
 Var JiwoMigrationKeepUser
+Var JiwoPreserveAndrowsDesktop
 Var JiwoPreserveShortcuts
 Var JiwoNativeUpdate
 Var JiwoFailureText
@@ -187,6 +188,7 @@ Var JiwoMigrationCommitted
     !insertmacro windowsMigrationShowFailure "${ACTION}" "$0"
     Abort
   ${EndIf}
+  ReadINIStr $JiwoPreserveAndrowsDesktop "$PLUGINSDIR\jiwo-shortcuts.ini" "Shortcuts" "PreserveAndrowsDesktop"
   ReadINIStr $JiwoPreserveShortcuts "$PLUGINSDIR\jiwo-shortcuts.ini" "Shortcuts" "Preserve"
 !macroend
 
@@ -249,7 +251,8 @@ Var JiwoMigrationCommitted
   ${If} ${FileExists} "$newStartMenuLink"
     WinShell::SetLnkAUMI "$newStartMenuLink" "${APP_ID}"
   ${EndIf}
-  ${If} ${FileExists} "$newDesktopLink"
+  ${If} $JiwoPreserveAndrowsDesktop != "1"
+  ${AndIf} ${FileExists} "$newDesktopLink"
     WinShell::SetLnkAUMI "$newDesktopLink" "${APP_ID}"
   ${EndIf}
   ${EndIf}
@@ -291,4 +294,20 @@ Function .onInstFailed
   ${EndIf}
 FunctionEnd
 !endif
+!macroend
+
+; The application directory may already be gone. Use the embedded helper,
+; and keep the link if its target or arguments cannot be verified.
+!macro windowsMigrationRemoveOwnedDesktopLink
+  InitPluginsDir
+  File /oname=$PLUGINSDIR\jiwo-uninstall-helper.ps1 "${JIWO_MIGRATION_SCRIPT}"
+  ClearErrors
+  StrCpy $R0 "-1"
+  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$PLUGINSDIR\jiwo-uninstall-helper.ps1" -Action CheckDesktopOwnership -DesktopShortcut "$oldDesktopLink" -Destination "$INSTDIR"' $R0
+  ${IfNot} ${Errors}
+  ${AndIf} $R0 == 0
+    WinShell::UninstShortcut "$oldDesktopLink"
+    Delete "$oldDesktopLink"
+  ${EndIf}
+  ClearErrors
 !macroend
