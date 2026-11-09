@@ -104,32 +104,27 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ${{ needs.reserve.outputs.reservation_artifact }}
-      - id: restore
-        run: node scripts/ci/restore.mjs ${{ matrix.platform }}
-      - if: steps.restore.outputs.reused != 'true'
-        run: node scripts/ci/version.mjs apply
-      - if: steps.restore.outputs.reused != 'true'
-        uses: pnpm/action-setup@v4
+      - run: node scripts/ci/version.mjs apply
+      - uses: pnpm/action-setup@v4
         with: {version: '11.19.0'}
-      - if: steps.restore.outputs.reused != 'true'
-        run: |
+      - run: |
           git config --global --add url."https://github.com/".insteadOf 'ssh://git@github.com/'
           git config --global --add url."https://github.com/".insteadOf 'git@github.com:'
           pnpm install --frozen-lockfile --ignore-scripts
           pnpm run postinstall
-      - if: steps.restore.outputs.reused != 'true'
-        run: pnpm run build
-      - if: steps.restore.outputs.reused != 'true' && matrix.platform == 'windows'
+      - run: pnpm run build
+      - if: matrix.platform == 'windows'
         shell: pwsh
         run: ./scripts/ci/windows-signing.ps1 login
-      - if: steps.restore.outputs.reused != 'true' && matrix.platform == 'windows'
+      - if: matrix.platform == 'windows'
         run: node scripts/ci/build-windows.mjs
-      - if: steps.restore.outputs.reused != 'true' && matrix.platform == 'windows'
+      - if: matrix.platform == 'windows'
         shell: pwsh
         run: ./scripts/ci/windows-signing.ps1 verify
-      - if: steps.restore.outputs.reused != 'true' && matrix.platform == 'macos'
+      - if: matrix.platform == 'macos'
         run: node scripts/ci/build-macos.cjs
         env:
+          NODE_OPTIONS: '--require="${{ github.workspace }}/scripts/ci/log-packaging-http.cjs"'
           CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
           MAC_INSTALLER_LINK: ${{ secrets.MAC_INSTALLER_LINK }}
@@ -137,12 +132,11 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      - if: steps.restore.outputs.reused != 'true'
-        run: node scripts/ci/artifacts.mjs collect ${{ matrix.platform }}
-      - if: steps.restore.outputs.reused != 'true'
-        uses: actions/upload-artifact@v4
+      - run: node scripts/ci/artifacts.mjs collect ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
         with:
           name: arkme-${{ needs.reserve.outputs.batch }}-${{ matrix.platform }}
+          overwrite: true
           path: |
             release-ci/*.exe
             release-ci/*.pkg
@@ -158,7 +152,6 @@ jobs:
         timeout-minutes: 1
         env:
           ARKME_BUILD_RESULT: ${{ job.status }}
-          ARKME_BUILD_REUSED: ${{ steps.restore.outputs.reused }}
         run: node scripts/ci/notify.mjs finish
   publish:
     needs: [reserve, build]
@@ -190,26 +183,24 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ${{ needs.reserve.outputs.reservation_artifact }}
-      - name: Restore immutable platform outputs
-        run: |
-          mkdir -p artifacts
-          node scripts/ci/restore.mjs macos
-          mv release-ci artifacts/macos
-          node scripts/ci/restore.mjs windows
-          mv release-ci artifacts/windows
+      - uses: actions/download-artifact@v4
+        with:
+          name: arkme-${{ needs.reserve.outputs.batch }}-macos
+          path: artifacts/macos
+      - uses: actions/download-artifact@v4
+        with:
+          name: arkme-${{ needs.reserve.outputs.batch }}-windows
+          path: artifacts/windows
       - name: Write back only if source branch is unchanged
         run: node scripts/ci/version.mjs writeback
-      - id: plan
-        run: node scripts/ci/restore.mjs publication
-      - if: steps.plan.outputs.reused != 'true'
-        run: node scripts/ci/artifacts.mjs manifest
+      - run: node scripts/ci/artifacts.mjs manifest
         env:
           ARKME_MANIFEST_PRIVATE_KEY: ${{ secrets.ARKME_MANIFEST_PRIVATE_KEY }}
-      - if: steps.plan.outputs.reused != 'true'
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: arkme-${{ needs.reserve.outputs.batch }}-publication
           path: publication/manifest.json
+          overwrite: true
           retention-days: 30
       - run: node scripts/ci/artifacts.mjs upload
       - id: release
