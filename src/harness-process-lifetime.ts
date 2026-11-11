@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
@@ -51,7 +51,43 @@ function installHarnessBuiltinCompatibility(): void {
 
 installHarnessBuiltinCompatibility();
 
-export interface HarnessProcessReceipt { schemaVersion: 1; pid: number; generation: string; }
+export interface HarnessProcessReceipt {
+  schemaVersion: 1; pid: number; generation: string;
+  /** Windows FILETIME, stored as a string to preserve precision across PID reuse. */
+  windowsCreationTime?: string;
+}
+interface WindowsProcessIdentity { creationTime: string; commandLine: string | null; }
+const identityUnverified = 'Cannot verify previous Harness exit; recovery is blocked';
+function validCreationTime(value: unknown): value is string {
+  return typeof value === 'string' && /^[1-9][0-9]{16,19}$/.test(value);
+}
+
+async function readWindowsProcessIdentity(pid: number): Promise<WindowsProcessIdentity | null> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(identityUnverified);
+  // Query only this PID. Never persist or report its command line (it may contain secrets).
+  const script = `$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.Encoding]::UTF8; `
+    + `$p=Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'; `
+    + `if ($null -eq $p) { 'null' } else { `
+    + `@{creationTime=$p.CreationDate.ToUniversalTime().ToFileTimeUtc().ToString([Globalization.CultureInfo]::InvariantCulture); `
+    + `commandLine=$p.CommandLine} | ConvertTo-Json -Compress }`;
+  try {
+    const output = await new Promise<string>((resolve, reject) => {
+      execFile(path.win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+        ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+        {windowsHide:true, timeout:5000, maxBuffer:256 * 1024, encoding:'utf8'},
+        (error, stdout) => error ? reject(error) : resolve(stdout));
+    });
+    const value: unknown = JSON.parse(output.trim().replace(/^\uFEFF/, ''));
+    if (value === null) return null;
+    const identity = value as Partial<WindowsProcessIdentity>;
+    if (!validCreationTime(identity.creationTime)
+      || (identity.commandLine !== null && typeof identity.commandLine !== 'string')) throw new Error(identityUnverified);
+    return identity as WindowsProcessIdentity;
+  } catch {
+    // Do not expose PowerShell output, command lines or an unverified process identity.
+    throw new Error(identityUnverified);
+  }
+}
 const mutations = new Map<string, Promise<void>>();
 function serialized(file: string, operation: () => Promise<void>): Promise<void> {
   const result = (mutations.get(file) ?? Promise.resolve()).then(operation);
@@ -66,6 +102,7 @@ async function readReceipt(file: string): Promise<HarnessProcessReceipt | undefi
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
   const receipt = value as Partial<HarnessProcessReceipt> | null;
   if (receipt?.schemaVersion !== 1 || !Number.isSafeInteger(receipt.pid) || receipt.pid! <= 0
+    || (receipt.windowsCreationTime !== undefined && !validCreationTime(receipt.windowsCreationTime))
     || typeof receipt.generation !== 'string' || !/^[A-Za-z0-9-]{1,100}$/.test(receipt.generation)) {
     throw new Error('Invalid Harness process receipt; recovery is blocked');
   }
@@ -73,11 +110,17 @@ async function readReceipt(file: string): Promise<HarnessProcessReceipt | undefi
 }
 export function writeHarnessProcessReceipt(file: string, receipt: HarnessProcessReceipt): Promise<void> {
   return serialized(file, async () => {
+    let recorded = receipt;
+    if (process.platform === 'win32') {
+      const identity = await readWindowsProcessIdentity(receipt.pid);
+      if (identity === null) throw new Error(identityUnverified);
+      recorded = {...receipt, windowsCreationTime:identity.creationTime};
+    }
     await mkdir(path.dirname(file), {recursive:true,mode:0o700});
     const temporary = `${file}.${randomUUID()}.tmp`;
     try {
       const handle = await open(temporary,'wx',0o600);
-      try { await handle.writeFile(JSON.stringify(receipt)); await handle.sync(); }
+      try { await handle.writeFile(JSON.stringify(recorded)); await handle.sync(); }
       finally { await handle.close(); }
       await rename(temporary,file);
     } finally { await rm(temporary,{force:true}).catch(() => undefined); }
@@ -88,7 +131,7 @@ export function assertPreviousHarnessExited(file: string): Promise<void> {
   return serialized(file, async () => {
     const receipt = await readReceipt(file);
     if (receipt === undefined) return;
-    assertReceiptExited(receipt);
+    await assertReceiptExited(receipt);
     await rm(file,{force:true});
   });
 }
@@ -97,17 +140,42 @@ export function clearExitedHarnessProcessReceipt(file: string, generation: strin
   return serialized(file, async () => {
     const receipt = await readReceipt(file);
     if (receipt === undefined || receipt.generation !== generation) return;
-    assertReceiptExited(receipt);
+    await assertReceiptExited(receipt);
     await rm(file,{force:true});
   });
 }
 
-function assertReceiptExited(receipt: HarnessProcessReceipt): void {
-  for (const pid of process.platform === 'win32' ? [receipt.pid] : [receipt.pid,-receipt.pid]) {
+async function assertReceiptExited(receipt: HarnessProcessReceipt): Promise<void> {
+  if (process.platform === 'win32') {
+    try { process.kill(receipt.pid, 0); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+      throw new Error(identityUnverified);
+    }
+    const identity = await readWindowsProcessIdentity(receipt.pid);
+    if (identity === null) {
+      // Exit during the query is fine; a still-live PID with no identity is not.
+      try { process.kill(receipt.pid, 0); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return; }
+      throw new Error(identityUnverified);
+    }
+    if (receipt.windowsCreationTime !== undefined) {
+      if (identity.creationTime !== receipt.windowsCreationTime) return;
+    } else {
+      // Legacy receipts have no creation time. Every receipt-managed Harness was
+      // started with --import for this guard. Only an observable command line
+      // without ANY import option proves this is not that managed process.
+      // Ambiguous/import-bearing processes stay protected, regardless of name.
+      if (!identity.commandLine?.trim()) throw new Error(identityUnverified);
+      if (!identity.commandLine.includes('--import')) return;
+    }
+    throw new Error('Previous Harness is still running; retry after it exits before recovering data');
+  }
+  for (const pid of [receipt.pid, -receipt.pid]) {
     try { process.kill(pid,0); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ESRCH') continue;
-      throw new Error('Cannot verify previous Harness exit; recovery is blocked');
+      throw new Error(identityUnverified);
     }
     throw new Error('Previous Harness is still running; retry after it exits before recovering data');
   }
