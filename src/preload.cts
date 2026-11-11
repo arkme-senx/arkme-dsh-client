@@ -262,6 +262,7 @@ function installAppUpdateNoticeRenderer(documentRef: Document = document): () =>
     const detail = documentRef.createElement("p");
     detail.textContent = status === "failed" ? state.error ?? "请重试或前往官网下载最新版本"
       : status === "available" ? state.canAutoInstall ? "正在准备更新包" : state.error ?? "请前往官网下载最新版本"
+      : status === "installing" && process.platform === "win32" ? "即我将暂时关闭，安装进度将在独立窗口显示。"
       : status === "downloading" ? "正在后台下载" : "";
     content.append(detail);
     if (status === "downloading" && typeof state.totalBytes === "number" && Number.isFinite(state.totalBytes) && state.totalBytes > 0) {
@@ -498,6 +499,7 @@ let harnessReadyNotified = false;
 contextBridge.exposeInMainWorld(
   "arkmeDesktop",
   Object.freeze({
+    localChatRead: (accountKey: string, input: unknown) => ipcRenderer.invoke('arkme-chat:read-local', accountKey, input),
     videoClipboard: Object.freeze({
       version: 1,
       supported: process.platform === 'darwin' || process.platform === 'win32',

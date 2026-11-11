@@ -25,6 +25,9 @@ try {
 Name "Jiwo migration compile fixture - never run"
 OutFile "${escaped(path.join(root, 'compile-only.exe'))}"
 RequestExecutionLevel user
+!define JIWO_VISIBLE_UPDATE_INCLUDE "${escaped(path.resolve('build/windows-update-ui.nsh'))}"
+!define JIWO_UPDATE_FAILURE_SCRIPT "${escaped(path.resolve('build/windows-update-failed.ps1'))}"
+!define isForceRun '"1" == "1"'
 !define JIWO_MIGRATION_SCRIPT "${escaped(path.resolve('build/windows-migration.ps1'))}"
 !define JIWO_MIGRATION_MANIFEST "${escaped(path.join(root, 'manifest.json'))}"
 !define JIWO_VERSION_CODE 275
@@ -44,6 +47,7 @@ RequestExecutionLevel user
   StrCpy $installMode all
 !macroend
 Var installMode
+Var hasPerMachineInstallation
 Var newStartMenuLink
 Var newDesktopLink
 Var oldStartMenuLink
@@ -68,10 +72,13 @@ ${shortcutMacros}
   StrCpy $newDesktopLink "$INSTDIR\\fixture-desktop.lnk"
 !macroend
 !include "MUI2.nsh"
+!insertmacro customPageAfterChangeDir
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro customHeader
 Function .onInit
+  !insertmacro preInit
+  StrCpy $hasPerMachineInstallation "0"
   StrCpy $installMode CurrentUser
   StrCpy $INSTDIR "$TEMP\\jiwo-compile-fixture-never-run"
   StrCpy $keepShortcuts true

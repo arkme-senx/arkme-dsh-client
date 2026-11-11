@@ -84,6 +84,8 @@ try {
   const nsisPath = value => path.resolve(value).replaceAll('$', () => '$$').replaceAll('"', '$\\"');
   await writeFile(includePath, [
     '!define JIWO_MIGRATION',
+    `!define JIWO_UPDATE_FAILURE_SCRIPT "${nsisPath("build/windows-update-failed.ps1")}"`,
+    `!define JIWO_VISIBLE_UPDATE_INCLUDE "${nsisPath("build/windows-update-ui.nsh")}"`,
     `!define JIWO_VERSION_CODE ${manifest.versionCode}`,
     `!define JIWO_MIGRATION_SCRIPT "${nsisPath("build/windows-migration.ps1")}"`,
     `!define JIWO_MIGRATION_MANIFEST "${nsisPath(manifestPath)}"`,

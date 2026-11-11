@@ -1,3 +1,5 @@
+import { readLocalChat } from './local-chat-read.js';
+import { focusWindowsUpdateWindow } from "./windows-update-window.js";
 import { installCallWindow } from './call-window.js';
 import { activationFailurePackages, observeWebBootFailure } from "./web-boot-failure.js";
 import { isOptionalExtensionProfileFailure } from "./optional-extension-recovery.js";
@@ -597,7 +599,12 @@ ipcMain.on("arkme-runtime:harness-version", event => {
   event.returnValue = activeHarnessVersion ?? null;
 });
 
-const hasSingleInstanceLock = app.requestSingleInstanceLock();
+let installingUpdate = false;
+if (process.platform === "win32" && app.isPackaged && appIdentity.appId === "cc.jiwo.arkme") {
+  try { installingUpdate = focusWindowsUpdateWindow(); }
+  catch (error) { logDiagnostic("update-window-detection-failed", error); }
+}
+const hasSingleInstanceLock = !installingUpdate && app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
@@ -1755,7 +1762,7 @@ ipcMain.handle('arkme-recording-import:read', (event, token: string, start: numb
 ipcMain.handle('arkme-recording-import:upload', (event, token: string, request) => recordingFiles.upload(recordingFilesContext(event), token, request));
 ipcMain.handle('arkme-recording-import:cancel', (event, id: string) => recordingFiles.cancel(recordingFilesContext(event), id));
 
-function videoClipboardContext(event: Electron.IpcMainInvokeEvent, accountKey: unknown): VideoClipboardContext {
+function authenticatedConversationContext(event: Electron.IpcMainInvokeEvent, accountKey: unknown) {
   const scope = activeAccountScope, origin = activeHarnessOrigin, authenticated = harnessAuthSession;
   const frame = event.senderFrame;
   const valid = () => scope !== null && scope.owner.kind === 'account' && activeAccountScope === scope
@@ -1765,10 +1772,20 @@ function videoClipboardContext(event: Electron.IpcMainInvokeEvent, accountKey: u
       origin, frameUrl: frame?.url ?? '', mainFrame: frame !== null && frame === event.sender.mainFrame,
       mainOwner: mainWindow?.webContents === event.sender, conversationOwner: conversationWindows.isActive(event.sender.id),
       ready: accountScopeReady, locked: desktopDeviceLock?.protected === true });
-  if (!valid() || !scope || !origin || !authenticated || !frame || typeof accountKey !== 'string') throw new Error('请在已登录的会话窗口复制视频');
+  if (!valid() || !scope || !origin || !authenticated || !frame || typeof accountKey !== 'string') throw new Error('请在已登录的会话窗口操作');
+  return { scope, origin, authenticated, frame, accountKey, valid };
+}
+
+ipcMain.handle('arkme-chat:read-local', (event, accountKey: unknown, input: unknown) => {
+  const { origin, authenticated, valid, accountKey: validatedAccountKey } = authenticatedConversationContext(event, accountKey);
+  return readLocalChat({ origin, cookie: harnessCookieHeader(authenticated), signal: authenticated.signal, valid }, validatedAccountKey, input);
+});
+
+function videoClipboardContext(event: Electron.IpcMainInvokeEvent, accountKey: unknown): VideoClipboardContext {
+  const { scope, origin, authenticated, frame, accountKey: validatedAccountKey, valid } = authenticatedConversationContext(event, accountKey);
   const owner = BrowserWindow.fromWebContents(event.sender);
   if (!owner || owner.isDestroyed()) throw new Error('视频复制窗口已关闭');
-  return { accountKey, directory: path.join(app.getPath('userData'), 'video-clipboard'),
+  return { accountKey: validatedAccountKey, directory: path.join(app.getPath('userData'), 'video-clipboard'),
     origin, cookie: harnessCookieHeader(authenticated), scope: JSON.stringify([scope.dshHome, origin, videoClipboardSession(authenticated)]), sender: frame,
     windowHandle: owner.getNativeWindowHandle(), valid,
     watchInvalidation(invalidate) {

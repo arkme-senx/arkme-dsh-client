@@ -18,6 +18,7 @@ test('an immediate reset waits for initial bootstrap rollback and error renderin
   const rollback = new Promise<void>(resolve => { releaseRollback = resolve })
   const starting = new Promise<void>(resolve => { started = resolve })
   const context = {
+    installingUpdate: false,
     actionQueue: Promise.resolve(),
     app: { requestSingleInstanceLock: () => true, whenReady: () => Promise.resolve() },
     registerApplicationLifecycle: () => undefined,
@@ -73,6 +74,7 @@ test('queued reset cannot delete a live restore staging tree; real historical da
   }
   const events: string[] = []
   const context = {
+    installingUpdate: false,
     actionQueue: Promise.resolve(),
     app: {requestSingleInstanceLock:()=>true, whenReady:()=>Promise.resolve()},
     registerApplicationLifecycle:()=>undefined,
