@@ -499,6 +499,7 @@ let harnessReadyNotified = false;
 contextBridge.exposeInMainWorld(
   "arkmeDesktop",
   Object.freeze({
+    localChatRead: (accountKey: string, input: unknown) => ipcRenderer.invoke('arkme-chat:read-local', accountKey, input),
     videoClipboard: Object.freeze({
       version: 1,
       supported: process.platform === 'darwin' || process.platform === 'win32',
