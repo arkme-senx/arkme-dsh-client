@@ -168,6 +168,7 @@ async function executePreload(
     },
     Date: { now: options.now ?? Date.now },
     document,
+    window: { addEventListener: () => {} },
     localStorage: options.storage,
     Notification: {
       get permission() { return notificationPermission; },
