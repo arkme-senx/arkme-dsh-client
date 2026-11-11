@@ -68,3 +68,9 @@ Windows CI 只生成并上传签名 NSIS EXE、EXE blockmap、latest.yml 和发�
 ### 正式发布后同步 dev
 
 后端确认 master 批次已发布后，sync-dev 用普通 merge PR 将该批次的版本回写提交合回 dev；pre-release 不参与。同步不会覆盖 dev 在构建期间新增的提交，也不会带入 master 上尚未发布的后续改动。仓库须允许 Actions 创建 PR、使用 merge commit。遇到冲突或保护规则时查看同步 PR，保留双方历史解决后用 merge commit 合并，勿 squash。可重跑原工作流，已包含该发布提交则跳过。
+
+### OSS 分片与诊断
+
+大于等于 8 MiB 的文件使用 8 MiB 分片、2 片并发；小文件继续 PUT。每个请求超时 5 分钟，最多 3 次尝试，每次刷新对象范围 STS；同一进程内保存 checkpoint 并续传已完成分片，跨 Action 重跑不保存 checkpoint。完成响应丢失导致 NoSuchUpload 时重新初始化，仍禁止覆盖；仅 FileAlreadyExists 进入原有 CDN 全量摘要校验，其他 409 不视为成功。
+
+JSON 日志包含平台/文件名、size_bytes、elapsed_ms、attempt、进度以及脱敏错误码；不输出 STS、uploadId、checkpoint 或 SDK 原始错误。上传完成日志不代表发布成功，仍须通过 CDN 摘要和后端校验。沿用限定对象的 PutObject 权限，不添加删除权限；失败任务的未完成分片不由本脚本主动删除，应由 OSS 既有分片生命周期清理。
