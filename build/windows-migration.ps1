@@ -1090,11 +1090,13 @@ function Begin-Overlay([string]$Stage, [string]$UninstallerName, $Legacy) {
   if ($preserveShortcuts) { Assert-PreservedShortcuts $script:PreservedLegacy {param($p) Read-ManagedShortcut $p} }
   foreach ($location in @(Get-ShortcutLocations $Legacy | Where-Object { !$preserveShortcuts })) {
     $file=$location.Path
+    # Missing links still inherit their ancestors' reparse points. Recheck after
+    # application exit, before any journal or payload mutation.
+    $null=Assert-LocalPath $file
     $target=''
     $compatibility=''
     $exists = Test-Path -LiteralPath $file
     if ($exists) {
-      $null = Assert-LocalPath $file
       if ($Scope -eq 'all' -and $location.Role -ne 'Startup' -and $file -in @(Get-ShortcutPaths)) { Assert-ProtectedObject $file $false -AllowShortcutDeletion }
       $link=Read-ManagedShortcut $file
       if (Test-AndrowsDesktop $location $link) { $preserveDesktop=$true; continue }
@@ -1709,6 +1711,11 @@ try {
     $roots += $legacy.Root
   }
   if ($Action -in @('Check','Prepare')) { $null=Assert-ElectronDestination -AllowManualRepair }
+  if ($Action -in @('Check','Prepare','Apply') -and !$script:PreservedLegacy) {
+    # Validate even absent shortcut slots before asking a running app to exit.
+    # Shared Flutter shortcuts excluded from this transaction remain untouched.
+    foreach ($location in @(Get-ShortcutLocations $legacy)) { $null=Assert-LocalPath $location.Path }
+  }
   Stop-Normally $roots
   if ($Action -in @('Prepare','Check')) { Assert-DiskCapacity }
   if ($Action -eq 'Apply') {

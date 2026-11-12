@@ -69,6 +69,11 @@ test.skipIf(process.platform !== 'win32')('real Windows short paths verify signe
  const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/short-path.ps1')],{encoding:'utf8'});
  expect(output).toContain('Windows short-path regression tests passed.');
 }, 60_000);
+test.skipIf(process.platform !== 'win32')('missing shortcuts below junctions fail before app exit or transaction creation', () => {
+ const shell = path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
+ const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/shortcut-path.ps1')],{encoding:'utf8'});
+ expect(output).toContain('Windows shortcut path preflight fixtures passed.');
+}, 120_000);
 test.skipIf(process.platform !== 'win32')('Windows process inspection recovers missing paths and tolerates verified process exit', () => {
  const shell = path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
  const output = execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/process-inspection.ps1')],{encoding:'utf8'});
