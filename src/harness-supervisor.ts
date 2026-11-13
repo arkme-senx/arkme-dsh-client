@@ -113,7 +113,7 @@ interface SupervisorDependencies {
   allocatePort: () => Promise<number>;
   spawn: (command: string, args: string[], options: SpawnOptions) => ManagedChild;
   authenticate: typeof authenticateHarness;
-  checkHealth: (url: string, session: HarnessAuthSession) => Promise<boolean>;
+  checkHealth: (url: string, session: HarnessAuthSession) => Promise<boolean | HarnessHealthResult>;
   checkApiReady: (url: string, session: HarnessAuthSession) => Promise<boolean>;
   sleep: (milliseconds: number) => Promise<void>;
   now: () => number;
@@ -875,6 +875,9 @@ export class HarnessProcessSupervisor {
   ): Promise<void> {
     const deadline = this.dependencies.now() + timeoutMs;
     let healthChecks = 0;
+    let pollCount = 0;
+    let phase = "waiting-launch-url";
+    let lastHealth: HarnessHealthResult = {ok: false, reason: "not-attempted"};
     let firstHealthFailureLogged = false;
     while (this.dependencies.now() < deadline) {
       signal.throwIfAborted();
@@ -888,24 +891,46 @@ export class HarnessProcessSupervisor {
         );
       }
 
+      pollCount += 1;
       if (running.auth === undefined && running.launchUrl !== undefined) {
+        phase = "authenticating";
+        this.recordLifecycle(running, "authentication-started");
         const launchUrl = running.launchUrl;
         delete running.launchUrl;
-        running.auth = await this.dependencies.authenticate(launchUrl, url, AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, deadline - this.dependencies.now()))]));
+        try {
+          running.auth = await this.dependencies.authenticate(launchUrl, url, AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, deadline - this.dependencies.now()))]));
+        } catch (error) {
+          this.recordLifecycle(running, "authentication-failed", {phase, elapsedMs: timeoutMs - Math.max(0, deadline - this.dependencies.now())});
+          throw error;
+        }
+        this.recordLifecycle(running, "authentication-ready");
+        phase = "post-authentication";
         // The session lifetime outlives the bounded exchange request.
         running.auth = { ...running.auth, signal: running.authAbort.signal };
         this.assertRunningBeforeReady(running);
-        await this.config.onAuthenticated?.(running.auth);
+        this.recordLifecycle(running, "post-authentication-started");
+        try {
+          await this.config.onAuthenticated?.(running.auth);
+        } catch (error) {
+          this.recordLifecycle(running, "post-authentication-failed", {phase});
+          throw error;
+        }
+        this.recordLifecycle(running, "post-authentication-ready");
         signal.throwIfAborted();
       }
-      healthChecks += 1;
-      if (running.auth !== undefined && await this.dependencies.checkHealth(url, running.auth)) {
-        this.recordLifecycle(running, "health-ready", { healthChecks });
-        return;
+      if (running.auth !== undefined) {
+        phase = "health-check";
+        healthChecks += 1;
+        const result = await this.dependencies.checkHealth(url, running.auth);
+        lastHealth = typeof result === "boolean" ? {ok: result, reason: result ? "ready" : "unhealthy"} : result;
+        if (lastHealth.ok) {
+          this.recordLifecycle(running, "health-ready", { healthChecks, pollCount });
+          return;
+        }
       }
       if (!firstHealthFailureLogged) {
         firstHealthFailureLogged = true;
-        this.recordLifecycle(running, "health-waiting", { url });
+        this.recordLifecycle(running, "health-waiting", { phase, lastHealthReason: lastHealth.reason });
       }
       signal.throwIfAborted();
       const remaining = deadline - this.dependencies.now();
@@ -916,6 +941,11 @@ export class HarnessProcessSupervisor {
     this.recordLifecycle(running, "startup-timeout", {
       timeoutMs,
       healthChecks,
+      pollCount,
+      phase,
+      lastHealthReason: lastHealth.reason,
+      ...(lastHealth.status === undefined ? {} : {lastHealthStatus: lastHealth.status}),
+      ...(lastHealth.errorCode === undefined ? {} : {lastHealthErrorCode: lastHealth.errorCode}),
       pid: running.child.pid ?? null
     });
     throw new Error(`Harness did not become ready within ${timeoutMs}ms`);
@@ -926,7 +956,7 @@ export class HarnessProcessSupervisor {
     event: string,
     details: Record<string, unknown> = {}
   ): void {
-    if (running.log.writableLength < 256 * 1024) running.log.write(`[supervisor] ${event} ${JSON.stringify(details)}\n`);
+    if (running.log.writableLength < 256 * 1024) running.log.write(`[supervisor] ${event} ${JSON.stringify({...details, atMs: Date.now()})}\n`);
   }
 
   private async stopRunningProcess(running: RunningHarness, markExpected: boolean): Promise<void> {
@@ -1204,18 +1234,34 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+export interface HarnessHealthResult {
+  ok: boolean;
+  reason: "not-attempted" | "ready" | "unhealthy" | "http-status" | "request-timeout" | "cancelled" | "network-error";
+  status?: number;
+  errorCode?: string;
+}
+
+// Diagnostics never include URLs, cookies, response bodies or arbitrary error messages.
+export const HEALTH_ERROR_CODES = ["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH", "EPIPE", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_SOCKET"] as const;
+export async function checkHarnessHealth(url: string, session: HarnessAuthSession): Promise<HarnessHealthResult> {
+  try {
+    const response = await fetch(url, {redirect: "manual", headers: {cookie: harnessCookieHeader(session)}, signal: AbortSignal.any([session.signal, AbortSignal.timeout(1_000)])});
+    void response.body?.cancel().catch(() => undefined);
+    return {ok: response.ok, reason: response.ok ? "ready" : "http-status", status: response.status};
+  } catch (error) {
+    if (session.signal.aborted) return {ok: false, reason: "cancelled"};
+    if (error instanceof Error && error.name === "TimeoutError") return {ok: false, reason: "request-timeout"};
+    const cause = error instanceof Error ? error.cause : undefined;
+    const code = isRecord(cause) ? cause.code : isRecord(error) ? error.code : undefined;
+    return {ok: false, reason: "network-error", ...(typeof code === "string" && HEALTH_ERROR_CODES.some(allowed => allowed === code) ? {errorCode: code} : {})};
+  }
+}
+
 const defaultDependencies: SupervisorDependencies = {
   authenticate: authenticateHarness,
   allocatePort: allocateLoopbackPort,
   spawn: (command, args, options) => nodeSpawn(command, args, options) as ManagedChild,
-  checkHealth: async (url, session) => {
-    try {
-      const response = await fetch(url, { redirect: "manual", headers: { cookie: harnessCookieHeader(session) }, signal: AbortSignal.any([session.signal, AbortSignal.timeout(1_000)]) });
-      return response.ok;
-    } catch {
-      return false;
-    }
-  },
+  checkHealth: checkHarnessHealth,
   checkApiReady: checkDshApiReady,
   sleep: async (milliseconds) => {
     await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));

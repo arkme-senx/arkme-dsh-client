@@ -40,7 +40,7 @@ export function scrubStartupDiagnostic(input: string, limit = 4096): string {
   return bounded(value, limit);
 }
 
-// Never upload renderer console/business output. Select fixed lifecycle events and numeric fields only.
+// Never upload renderer console/business output. Select fixed lifecycle events and allowlisted fields only.
 export async function startupLifecycleTail(file: string, since = 0): Promise<string> {
   const handle = await open(file, 'r');
   try {
@@ -58,14 +58,23 @@ export async function startupLifecycleTail(file: string, since = 0): Promise<str
     lines = lines.slice(latest);
     const selected: string[] = [];
     for (const line of lines) {
-      const match = /^\[supervisor\] (spawned|health-waiting|health-ready|startup-timeout|process-exit|process-stop-requested|process-force-stop-requested) (\{.*\})$/.exec(line);
+      const match = /^\[supervisor\] (spawned|authentication-started|authentication-ready|authentication-failed|post-authentication-started|post-authentication-ready|post-authentication-failed|health-waiting|health-ready|startup-timeout|process-exit|process-stop-requested|process-force-stop-requested) (\{.*\})$/.exec(line);
       if (!match) continue;
       try {
         const parsed = JSON.parse(match[2]!) as Record<string, unknown>;
-        const safe: Record<string, number | boolean> = {};
-        for (const key of ['timeoutMs','healthChecks','code','expected']) {
+        const safe: Record<string, number | boolean | string> = {};
+        for (const key of ['timeoutMs','healthChecks','pollCount','code','expected','atMs','elapsedMs','lastHealthStatus']) {
           const v = parsed[key];
-          if (typeof v === 'number' || typeof v === 'boolean') safe[key] = v;
+          if ((typeof v === 'number' && Number.isSafeInteger(v)) || (key === 'expected' && typeof v === 'boolean')) safe[key] = v;
+        }
+        const enums: Record<string, readonly string[]> = {
+          phase: ['waiting-launch-url','authenticating','post-authentication','health-check'],
+          lastHealthReason: ['not-attempted','ready','unhealthy','http-status','request-timeout','cancelled','network-error'],
+          lastHealthErrorCode: ['ECONNREFUSED','ECONNRESET','ETIMEDOUT','EHOSTUNREACH','ENETUNREACH','EPIPE','UND_ERR_CONNECT_TIMEOUT','UND_ERR_HEADERS_TIMEOUT','UND_ERR_SOCKET']
+        };
+        for (const [key, allowed] of Object.entries(enums)) {
+          const value = parsed[key];
+          if (typeof value === 'string' && allowed.includes(value)) safe[key] = value;
         }
         selected.push(`[supervisor] ${match[1]} ${JSON.stringify(safe)}`);
       } catch { /* Incomplete log lines are not sent. */ }
@@ -106,6 +115,7 @@ export class StartupDiagnostics {
     attempt.reported = true; // Synchronous: duplicate supervisor/renderFailure notifications share one event.
     const meta = this.options.metadata();
     if (!['windows','macos'].includes(meta.platform) || !['x64','arm64'].includes(meta.architecture) || !Number.isInteger(meta.build) || meta.build < 1) return;
+    const failureOccurredAtMs = this.now();
     const report: Report = {
       schema:1, event_id:attempt.id, platform:meta.platform, architecture:meta.architecture,
       os_version:meta.osVersion, version:meta.version, build:meta.build,
@@ -119,7 +129,9 @@ export class StartupDiagnostics {
       ? startupLifecycleTail(logFile, attempt.started).then(text => this.attempt?.id === attempt.id ? text : '').catch(() => '')
       : Promise.resolve('');
     this.schedule(async () => {
-      report.log = scrubStartupDiagnostic(report.log + "\n" + scrubStartupDiagnostic(await tail, 1800), 12000);
+      const timing = `[startup-report] timing ${JSON.stringify({attemptStartedAtMs: attempt.started, failureOccurredAtMs})}`;
+      // Reserve the tail budget even when the error message fills its own limit.
+      report.log = scrubStartupDiagnostic(timing + "\n" + scrubStartupDiagnostic(report.log, 9700) + "\n" + scrubStartupDiagnostic(await tail, 2000), 12000);
       await mkdir(this.options.directory,{recursive:true,mode:0o700});
       // Reserve a slot BEFORE writing; this also bounds repeated offline failures.
       await this.prune(19);

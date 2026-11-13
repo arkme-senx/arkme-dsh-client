@@ -118,3 +118,36 @@ test('keeps the error stack beyond the short summary in the bounded log field',a
  expect(report.log).toContain('Caused by: original failure');
  expect(Buffer.byteLength(report.log)).toBeLessThanOrEqual(12000);
 });
+
+
+test('preserves bounded diagnostic enums and timestamps but drops arbitrary diagnostic values', async () => {
+ const {directory}=await fixture();const log=path.join(directory,'harness.log');
+ await writeFile(log, '[supervisor] spawned {"timeoutMs":90000,"atMs":1794499200000}\n[supervisor] authentication-ready {"atMs":1794499200100}\n[supervisor] startup-timeout {"pollCount":358,"healthChecks":12,"phase":"health-check","lastHealthReason":"http-status","lastHealthStatus":503,"lastHealthErrorCode":"ECONNREFUSED","atMs":1794499290000}\n[supervisor] startup-timeout {"phase":"private message","lastHealthReason":"private reason","lastHealthErrorCode":"PRIVATE_SECRET","lastHealthStatus":"private","atMs":"private"}\n');
+ const text=await startupLifecycleTail(log);
+ expect(text).toContain('"healthChecks":12');expect(text).toContain('"pollCount":358');
+ expect(text).toContain('authentication-ready');expect(text).toContain('"phase":"health-check"');
+ expect(text).toContain('"lastHealthReason":"http-status"');expect(text).toContain('"lastHealthStatus":503');
+ expect(text).toContain('"atMs":1794499290000');expect(text).toContain('ECONNREFUSED');
+ expect(text).not.toContain('private');expect(text).not.toContain('PRIVATE_SECRET');
+});
+
+test('persists original failure time through an offline retry using existing log contract',async()=>{
+ const f=await fixture(); f.reporter.begin(); f.reporter.fail('failed'); await f.reporter.settled();
+ const filename=(await readdir(f.directory))[0]!;
+ const original=JSON.parse(await readFile(path.join(f.directory,filename),'utf8'));
+ expect(original.log).toMatch(/\[startup-report\] timing \{"attemptStartedAtMs":\d+,"failureOccurredAtMs":\d+\}/);
+ const send=vi.fn(async(_url:unknown,init?:RequestInit)=>{expect(JSON.parse(init!.body as string).log).toBe(original.log);return new Response(null,{status:202});});
+ const next=new StartupDiagnostics({directory:f.directory,serviceOrigin:'https://jotmo.senguo.me',fetcher:send as typeof fetch,metadata:()=>{throw Error('unused');}});
+ next.begin();await next.settled();expect(send).toHaveBeenCalledOnce();
+});
+
+test('retains timeout evidence after a maximum-size failure message', async()=>{
+ const {reporter,directory}=await fixture();const log=path.join(directory,'harness.log');
+ reporter.begin('harness-start');
+ await writeFile(log,'[supervisor] spawned {"atMs":1794499200000}\n[supervisor] authentication-ready {"atMs":1794499200100}\n[supervisor] startup-timeout {"phase":"health-check","lastHealthReason":"http-status","lastHealthStatus":503,"healthChecks":12,"pollCount":358,"atMs":1794499290000}\n');
+ reporter.fail('中'.repeat(6000),log);await reporter.settled();
+ const filename=(await readdir(directory)).find(name=>name.endsWith('.json'))!;
+ const report=JSON.parse(await readFile(path.join(directory,filename),'utf8'));
+ expect(report.log).toContain('failureOccurredAtMs');expect(report.log).toContain('startup-timeout');expect(report.log).toContain('"lastHealthStatus":503');
+ expect(Buffer.byteLength(report.log)).toBeLessThanOrEqual(12000);
+});
