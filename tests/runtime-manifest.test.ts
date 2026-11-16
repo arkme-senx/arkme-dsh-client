@@ -32,6 +32,7 @@ describe("standalone Harness runtime", () => {
       "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
       "@deepseek-ai/schemastery": "3.18.5",
       "@senguoyun/dsh-arkme": "catalog:production",
+      "@tencentcloud/lite-chat": "1.6.11",
       "ali-oss": "6.23.0",
       "js-yaml": "4.2.0",
       "pnpm": "11.19.0",

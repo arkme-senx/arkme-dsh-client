@@ -192,6 +192,9 @@ importers:
       '@senguoyun/dsh-arkme':
         specifier: catalog:production
         version: https://codeload.github.com/arkme-senx/arkme-dsh-plugin/tar.gz/9497ad8f963ca18af9ce8a39664e8fe1faa20a0b(b2c8acc20c8162a78a0f1d1d6952239e)
+      '@tencentcloud/lite-chat':
+        specifier: 1.6.11
+        version: 1.6.11
       ali-oss:
         specifier: 6.23.0
         version: 6.23.0(supports-color@7.2.0)
@@ -3919,6 +3922,9 @@ packages:
   '@szmarczak/http-timer@4.0.6':
     resolution: {integrity: sha512-4BAffykYOgO+5nzBWYwE3W90sBgLJoUPRWWcL8wlyiM8IB8ipJz3UMJ9KXQd1RKQXpKp8Tutn80HZtWsu2u76w==}
     engines: {node: '>=10'}
+
+  '@tencentcloud/lite-chat@1.6.11':
+    resolution: {integrity: sha512-nxznntQDOEtTjmnCgwwIKn5b87C9Jy/pgb6toLRJY8Hq0CUhDv7tOJbcJizxbwWAJ8QQOSU5jrkNS0ERnNPxMQ==}
 
   '@tiptap/core@3.31.3':
     resolution: {integrity: sha512-Cz50pvciQrxdSxgTkHOVz0uD0Yl/8Xt0QatGD6ILm47jW8EzyHR9RkUGs/D5IqzXKuVPntfw1ttaT926vXfiRg==}
@@ -11443,6 +11449,8 @@ snapshots:
   '@szmarczak/http-timer@4.0.6':
     dependencies:
       defer-to-connect: 2.0.1
+
+  '@tencentcloud/lite-chat@1.6.11': {}
 
   '@tiptap/core@3.31.3(@tiptap/pm@3.31.3)':
     dependencies:

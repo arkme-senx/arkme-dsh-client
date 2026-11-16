@@ -24,6 +24,7 @@
     "@deepseek-ai/cosmokit": "1.8.6",
     "@deepseek-ai/schemastery": "3.18.5",
     "@senguoyun/dsh-arkme": "catalog:production",
+    "@tencentcloud/lite-chat": "1.6.11",
     "serialport": "13.0.0",
     "ali-oss": "6.23.0",
     "qrcode-generator": "2.0.4",
