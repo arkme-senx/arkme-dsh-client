@@ -1,3 +1,4 @@
+import { installGameWindowNative } from './game-window-native.js';
 import { BrowserWindow, ipcMain, shell } from 'electron';
 import { ConversationWindows, type ConversationEvent } from './conversation-windows.js';
 import { installAttachmentPreviewNative } from './attachment-preview-native.js';
@@ -28,11 +29,13 @@ export function installConversationWindowIpc(options: {
     title: target.source.displayName, backgroundColor: '#ffffff', autoHideMenuBar: true,
     webPreferences: {session: main.webContents.session, preload: options.preload(), sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true}});
    const windowId = window.webContents.id;
+   const gameWindow = installGameWindowNative(window, options.origin);
    const preview = installAttachmentPreviewNative(window, options.origin);
    window.webContents.on('will-navigate', (event, destination) => { if (destination !== url.href) event.preventDefault(); });
    window.webContents.on('will-redirect', event => event.preventDefault());
    window.webContents.on('will-attach-webview', event => event.preventDefault());
    window.webContents.setWindowOpenHandler(details => {
+    const game = gameWindow.handle(details); if (game) return game;
     const allowed = preview.handle(details); if (allowed) return allowed;
     try { if (['http:', 'https:'].includes(new URL(details.url).protocol)) void shell.openExternal(details.url); } catch {}
     return {action: 'deny'};
