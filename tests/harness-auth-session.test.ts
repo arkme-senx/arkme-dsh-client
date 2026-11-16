@@ -37,3 +37,17 @@ test('never follows an external redirect with token or cookie', async () => {
   try { await expect(auth.authenticateHarness(`${url}?token=secret`, url, new AbortController().signal)).rejects.toThrow('redirect'); }
   finally { await new Promise<void>(r => server.close(() => r())); }
 });
+
+test('failed local exchange preserves safe phase and transport code without secrets', async () => {
+ const {harnessFailureDiagnostic}=await import('../src/harness-process-lifetime.js');
+ const original=globalThis.fetch;
+ globalThis.fetch=async()=>{throw new TypeError('private token and URL',{cause:{code:'ECONNRESET',secret:'private'}});};
+ try {
+  await auth.authenticateHarness('http://127.0.0.1:41234/?token=private','http://127.0.0.1:41234/',new AbortController().signal);
+  throw new Error('expected failure');
+ } catch(error) {
+  expect((error as Error).message).toBe('Harness authentication failed');
+  expect(harnessFailureDiagnostic(error)).toMatchObject({authPhase:'token-exchange',diagnosticReason:'network-error',errorCode:'ECONNRESET'});
+  expect(JSON.stringify(harnessFailureDiagnostic(error))).not.toContain('private');
+ } finally {globalThis.fetch=original;}
+});

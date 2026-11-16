@@ -1,3 +1,4 @@
+import {annotateHarnessFailure, diagnosticNetworkCode} from './harness-process-lifetime.js';
 import { stripVTControlCharacters } from 'node:util';
 
 export interface HarnessAuthSession {
@@ -58,8 +59,13 @@ export function harnessCookieHeader(session: HarnessAuthSession): string {
 
 export async function authenticateHarness(launchUrl: string, root: string, signal: AbortSignal): Promise<HarnessAuthSession> {
   if (!validLaunchUrl(launchUrl, root)) throw new Error('Invalid Harness authentication URL');
+  const started = Date.now();
+  let authPhase = 'token-exchange';
+  let status: number | undefined;
   try {
     const response = await fetch(launchUrl, {redirect: 'manual', signal});
+    status = response.status;
+    authPhase = 'token-response';
     await response.body?.cancel();
     if (response.status !== 303) throw new Error('Harness authentication exchange failed');
     const location = response.headers.get('location');
@@ -74,14 +80,21 @@ export async function authenticateHarness(launchUrl: string, root: string, signa
       throw new Error('Invalid Harness authentication cookie');
     }
     const session: HarnessAuthSession = {url: root, cookie: {name: match[1]!, value: match[2]!, path: '/', httpOnly: true, sameSite: 'strict'}, signal};
+    authPhase = 'authenticated-page';
+    status = undefined;
     const clean = await fetch(root, {headers: {cookie: harnessCookieHeader(session)}, redirect: 'manual', signal});
+    status = clean.status;
+    authPhase = 'page-response';
     await clean.body?.cancel();
     if (!clean.ok) throw new Error('Harness authenticated page unavailable');
     signal.throwIfAborted();
     return session;
   } catch (error) {
     // Fetch diagnostics may contain the secret request URL; expose only fixed errors.
-    if (error instanceof Error && /^(Invalid Harness|Harness auth)/.test(error.message)) throw error;
-    throw new Error(signal.aborted ? 'Harness authentication cancelled' : 'Harness authentication failed');
+    const explicit = error instanceof Error && /^(Invalid Harness|Harness auth)/.test(error.message);
+    const reported = explicit ? error : new Error(signal.aborted ? 'Harness authentication cancelled' : 'Harness authentication failed');
+    const errorCode = diagnosticNetworkCode(error);
+    throw annotateHarnessFailure(reported, {authPhase, diagnosticReason: signal.aborted ? (signal.reason instanceof Error && signal.reason.name === 'TimeoutError' ? 'request-timeout' : 'cancelled') : explicit ? 'protocol-error' : 'network-error',
+      elapsedMs: Math.max(0, Date.now() - started), ...(status === undefined ? {} : {status}), ...(errorCode === undefined ? {} : {errorCode})});
   }
 }

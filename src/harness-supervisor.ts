@@ -1,3 +1,4 @@
+import {harnessFailureDiagnostic} from './harness-process-lifetime.js';
 import { activationFailurePackages } from "./web-boot-failure.js";
 import { incompatibleProfileCorePackages } from "./profile-core-compatibility.js";
 import { clearExitedHarnessProcessReceipt, writeHarnessProcessReceipt } from "./harness-process-lifetime.js";
@@ -654,7 +655,13 @@ export class HarnessProcessSupervisor {
       this.recordLifecycle(running, "ready", { url });
       return { running, url };
     } catch (error) {
-      await this.stopRunningProcess(running, false);
+      const diagnostic = harnessFailureDiagnostic(error);
+      if (Object.keys(diagnostic).length) this.recordLifecycle(running, "startup-operation-failed", {...diagnostic});
+      try { await this.stopRunningProcess(running, false); }
+      catch (cleanupError) {
+        this.recordLifecycle(running, "process-cleanup-failed", {...harnessFailureDiagnostic(cleanupError)});
+        throw cleanupError;
+      }
       const message = this.failureMessage(error, running.tail);
       throw new Error(message, { cause: error });
     }
@@ -900,7 +907,7 @@ export class HarnessProcessSupervisor {
         try {
           running.auth = await this.dependencies.authenticate(launchUrl, url, AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, deadline - this.dependencies.now()))]));
         } catch (error) {
-          this.recordLifecycle(running, "authentication-failed", {phase, elapsedMs: timeoutMs - Math.max(0, deadline - this.dependencies.now())});
+          this.recordLifecycle(running, "authentication-failed", {phase, ...harnessFailureDiagnostic(error), elapsedMs: timeoutMs - Math.max(0, deadline - this.dependencies.now())});
           throw error;
         }
         this.recordLifecycle(running, "authentication-ready");

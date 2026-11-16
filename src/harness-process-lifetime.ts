@@ -5,6 +5,23 @@ import path from 'node:path';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { getEnvironmentData, setEnvironmentData, isMainThread, type WorkerOptions } from 'node:worker_threads';
 
+// Only internally constructed, bounded metadata crosses the diagnostic boundary.
+// Never retain Error.cause, command lines, URLs, headers or arbitrary messages.
+const diagnostics = new WeakMap<Error, Record<string, string | number>>();
+const networkCodes = new Set(['ECONNREFUSED','ECONNRESET','ETIMEDOUT','EHOSTUNREACH','ENETUNREACH','EPIPE','UND_ERR_CONNECT_TIMEOUT','UND_ERR_HEADERS_TIMEOUT','UND_ERR_SOCKET']);
+export function diagnosticNetworkCode(error: unknown): string | undefined {
+  const value = error as {code?: unknown; cause?: {code?: unknown}} | null;
+  const code = value?.cause?.code ?? value?.code;
+  return typeof code === 'string' && networkCodes.has(code) ? code : undefined;
+}
+export function annotateHarnessFailure(error: Error, detail: Record<string, string | number>): Error {
+  diagnostics.set(error, Object.freeze({...detail}));
+  return error;
+}
+export function harnessFailureDiagnostic(error: unknown): Readonly<Record<string, string | number>> {
+  return error instanceof Error ? diagnostics.get(error) ?? {} : {};
+}
+
 const builtinCompatibilityKey = '@arkme/mas-electron-builtin-compatibility';
 
 /** Preserve explicit Worker isolation while carrying the host's verified internal-module adapter. */
@@ -62,30 +79,43 @@ function validCreationTime(value: unknown): value is string {
   return typeof value === 'string' && /^[1-9][0-9]{16,19}$/.test(value);
 }
 
-async function readWindowsProcessIdentity(pid: number): Promise<WindowsProcessIdentity | null> {
-  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(identityUnverified);
+type IdentityOperation = 'register-new' | 'verify-previous' | 'clear-exited';
+function identityFailure(operation: IdentityOperation, diagnosticReason: string, started = Date.now(), nativeHresult?: number): Error {
+  return annotateHarnessFailure(new Error(identityUnverified), {operation, diagnosticReason, elapsedMs: Math.max(0, Date.now() - started), ...(nativeHresult === undefined ? {} : {nativeHresult})});
+}
+async function readWindowsProcessIdentity(pid: number, operation: IdentityOperation): Promise<WindowsProcessIdentity | null> {
+  const started = Date.now();
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw identityFailure(operation, 'invalid-pid', started);
   // Query only this PID. Never persist or report its command line (it may contain secrets).
   const script = `$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.Encoding]::UTF8; `
-    + `$p=Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'; `
+    + `try { $p=Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'; `
     + `if ($null -eq $p) { 'null' } else { `
     + `@{creationTime=$p.CreationDate.ToUniversalTime().ToFileTimeUtc().ToString([Globalization.CultureInfo]::InvariantCulture); `
-    + `commandLine=$p.CommandLine} | ConvertTo-Json -Compress }`;
+    + `commandLine=$p.CommandLine} | ConvertTo-Json -Compress } `
+    + `} catch { @{failure='cim-query';hresult=$_.Exception.HResult} | ConvertTo-Json -Compress }`;
   try {
     const output = await new Promise<string>((resolve, reject) => {
       execFile(path.win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
         ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
         {windowsHide:true, timeout:5000, maxBuffer:256 * 1024, encoding:'utf8'},
-        (error, stdout) => error ? reject(error) : resolve(stdout));
+        (error, stdout) => error ? reject(identityFailure(operation, error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 'query-output-limit' : error.killed ? 'query-timeout' : error.code === 'ENOENT' ? 'query-unavailable' : 'query-failed', started)) : resolve(stdout));
     });
-    const value: unknown = JSON.parse(output.trim().replace(/^\uFEFF/, ''));
+    let value: unknown;
+    try { value = JSON.parse(output.trim().replace(/^\uFEFF/, '')); }
+    catch { throw identityFailure(operation, 'invalid-json', started); }
     if (value === null) return null;
+    if (typeof value !== 'object' || value === null) throw identityFailure(operation, 'invalid-identity', started);
+    const failure = value as {failure?: unknown; hresult?: unknown};
+    if (failure.failure === 'cim-query') throw identityFailure(operation, 'query-failed', started,
+      typeof failure.hresult === 'number' && Number.isSafeInteger(failure.hresult) ? failure.hresult : undefined);
     const identity = value as Partial<WindowsProcessIdentity>;
     if (!validCreationTime(identity.creationTime)
-      || (identity.commandLine !== null && typeof identity.commandLine !== 'string')) throw new Error(identityUnverified);
+      || (identity.commandLine !== null && typeof identity.commandLine !== 'string')) throw identityFailure(operation, 'invalid-identity', started);
     return identity as WindowsProcessIdentity;
-  } catch {
+  } catch (error) {
     // Do not expose PowerShell output, command lines or an unverified process identity.
-    throw new Error(identityUnverified);
+    if (Object.keys(harnessFailureDiagnostic(error)).length) throw error;
+    throw identityFailure(operation, 'query-failed', started);
   }
 }
 const mutations = new Map<string, Promise<void>>();
@@ -112,8 +142,8 @@ export function writeHarnessProcessReceipt(file: string, receipt: HarnessProcess
   return serialized(file, async () => {
     let recorded = receipt;
     if (process.platform === 'win32') {
-      const identity = await readWindowsProcessIdentity(receipt.pid);
-      if (identity === null) throw new Error(identityUnverified);
+      const identity = await readWindowsProcessIdentity(receipt.pid, 'register-new');
+      if (identity === null) throw identityFailure('register-new', 'process-missing');
       recorded = {...receipt, windowsCreationTime:identity.creationTime};
     }
     await mkdir(path.dirname(file), {recursive:true,mode:0o700});
@@ -131,7 +161,7 @@ export function assertPreviousHarnessExited(file: string): Promise<void> {
   return serialized(file, async () => {
     const receipt = await readReceipt(file);
     if (receipt === undefined) return;
-    await assertReceiptExited(receipt);
+    await assertReceiptExited(receipt, 'verify-previous');
     await rm(file,{force:true});
   });
 }
@@ -140,24 +170,24 @@ export function clearExitedHarnessProcessReceipt(file: string, generation: strin
   return serialized(file, async () => {
     const receipt = await readReceipt(file);
     if (receipt === undefined || receipt.generation !== generation) return;
-    await assertReceiptExited(receipt);
+    await assertReceiptExited(receipt, 'clear-exited');
     await rm(file,{force:true});
   });
 }
 
-async function assertReceiptExited(receipt: HarnessProcessReceipt): Promise<void> {
+async function assertReceiptExited(receipt: HarnessProcessReceipt, operation: IdentityOperation): Promise<void> {
   if (process.platform === 'win32') {
     try { process.kill(receipt.pid, 0); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
-      throw new Error(identityUnverified);
+      throw identityFailure(operation, 'liveness-unverified');
     }
-    const identity = await readWindowsProcessIdentity(receipt.pid);
+    const identity = await readWindowsProcessIdentity(receipt.pid, operation);
     if (identity === null) {
       // Exit during the query is fine; a still-live PID with no identity is not.
       try { process.kill(receipt.pid, 0); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return; }
-      throw new Error(identityUnverified);
+      throw identityFailure(operation, 'liveness-unverified');
     }
     if (receipt.windowsCreationTime !== undefined) {
       if (identity.creationTime !== receipt.windowsCreationTime) return;
@@ -166,7 +196,7 @@ async function assertReceiptExited(receipt: HarnessProcessReceipt): Promise<void
       // started with --import for this guard. Only an observable command line
       // without ANY import option proves this is not that managed process.
       // Ambiguous/import-bearing processes stay protected, regardless of name.
-      if (!identity.commandLine?.trim()) throw new Error(identityUnverified);
+      if (!identity.commandLine?.trim()) throw identityFailure(operation, 'command-line-unavailable');
       if (!identity.commandLine.includes('--import')) return;
     }
     throw new Error('Previous Harness is still running; retry after it exits before recovering data');
@@ -175,7 +205,7 @@ async function assertReceiptExited(receipt: HarnessProcessReceipt): Promise<void
     try { process.kill(pid,0); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ESRCH') continue;
-      throw new Error(identityUnverified);
+      throw identityFailure(operation, 'liveness-unverified');
     }
     throw new Error('Previous Harness is still running; retry after it exits before recovering data');
   }

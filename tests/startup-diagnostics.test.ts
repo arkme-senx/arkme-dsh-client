@@ -151,3 +151,13 @@ test('retains timeout evidence after a maximum-size failure message', async()=>{
  expect(report.log).toContain('failureOccurredAtMs');expect(report.log).toContain('startup-timeout');expect(report.log).toContain('"lastHealthStatus":503');
  expect(Buffer.byteLength(report.log)).toBeLessThanOrEqual(12000);
 });
+
+test('keeps safe process/auth diagnosis through telemetry tail and rejects raw identity',async()=>{
+ const dir=await mkdtemp(path.join(os.tmpdir(),'startup-diagnostic-'));roots.push(dir);
+ const file=path.join(dir,'harness.log');
+ await writeFile(file, '[supervisor] spawned {}\n'+
+  '[supervisor] startup-operation-failed {"operation":"register-new","diagnosticReason":"query-timeout","elapsedMs":5005,"commandLine":"private secret"}\n'+
+  '[supervisor] authentication-failed {"authPhase":"authenticated-page","diagnosticReason":"network-error","errorCode":"ECONNRESET","status":303,"url":"private secret"}\n');
+ const tail=await startupLifecycleTail(file);
+ expect(tail).toContain('register-new');expect(tail).toContain('query-timeout');expect(tail).toContain('authenticated-page');expect(tail).toContain('ECONNRESET');expect(tail).not.toContain('private');
+});

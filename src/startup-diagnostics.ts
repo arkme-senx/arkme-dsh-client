@@ -58,16 +58,20 @@ export async function startupLifecycleTail(file: string, since = 0): Promise<str
     lines = lines.slice(latest);
     const selected: string[] = [];
     for (const line of lines) {
-      const match = /^\[supervisor\] (spawned|authentication-started|authentication-ready|authentication-failed|post-authentication-started|post-authentication-ready|post-authentication-failed|health-waiting|health-ready|startup-timeout|process-exit|process-stop-requested|process-force-stop-requested) (\{.*\})$/.exec(line);
+      const match = /^\[supervisor\] (spawned|startup-operation-failed|process-cleanup-failed|authentication-started|authentication-ready|authentication-failed|post-authentication-started|post-authentication-ready|post-authentication-failed|health-waiting|health-ready|startup-timeout|process-exit|process-stop-requested|process-force-stop-requested) (\{.*\})$/.exec(line);
       if (!match) continue;
       try {
         const parsed = JSON.parse(match[2]!) as Record<string, unknown>;
         const safe: Record<string, number | boolean | string> = {};
-        for (const key of ['timeoutMs','healthChecks','pollCount','code','expected','atMs','elapsedMs','lastHealthStatus']) {
+        for (const key of ['timeoutMs','healthChecks','pollCount','code','expected','atMs','elapsedMs','lastHealthStatus','status','nativeHresult']) {
           const v = parsed[key];
           if ((typeof v === 'number' && Number.isSafeInteger(v)) || (key === 'expected' && typeof v === 'boolean')) safe[key] = v;
         }
         const enums: Record<string, readonly string[]> = {
+          operation: ['register-new','verify-previous','clear-exited'],
+          authPhase: ['token-exchange','token-response','authenticated-page','page-response'],
+          diagnosticReason: ['request-timeout','cancelled','protocol-error','network-error','invalid-pid','query-timeout','query-output-limit','query-unavailable','query-failed','invalid-json','invalid-identity','process-missing','liveness-unverified','command-line-unavailable'],
+          errorCode: ['ECONNREFUSED','ECONNRESET','ETIMEDOUT','EHOSTUNREACH','ENETUNREACH','EPIPE','UND_ERR_CONNECT_TIMEOUT','UND_ERR_HEADERS_TIMEOUT','UND_ERR_SOCKET'],
           phase: ['waiting-launch-url','authenticating','post-authentication','health-check'],
           lastHealthReason: ['not-attempted','ready','unhealthy','http-status','request-timeout','cancelled','network-error'],
           lastHealthErrorCode: ['ECONNREFUSED','ECONNRESET','ETIMEDOUT','EHOSTUNREACH','ENETUNREACH','EPIPE','UND_ERR_CONNECT_TIMEOUT','UND_ERR_HEADERS_TIMEOUT','UND_ERR_SOCKET']

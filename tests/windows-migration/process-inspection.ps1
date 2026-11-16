@@ -34,7 +34,15 @@ try {
   $script:mode='stale-pid'
   Assert-Blocked { Get-MigrationProcesses @($root) } 'Stale PID metadata was trusted.'
   $script:mode='protected'
-  Assert-Blocked { Get-MigrationProcesses @($root) } 'Live unreadable process was ignored.'
+  $captured=@()
+  try { $captured=@(Get-MigrationProcesses @($root) 6>&1) } catch {
+    $native=$_.Exception.GetBaseException()
+    Assert-True ($native -is [ComponentModel.Win32Exception]) 'Native error type lost.'
+    Assert-True ($native.Data['JiwoNativeApi'] -in @('OpenProcess','GetProcessTimes','QueryFullProcessImageName','GetProcessTimes.ExitCheck')) 'Failure API diagnostic missing.'
+    $captured=@(Write-MigrationProcessDiagnostic $_ 4 1 6>&1)
+  }
+  Assert-True (($captured | Out-String) -match 'nativeErrorCode') 'Native code missing from safe transcript.'
+  Assert-True (!(($captured | Out-String).Contains($root))) 'Private path entered diagnostic.'
   $script:mode='normal'
   $held=[JiwoMigrationProcess]::Open($fixture.Id)
   try {

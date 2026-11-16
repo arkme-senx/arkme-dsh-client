@@ -1,3 +1,4 @@
+import {harnessFailureDiagnostic} from './harness-process-lifetime.js';
 import { readLocalChat } from './local-chat-read.js';
 import { focusWindowsUpdateWindow } from "./windows-update-window.js";
 import { installCallWindow } from './call-window.js';
@@ -2336,7 +2337,9 @@ async function showFatalBootstrapError(error: unknown): Promise<void> {
 
 async function renderFailure(error: unknown): Promise<void> {
   logDiagnostic("render-failure", error);
-  startupDiagnostics.fail(error instanceof Error ? error.stack ?? error.message : String(error), logPath);
+  const failureDiagnostic = harnessFailureDiagnostic(error);
+  startupDiagnostics.fail((error instanceof Error ? error.stack ?? error.message : String(error))
+    + (Object.keys(failureDiagnostic).length ? '\n[startup-operation] ' + JSON.stringify(failureDiagnostic) : ''), logPath);
   const message = error instanceof Error ? error.message : String(error);
   const workspacePath = controller?.getCurrentWorkspace();
   const display = error instanceof ElectronRuntimeManifestError || error instanceof BadRuntimeReleaseBlockedError
