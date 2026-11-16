@@ -442,22 +442,35 @@ public sealed class JiwoMigrationProcess : IDisposable {
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr p);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr p,uint access,out IntPtr token);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetTokenInformation(IntPtr token,int kind,IntPtr data,int size,out int needed);
+  static Win32Exception NativeFailure(string api, int code) {
+    var error=new Win32Exception(code);error.Data["JiwoNativeApi"]=api;return error;
+  }
   public bool HasExited {
-    get { long c,e,k,u; if(!GetProcessTimes(handle,out c,out e,out k,out u))throw new Win32Exception();return e!=0; }
+    get { long c,e,k,u; if(!GetProcessTimes(handle,out c,out e,out k,out u))throw NativeFailure("GetProcessTimes.ExitCheck",Marshal.GetLastWin32Error());return e!=0; }
   }
   public static JiwoMigrationProcess Open(int pid) {
     var h=OpenProcess(0x1000,false,pid);
-    if(h==IntPtr.Zero) { int error=Marshal.GetLastWin32Error();if(error==87 && pid>0)return null;throw new Win32Exception(error,"Cannot verify a running app/kernel process."); }
+    if(h==IntPtr.Zero) { int error=Marshal.GetLastWin32Error();if(error==87 && pid>0)return null;var failure=new Win32Exception(error,"Cannot verify a running app/kernel process.");failure.Data["JiwoNativeApi"]="OpenProcess";throw failure; }
     var result=new JiwoMigrationProcess();result.handle=h;
     try {
       long c,e,k,u;
-      if(!GetProcessTimes(h,out c,out e,out k,out u))throw new Win32Exception();
+      if(!GetProcessTimes(h,out c,out e,out k,out u))throw NativeFailure("GetProcessTimes",Marshal.GetLastWin32Error());
       if(e!=0){result.Dispose();return null;}
       result.CreationTicks=DateTime.FromFileTimeUtc(c).Ticks;
       var path=new StringBuilder(32768);int size=path.Capacity;
-      if(!QueryFullProcessImageName(h,0,path,ref size))throw new Win32Exception();
+      if(!QueryFullProcessImageName(h,0,path,ref size))throw NativeFailure("QueryFullProcessImageName",Marshal.GetLastWin32Error());
       result.Path=path.ToString();return result;
-    } catch { bool exited=false;try{exited=result.HasExited;}finally{result.Dispose();}if(exited)return null;throw; }
+    } catch (Exception original) {
+      bool exited=false;
+      try {exited=result.HasExited;}
+      catch (Exception verification) {
+        verification.Data["JiwoOriginalNativeApi"]=original.Data["JiwoNativeApi"];
+        var native=original as Win32Exception;
+        if(native!=null)verification.Data["JiwoOriginalNativeCode"]=native.NativeErrorCode;
+        throw;
+      } finally {result.Dispose();}
+      if(exited)return null;throw;
+    }
   }
   public string OwnerSid() {
     IntPtr token=IntPtr.Zero, data=IntPtr.Zero;
@@ -474,6 +487,17 @@ public sealed class JiwoMigrationProcess : IDisposable {
 }
 '@
 }
+function Write-MigrationProcessDiagnostic($Failure, [int]$ProcessId, [long]$ElapsedMs) {
+  # Fixed keys and enum values only: no paths, command lines, SID or exception text.
+  $base=$Failure.Exception.GetBaseException()
+  $detail=[ordered]@{operation='process-open';pid=$ProcessId;elapsedMs=$ElapsedMs;hresult=$base.HResult}
+  $allowed=@('OpenProcess','GetProcessTimes','GetProcessTimes.ExitCheck','QueryFullProcessImageName')
+  if($base -is [ComponentModel.Win32Exception]){$detail.nativeErrorCode=$base.NativeErrorCode}
+  if($base.Data['JiwoNativeApi'] -in $allowed){$detail.nativeApi=$base.Data['JiwoNativeApi']}
+  if($base.Data['JiwoOriginalNativeApi'] -in $allowed){$detail.originalNativeApi=$base.Data['JiwoOriginalNativeApi']}
+  if($base.Data['JiwoOriginalNativeCode'] -is [int]){$detail.originalNativeErrorCode=$base.Data['JiwoOriginalNativeCode']}
+  Write-Host ('[installer-process] '+($detail | ConvertTo-Json -Compress))
+}
 function Get-MigrationProcesses([string[]]$Roots) {
   Initialize-MigrationProcessNative
   $currentSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -481,7 +505,13 @@ function Get-MigrationProcesses([string[]]$Roots) {
     if($item.Name -ieq 'node.exe' -and !(Test-ArkmeNode $item.ExecutablePath $item.CommandLine $Roots)){continue}
     # Hold one handle across image/token reads: an exited PID must never resolve
     # to a replacement process. Only proven termination may be ignored.
-    $process=[JiwoMigrationProcess]::Open([int]$item.ProcessId)
+    $openTimer=[Diagnostics.Stopwatch]::StartNew()
+    try { $process=[JiwoMigrationProcess]::Open([int]$item.ProcessId) }
+    catch {
+      # Diagnostic failure must not replace the original process verification error.
+      try { Write-MigrationProcessDiagnostic $_ ([int]$item.ProcessId) $openTimer.ElapsedMilliseconds } catch {}
+      throw
+    }
     if(!$process){continue}
     try {
       if(!$item.CreationDate -or [Math]::Abs($process.CreationTicks-$item.CreationDate.ToUniversalTime().Ticks) -ge 10){throw 'A running process changed during verification. Retry installation after exiting the application normally.'}

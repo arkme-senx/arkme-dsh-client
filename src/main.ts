@@ -1,3 +1,5 @@
+import { installGameWindowNative } from './game-window-native.js';
+import {harnessFailureDiagnostic} from './harness-process-lifetime.js';
 import { readLocalChat } from './local-chat-read.js';
 import { focusWindowsUpdateWindow } from "./windows-update-window.js";
 import { installCallWindow } from './call-window.js';
@@ -1959,6 +1961,7 @@ function createMainWindow(): void {
 }
 
 function installNavigationPolicy(window: BrowserWindow): void {
+  const gameWindow = installGameWindowNative(window, () => activeHarnessOrigin);
   const attachmentPreview = installAttachmentPreviewNative(window, () => activeHarnessOrigin);
   const dayReviewConfirmation = installDayReviewConfirmationWindow(window, () => activeHarnessOrigin);
   const handleNavigation = (event: Electron.Event, targetUrl: string) => {
@@ -1977,6 +1980,8 @@ function installNavigationPolicy(window: BrowserWindow): void {
   window.webContents.on("will-redirect", handleNavigation);
   window.webContents.on("will-attach-webview", (event) => event.preventDefault());
   window.webContents.setWindowOpenHandler(details => {
+    const game = gameWindow.handle(details);
+    if (game) return game;
     const confirmation = dayReviewConfirmation.handle(details);
     if (confirmation) return confirmation;
     const preview = attachmentPreview.handle(details);
@@ -2336,7 +2341,9 @@ async function showFatalBootstrapError(error: unknown): Promise<void> {
 
 async function renderFailure(error: unknown): Promise<void> {
   logDiagnostic("render-failure", error);
-  startupDiagnostics.fail(error instanceof Error ? error.stack ?? error.message : String(error), logPath);
+  const failureDiagnostic = harnessFailureDiagnostic(error);
+  startupDiagnostics.fail((error instanceof Error ? error.stack ?? error.message : String(error))
+    + (Object.keys(failureDiagnostic).length ? '\n[startup-operation] ' + JSON.stringify(failureDiagnostic) : ''), logPath);
   const message = error instanceof Error ? error.message : String(error);
   const workspacePath = controller?.getCurrentWorkspace();
   const display = error instanceof ElectronRuntimeManifestError || error instanceof BadRuntimeReleaseBlockedError

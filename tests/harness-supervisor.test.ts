@@ -48,6 +48,7 @@ async function createHarness(overrides: {
   coreDependencyPolicy?: {modulePath: string};
   dshBinPath?: string;
   realAuthentication?: boolean;
+  noLaunchUrl?: boolean;
   validateRecoveredPage?: (session: import("../src/harness-auth-session.js").HarnessAuthSession) => Promise<void>;
   onAuthenticated?: (session: import("../src/harness-auth-session.js").HarnessAuthSession) => Promise<void>;
   health?: (context: { spawnCount: number; children: FakeChild[] }) => Promise<boolean>;
@@ -82,7 +83,7 @@ async function createHarness(overrides: {
     const spawned = children[spawnIndex] ?? new FakeChild();
     if (children[spawnIndex] === undefined) children.push(spawned);
     spawnIndex += 1;
-    queueMicrotask(() => spawned.stdout.write(`dsh web: http://127.0.0.1:${overrides.port ?? 41234}/?token=test-launch-token\n`));
+    if (!overrides.noLaunchUrl) queueMicrotask(() => spawned.stdout.write(`dsh web: http://127.0.0.1:${overrides.port ?? 41234}/?token=test-launch-token\n`));
     return spawned;
   });
   let now = 0;
@@ -1305,4 +1306,22 @@ test("restores preflight Profile when workspace registration fails after launch"
   expect(await readFile(harness.profilePath,"utf8")).toBe(harness.original);
   const receiptDir=path.join(harness.dshHome,"arkme-self/desktop-extension-quarantine");
   for (const name of await readdir(receiptDir)) expect(JSON.parse(await readFile(path.join(receiptDir,name,"receipt.json"),"utf8")).phase).toBe("restored");
+});
+
+
+test('timeout distinguishes polling without a launch URL from actual health requests', async () => {
+  const {supervisor, root} = await createHarness({noLaunchUrl: true});
+  await expect(supervisor.start(root, {timeoutMs: 100, pollIntervalMs: 25})).rejects.toThrow('did not become ready');
+  const log = await readFile(path.join(root, 'logs', 'harness.log'), 'utf8');
+  const line = log.split('\n').find(line => line.startsWith('[supervisor] startup-timeout '))!;
+  expect(JSON.parse(line.slice(line.indexOf('{')))).toMatchObject({pollCount: 4, healthChecks: 0, phase: 'waiting-launch-url', lastHealthReason: 'not-attempted'});
+});
+
+test('timeout records completed authentication separately from unhealthy responses', async () => {
+  const {supervisor, root} = await createHarness({health: async () => false});
+  await expect(supervisor.start(root, {timeoutMs: 100, pollIntervalMs: 25})).rejects.toThrow('did not become ready');
+  const log = await readFile(path.join(root, 'logs', 'harness.log'), 'utf8');
+  expect(log).toContain('[supervisor] authentication-ready ');
+  const line = log.split('\n').find(line => line.startsWith('[supervisor] startup-timeout '))!;
+  expect(JSON.parse(line.slice(line.indexOf('{')))).toMatchObject({healthChecks: 3, pollCount: 4, phase: 'health-check', lastHealthReason: 'unhealthy'});
 });

@@ -52,3 +52,25 @@ test('cannot replace receipt when creation identity cannot be read',async()=>{
  answer(null,new Error('probe timeout'));await expect(writeHarnessProcessReceipt(file,{...oldReceipt,generation:'new'})).rejects.toThrow();
  expect(JSON.parse(await readFile(file,'utf8'))).toEqual(oldReceipt);
 });
+
+test('new-process query timeout is distinguished from old receipt verification and sanitized',async()=>{
+ const {harnessFailureDiagnostic}=await import('../src/harness-process-lifetime.js');
+ answer(null,Object.assign(new Error('private command line'),{killed:true,signal:'SIGTERM'}));
+ try {await writeHarnessProcessReceipt(file,{...oldReceipt,generation:'new'});throw new Error('expected failure');}
+ catch(error){expect(harnessFailureDiagnostic(error)).toMatchObject({operation:'register-new',diagnosticReason:'query-timeout'});expect(JSON.stringify(harnessFailureDiagnostic(error))).not.toContain('private');}
+});
+
+test.each(['verify-previous','clear-exited'] as const)('query failures label %s and retain receipt',async operation=>{
+ const {harnessFailureDiagnostic,clearExitedHarnessProcessReceipt}=await import('../src/harness-process-lifetime.js');
+ answer(null,new Error('private command'));
+ try {await (operation==='verify-previous'?assertPreviousHarnessExited(file):clearExitedHarnessProcessReceipt(file,'old'));throw new Error('expected failure');}
+ catch(error){expect(harnessFailureDiagnostic(error)).toMatchObject({operation,diagnosticReason:'query-failed'});}
+ expect(JSON.parse(await readFile(file,'utf8'))).toEqual(oldReceipt);
+});
+
+test('CIM failure keeps only numeric HRESULT, not private provider output',async()=>{
+ const {harnessFailureDiagnostic}=await import('../src/harness-process-lifetime.js');
+ answer({failure:'cim-query',hresult:-2147024891,private:'secret command'});
+ try{await writeHarnessProcessReceipt(file,oldReceipt);throw new Error('expected failure');}
+ catch(error){expect(harnessFailureDiagnostic(error)).toMatchObject({operation:'register-new',diagnosticReason:'query-failed',nativeHresult:-2147024891});expect(JSON.stringify(harnessFailureDiagnostic(error))).not.toContain('secret');}
+});
