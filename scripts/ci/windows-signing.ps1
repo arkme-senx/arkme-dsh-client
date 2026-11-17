@@ -161,7 +161,10 @@ for($attempt=1;$attempt -le 2;$attempt++){
   $start.FileName='node';$start.ArgumentList.Add('scripts/ci/token.mjs');$start.ArgumentList.Add([string]$attempt)
   $start.UseShellExecute=$false;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
   $child=[System.Diagnostics.Process]::Start($start)
-  $token=$child.StandardOutput.ReadToEnd();$null=$child.StandardError.ReadToEnd();$child.WaitForExit()
+  $token=$child.StandardOutput.ReadToEnd();$tokenDiagnostics=$child.StandardError.ReadToEnd();$child.WaitForExit()
+  foreach($line in ($tokenDiagnostics -split '\r?\n')){
+   if($line -match '^Signing token unavailable: stage=(create|result|decrypt|validate|ack|wait) reason=(device_unavailable|unlock_failed|account_mismatch|token_unreadable|codex_failed|timeout|expired|cancelled|consumed|unknown|request_failed|invalid_token|http_[1-5]\d{2}|connection_unavailable|response_unavailable|api_rejected) status=(pending|leased|ready|failed|expired|cancelled|consumed|unknown) elapsed_ms=\d+ clock_skew_s=-?\d+ ttl_s=-?\d+$'){Write-Output $line}
+  }
   if($child.ExitCode -ne 0 -or $token -notmatch '^\d{6}$'){throw 'Token request failed'}
   Write-Output 'Fresh signing token received through private pipe; submitting login'
   [ArkmeLoginControls]::SetText([IntPtr]$controls.Account,$env:SIMPLYSIGN_ACCOUNT)
