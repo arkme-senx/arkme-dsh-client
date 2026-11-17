@@ -77,6 +77,7 @@ import {
   parseArkmeDeepLink
 } from "./deep-link.js";
 import { DesktopController } from "./desktop-controller.js";
+import { openExternalBrowser, showRecordingLinkError } from "./external-browser.js";
 import { resolveArkmePreloadPath } from "./desktop-capabilities.js";
 import { AppUpdateNoticeCoordinator, registerAppUpdateNoticeIpc, installAppUpdateNoticeStyles } from "./app-update-notice.js";
 import { createElectronAppUpdater } from "./electron-app-updater.js";
@@ -1963,7 +1964,11 @@ function createMainWindow(): void {
 function installNavigationPolicy(window: BrowserWindow): void {
   const gameWindow = installGameWindowNative(window, () => activeHarnessOrigin);
   const attachmentPreview = installAttachmentPreviewNative(window, () => activeHarnessOrigin);
-  const dayReviewConfirmation = installDayReviewConfirmationWindow(window, () => activeHarnessOrigin);
+  const confirmationWindow = installDayReviewConfirmationWindow(window, () => activeHarnessOrigin, (child, expired) => {
+    void showRecordingLinkError(child, expired).then(() => {
+      if (child !== window && !child.isDestroyed()) child.close();
+    });
+  });
   const handleNavigation = (event: Electron.Event, targetUrl: string) => {
     const decision = decideNavigation(targetUrl, {
       statusPageUrl,
@@ -1973,7 +1978,7 @@ function installNavigationPolicy(window: BrowserWindow): void {
 
     event.preventDefault();
     if (decision.kind === "action") enqueueAppAction(decision.action);
-    if (decision.kind === "external") void shell.openExternal(decision.url);
+    if (decision.kind === "external") void openExternalBrowser(window, decision.url);
   };
 
   window.webContents.on("will-navigate", handleNavigation);
@@ -1982,7 +1987,7 @@ function installNavigationPolicy(window: BrowserWindow): void {
   window.webContents.setWindowOpenHandler(details => {
     const game = gameWindow.handle(details);
     if (game) return game;
-    const confirmation = dayReviewConfirmation.handle(details);
+    const confirmation = confirmationWindow.handle(details);
     if (confirmation) return confirmation;
     const preview = attachmentPreview.handle(details);
     if (preview) return preview;
@@ -1992,7 +1997,8 @@ function installNavigationPolicy(window: BrowserWindow): void {
       harnessOrigin: activeHarnessOrigin
     });
     if (decision.kind === "action") enqueueAppAction(decision.action);
-    if (decision.kind === "external") void shell.openExternal(decision.url);
+    if (decision.kind === "external") void openExternalBrowser(window, decision.url);
+    if (decision.kind === "allow" && /^https?:\/\//i.test(url)) void openExternalBrowser(window, url);
     return { action: "deny" };
   });
 }

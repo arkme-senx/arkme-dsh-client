@@ -30,19 +30,22 @@ describe("decideNavigation", () => {
     });
   });
 
-  test("opens external HTTPS URLs outside Electron", () => {
-    expect(decideNavigation("https://platform.deepseek.com/", context)).toEqual({
-      kind: "external",
-      url: "https://platform.deepseek.com/"
-    });
+  test("opens HTTP and HTTPS URLs, including other localhost ports, outside Electron", () => {
+    for (const url of [
+      "https://platform.deepseek.com/", "http://www.google.com/", "http://example.com/path?q=1#section",
+      "http://127.example.com/", "http://127.0.0.1:9999/", "http://localhost:9999/", "http://[::1]:9999/",
+    ]) {
+      expect(decideNavigation(url, context)).toEqual({ kind: "external", url });
+    }
   });
 
-  test("denies other local ports, files, scripts and insecure external URLs", () => {
+  test("denies files, scripts and unsupported protocols", () => {
     for (const target of [
-      "http://127.0.0.1:9999/",
-      "http://example.com/",
       "file:///etc/passwd",
-      "javascript:alert(1)"
+      "javascript:alert(1)",
+      "data:text/html,hello",
+      "mailto:example@example.com",
+      "not a URL"
     ]) {
       expect(decideNavigation(target, context)).toEqual({ kind: "deny" });
     }

@@ -1,4 +1,5 @@
-import { BrowserWindow, ipcMain, screen, shell } from "electron";
+import { BrowserWindow, ipcMain, screen } from "electron";
+import { openExternalBrowser } from "./external-browser.js";
 import { acceptsPreviewPopup, previewBounds } from "./attachment-preview-window.js";
 let savedBounds: Electron.Rectangle | undefined;
 
@@ -28,7 +29,7 @@ export function installAttachmentPreviewNative(main: BrowserWindow, origin: () =
     window.webContents.on("will-redirect", event => event.preventDefault());
     window.webContents.on("will-attach-webview", event => event.preventDefault());
     window.webContents.setWindowOpenHandler(({url}) => {
-      try { if (["http:", "https:"].includes(new URL(url).protocol)) void shell.openExternal(url); } catch {}
+      try { if (["http:", "https:"].includes(new URL(url).protocol)) void openExternalBrowser(window, url); } catch {}
       return {action: "deny"};
     });
     window.webContents.on("before-input-event", (event, input) => {

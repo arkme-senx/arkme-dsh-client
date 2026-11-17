@@ -38,7 +38,7 @@ export function decideNavigation(
     return { kind: "allow" };
   }
 
-  if (target.protocol === "https:") {
+  if (target.protocol === "https:" || target.protocol === "http:") {
     return { kind: "external", url: target.href };
   }
 
