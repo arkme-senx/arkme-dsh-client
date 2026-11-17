@@ -1,0 +1,41 @@
+name: Upload verified macOS 3.0.35 artifacts
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: arkme-macos-313-recovery
+  cancel-in-progress: false
+jobs:
+  upload:
+    if: github.repository == 'arkme-senx/arkme-dsh-client' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: '${{ github.sha }}'}
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - uses: pnpm/action-setup@v4
+        with: {version: '11.19.0'}
+      - run: |
+          git config --global --add url."https://github.com/".insteadOf 'ssh://git@github.com/'
+          git config --global --add url."https://github.com/".insteadOf 'git@github.com:'
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Verify original successful Mac job and immutable artifact bytes
+        run: node scripts/ci/recover-macos-313.mjs prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Upload only verified Mac objects through existing scoped CI grants
+        run: node scripts/ci/recover-macos-313.mjs upload
+        env:
+          ARKME_CI_BACKEND: ${{ vars.ARKME_CI_BACKEND }}
+          ARKME_CI_SECRET: ${{ secrets.ARKME_CI_SECRET }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-313-upload-receipt
+          path: macos-upload-receipt.json
+          if-no-files-found: error
+          retention-days: 30

@@ -76,3 +76,8 @@ Windows CI 只生成并上传签名 NSIS EXE、EXE blockmap、latest.yml 和发�
 大于等于 8 MiB 的文件使用 8 MiB 分片、2 片并发；小文件继续 PUT。每个请求超时 5 分钟，最多 3 次尝试，每次刷新对象范围 STS；同一进程内保存 checkpoint 并续传已完成分片，跨 Action 重跑不保存 checkpoint。完成响应丢失导致 NoSuchUpload 时重新初始化，仍禁止覆盖；仅 FileAlreadyExists 进入原有 CDN 全量摘要校验，其他 409 不视为成功。
 
 JSON 日志包含平台/文件名、size_bytes、elapsed_ms、attempt、进度以及脱敏错误码；不输出 STS、uploadId、checkpoint 或 SDK 原始错误。上传完成日志不代表发布成功，仍须通过 CDN 摘要和后端校验。沿用限定对象的 PutObject 权限，不添加删除权限；失败任务的未完成分片不由本脚本主动删除，应由 OSS 既有分片生命周期清理。
+# macOS 3.0.35 独立上传补救
+
+`recover-macos-313.yml` 仅允许在 `master` 手动执行，沿用 `prod` 环境的审批和凭据。它固定读取 run `44147416141` 中成功签名、公证的 Mac artifact `14360210722`，核对来源、完整归档 SHA-256、原始平台元数据及全部文件 SHA-512，复用现有逐对象 STS、禁止覆盖的上传和 CDN 全量校验。任务不申请新版本，不重建包，不上传 Windows，不修改 stable 或 Runtime 兼容规则。产出 `macos-313-upload-receipt.json` 仅表示上传验证成功。
+
+激活前在现有管理页补录并验证 shell Code 313 的 macOS 双架构 Runtime 兼容范围，保留原版本和 stable ID 作为回滚依据；上传回执不代表已经上线。单独激活 Mac 313 后，原来的三平台 CI 批次不能假定可以继续原样发布：其版本比较可能拒绝已发布的同构建号，Windows 负责人应先核对线上版本，再确定后续版本和批次。本脚本固定为本次恢复，不接受任意来源或目标参数，完成后可删除。
