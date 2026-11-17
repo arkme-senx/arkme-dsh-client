@@ -1,4 +1,5 @@
-import { BrowserWindow, ipcMain, shell } from "electron";
+import { BrowserWindow, ipcMain } from "electron";
+import { openExternalBrowser } from "./external-browser.js";
 import { LongArticleWindows } from "./long-article-windows.js";
 const prefix = "arkme-long-article:";
 export function installLongArticleWindowIpc(options: {
@@ -31,7 +32,7 @@ export function installLongArticleWindowIpc(options: {
       window.webContents.on("will-navigate", (event, destination) => { if (destination !== url.href) event.preventDefault(); });
       window.webContents.on("will-redirect", event => event.preventDefault());
       window.webContents.setWindowOpenHandler(({ url: destination }) => {
-        try { if (["https:", "http:"].includes(new URL(destination).protocol)) void shell.openExternal(destination); } catch {}
+        try { if (["https:", "http:"].includes(new URL(destination).protocol)) void openExternalBrowser(window, destination); } catch {}
         return { action: "deny" };
       });
       window.webContents.on("render-process-gone", () => { manager.cancelClose(); manager.finishClose(window.webContents.id); });
