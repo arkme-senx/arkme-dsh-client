@@ -105,6 +105,9 @@ jobs:
         with:
           name: ${{ needs.reserve.outputs.reservation_artifact }}
       - run: node scripts/ci/version.mjs apply
+      - name: 核对签名使用的 UTC 时间
+        continue-on-error: true
+        run: node scripts/ci/signing-health.mjs clock
       - uses: pnpm/action-setup@v4
         with: {version: '11.19.0'}
       - run: |
@@ -121,6 +124,10 @@ jobs:
       - if: matrix.platform == 'windows'
         shell: pwsh
         run: ./scripts/ci/windows-signing.ps1 verify
+      - if: matrix.platform == 'macos'
+        name: 诊断 Apple 时间戳服务
+        continue-on-error: true
+        run: node scripts/ci/signing-health.mjs timestamp
       - if: matrix.platform == 'macos'
         run: node scripts/ci/build-macos.cjs
         env:
