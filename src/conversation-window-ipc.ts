@@ -1,5 +1,7 @@
 import { installGameWindowNative } from './game-window-native.js';
-import { BrowserWindow, ipcMain, shell } from 'electron';
+import { BrowserWindow, ipcMain } from 'electron';
+import { openExternalBrowser, showRecordingLinkError } from './external-browser.js';
+import { installDayReviewConfirmationWindow } from './day-review-confirmation-window.js';
 import { ConversationWindows, type ConversationEvent } from './conversation-windows.js';
 import { installAttachmentPreviewNative } from './attachment-preview-native.js';
 import { ConversationDraftStorage } from './conversation-draft-storage.js';
@@ -31,13 +33,19 @@ export function installConversationWindowIpc(options: {
    const windowId = window.webContents.id;
    const gameWindow = installGameWindowNative(window, options.origin);
    const preview = installAttachmentPreviewNative(window, options.origin);
+   const confirmation = installDayReviewConfirmationWindow(window, options.origin, (child, expired) => {
+    void showRecordingLinkError(child, expired).then(() => {
+     if (child !== window && !child.isDestroyed()) child.close();
+    });
+   });
    window.webContents.on('will-navigate', (event, destination) => { if (destination !== url.href) event.preventDefault(); });
    window.webContents.on('will-redirect', event => event.preventDefault());
    window.webContents.on('will-attach-webview', event => event.preventDefault());
    window.webContents.setWindowOpenHandler(details => {
     const game = gameWindow.handle(details); if (game) return game;
+    const plan = confirmation.handle(details); if (plan) return plan;
     const allowed = preview.handle(details); if (allowed) return allowed;
-    try { if (['http:', 'https:'].includes(new URL(details.url).protocol)) void shell.openExternal(details.url); } catch {}
+    try { if (['http:', 'https:'].includes(new URL(details.url).protocol)) void openExternalBrowser(window, details.url); } catch {}
     return {action: 'deny'};
    });
    window.on('close', event => {
