@@ -248,3 +248,8 @@ test('Androws updates select the transaction before invoking an older uninstalle
  expect(uninstall).toContain('!insertmacro windowsMigrationRemoveOwnedDesktopLink');
  expect(uninstall).not.toContain('Delete "$oldDesktopLink"');
 });
+
+ test.skipIf(process.platform !== 'win32')('legacy registry accepts equivalent real 8.3 paths but rejects unsafe uninstall layouts', () => {
+ const shell=path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
+ expect(execFileSync(shell,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve('tests/windows-migration/legacy-layout.ps1')],{encoding:'utf8'})).toContain('Windows legacy layout fixtures passed');
+ });
