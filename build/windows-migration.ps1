@@ -170,7 +170,13 @@ function Get-LegacyInstall {
           $root = Assert-LocalPath ([string]$key.GetValue('InstallLocation'))
           if (!(Test-LegacyDisplayIdentity ([string]$key.GetValue('DisplayName')) ([string]$key.GetValue('DisplayVersion')))) { throw 'Unknown Flutter installation identity/version.' }
           $uninstall = [string]$key.GetValue('UninstallString')
-          if ($uninstall.Trim('"') -ine (Join-Path $root 'unins000.exe')) { throw 'Unknown Flutter uninstall layout.' }
+          # Compare canonical filesystem paths on both sides. InstallLocation may
+          # already have been expanded from an 8.3 alias by Assert-LocalPath.
+          # This is a path-only registration check: never execute or accept args.
+          if ($uninstall -notmatch '\A(?:"([^"\r\n]+)"|([^"\r\n]+))\z') { throw 'Unknown Flutter uninstall layout.' }
+          $uninstallPath=if ($Matches[1]) { $Matches[1] } else { $Matches[2] }
+          $uninstallPath=Assert-LocalPath $uninstallPath
+          if ($uninstallPath -ine (Join-Path $root 'unins000.exe')) { throw 'Unknown Flutter uninstall layout.' }
           $found += [pscustomobject]@{ Root=$root; Hive=$hive; View=$view; Version=[string]$key.GetValue('DisplayVersion'); Scope=$(if ($hive -eq 'LocalMachine') {'all'} else {'current'}) }
         } finally { $key.Dispose() }
       } finally { $base.Dispose() }
