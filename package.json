@@ -1,7 +1,7 @@
 {
   "name": "arkme",
-  "version": "3.0.34",
-  "versionCode": 312,
+  "version": "3.0.35",
+  "versionCode": 313,
   "private": true,
   "author": "Jotmo",
   "description": "即我",
@@ -133,7 +133,7 @@
           ]
         }
       ],
-      "bundleVersion": "312",
+      "bundleVersion": "313",
       "minimumSystemVersion": "12.0",
       "appId": "com.senqisi.Jotmo"
     },
