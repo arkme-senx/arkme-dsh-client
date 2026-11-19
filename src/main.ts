@@ -2016,9 +2016,9 @@ async function monitorWebBoot(window: BrowserWindow, session: HarnessAuthSession
       window.isDestroyed() || frame !== window.webContents.mainFrame || supervisor !== webBootSupervisor ||
       reportedWebBootFailures.has(session)) return;
   reportedWebBootFailures.add(session);
-  startupDiagnostics.begin("plugin-load");
-  startupDiagnostics.fail(message);
-  await supervisor?.recoverWebBootFailure(session, message);
+  await startupDiagnostics.reportWebBootRecovery(message, async () =>
+    supervisor ? supervisor.recoverWebBootFailure(session, message) : "not-applicable"
+  );
 }
 
 async function renderState(state: HarnessState | RuntimeInstallProgress): Promise<void> {

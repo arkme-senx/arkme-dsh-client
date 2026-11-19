@@ -89,6 +89,7 @@ export async function startupLifecycleTail(file: string, since = 0): Promise<str
 
 export class StartupDiagnostics {
   private attempt: {id: string; started: number; stage: Stage; reported: boolean} | undefined;
+  private webRecovery = false;
   private stopped = false;
   private sending: AbortController | undefined;
   private work = Promise.resolve();
@@ -105,15 +106,42 @@ export class StartupDiagnostics {
     this.schedule(() => this.flush());
   }
   starting(): void {
+    if (this.webRecovery) return;
     if (!this.attempt || this.attempt.reported) this.begin('harness-start');
     else this.attempt.stage = 'harness-start';
   }
   cancel(): void { this.attempt = undefined; }
   shutdown(): void { this.stopped = true; this.cancel(); this.sending?.abort(); }
   fail(message: string, logFile?: string): void {
+    if (this.webRecovery) return;
     try { this.captureFailure(message, logFile); } catch { /* Telemetry must never affect startup. */ }
   }
-  private captureFailure(message: string, logFile?: string): void {
+  /** The failure and its terminal recovery report have distinct event IDs but one correlation ID.
+   * Intermediate supervisor state changes belong to this operation, not a new startup failure. */
+  async reportWebBootRecovery(message: string, recover: () => Promise<'recovered' | 'not-applicable' | 'cancelled'>): Promise<void> {
+    if (this.webRecovery) return;
+    this.webRecovery = true;
+    const attemptId = randomUUID().replaceAll('-', '');
+    const report = (phase: 'detected' | 'outcome', outcome: string, recovery: string, detail: string) => {
+      try {
+        this.begin('plugin-load');
+        this.captureFailure(detail, undefined, recovery,
+          `[startup-report] web-recovery ${JSON.stringify({attemptId, phase, outcome})}`);
+      } catch { /* Diagnostics must not change recovery behavior. */ }
+    };
+    report('detected', 'pending', 'unknown', message);
+    try {
+      const outcome = await recover();
+      report('outcome', outcome, outcome === 'recovered' ? 'completed' : 'unknown', message);
+    } catch (error) {
+      report('outcome', 'failed', 'failed', message + '\n' + (error instanceof Error ? error.message : 'Recovery failed'));
+      throw error;
+    } finally {
+      this.webRecovery = false;
+      this.cancel();
+    }
+  }
+  private captureFailure(message: string, logFile?: string, recovery = 'unknown', recoveryMarker = ''): void {
     const attempt = this.attempt;
     if (!attempt || attempt.reported || this.stopped || this.options.enabled === false || this.pending >= 20) return;
     attempt.reported = true; // Synchronous: duplicate supervisor/renderFailure notifications share one event.
@@ -124,7 +152,7 @@ export class StartupDiagnostics {
       schema:1, event_id:attempt.id, platform:meta.platform, architecture:meta.architecture,
       os_version:meta.osVersion, version:meta.version, build:meta.build,
       stage:message.includes('plugin tree failed to load') ? 'plugin-load' : attempt.stage,
-      result:'failure',error_code:'STARTUP_FAILED',recovery:'unknown',scope:'current',
+      result:'failure',error_code:'STARTUP_FAILED',recovery,scope:'current',
       elapsed_ms:Math.max(0,Math.min(604800000,this.now()-attempt.started)),
       details:scrubStartupDiagnostic(message),log:scrubStartupDiagnostic(message,10000),
       harness_version:componentVersion(meta.harnessVersion),plugin_version:componentVersion(meta.pluginVersion)
@@ -135,7 +163,7 @@ export class StartupDiagnostics {
     this.schedule(async () => {
       const timing = `[startup-report] timing ${JSON.stringify({attemptStartedAtMs: attempt.started, failureOccurredAtMs})}`;
       // Reserve the tail budget even when the error message fills its own limit.
-      report.log = scrubStartupDiagnostic(timing + "\n" + scrubStartupDiagnostic(report.log, 9700) + "\n" + scrubStartupDiagnostic(await tail, 2000), 12000);
+      report.log = scrubStartupDiagnostic(timing + "\n" + recoveryMarker + "\n" + scrubStartupDiagnostic(report.log, 9700) + "\n" + scrubStartupDiagnostic(await tail, 2000), 12000);
       await mkdir(this.options.directory,{recursive:true,mode:0o700});
       // Reserve a slot BEFORE writing; this also bounds repeated offline failures.
       await this.prune(19);
@@ -179,7 +207,7 @@ export class StartupDiagnostics {
       if (!validQueuedReport(r)) { await rm(file,{force:true}); continue; }
       // Queue is never a source of arbitrary request fields or destinations.
       if (path.basename(file)!==r.event_id+'.json') { await rm(file,{force:true}); continue; }
-      const body = JSON.stringify({schema:1,event_id:r.event_id,platform:r.platform,os_version:r.os_version,architecture:r.architecture,version:r.version,build:r.build,stage:r.stage,result:'failure',error_code:'STARTUP_FAILED',recovery:'unknown',scope:'current',elapsed_ms:r.elapsed_ms,details:scrubStartupDiagnostic(r.details),log:scrubStartupDiagnostic(r.log,12000),harness_version:componentVersion(r.harness_version),plugin_version:componentVersion(r.plugin_version)});
+      const body = JSON.stringify({schema:1,event_id:r.event_id,platform:r.platform,os_version:r.os_version,architecture:r.architecture,version:r.version,build:r.build,stage:r.stage,result:'failure',error_code:'STARTUP_FAILED',recovery:r.recovery,scope:'current',elapsed_ms:r.elapsed_ms,details:scrubStartupDiagnostic(r.details),log:scrubStartupDiagnostic(r.log,12000),harness_version:componentVersion(r.harness_version),plugin_version:componentVersion(r.plugin_version)});
       const abort = new AbortController();
       this.sending = abort;
       const timeout = setTimeout(()=>abort.abort(),1500); timeout.unref();
@@ -203,6 +231,7 @@ function validQueuedReport(r: Report): boolean {
     && Number.isInteger(r.build) && r.build > 0 && r.build <= 2147483647
     && Number.isInteger(r.elapsed_ms) && r.elapsed_ms >= 0 && r.elapsed_ms <= 604800000
     && ['runtime-prepare','harness-start','plugin-load'].includes(r.stage)
+    && ['unknown','completed','failed'].includes(r.recovery)
     && r.error_code === 'STARTUP_FAILED' && r.result === 'failure'
     && typeof r.details === 'string' && typeof r.log === 'string'
     && typeof r.harness_version === 'string' && typeof r.plugin_version === 'string';
