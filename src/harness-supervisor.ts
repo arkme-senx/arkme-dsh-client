@@ -230,17 +230,17 @@ export class HarnessProcessSupervisor {
     finally { if (this.startupAbort === abort) this.startupAbort = null; }
   }
 
-  async recoverWebBootFailure(session: HarnessAuthSession, message: string): Promise<void> {
+  async recoverWebBootFailure(session: HarnessAuthSession, message: string): Promise<'recovered' | 'not-applicable' | 'cancelled'> {
     const running = this.current;
     const packages = activationFailurePackages(message);
     if (!packages || !running || running.auth !== session || session.signal.aborted ||
-        this.state?.kind !== "ready" || !this.config.optionalExtensionRecovery || this.startupAbort) return;
+        this.state?.kind !== "ready" || !this.config.optionalExtensionRecovery || this.startupAbort) return 'not-applicable';
     const abort = new AbortController();
     this.startupAbort = abort;
     try {
-      if (!await areEnabledOptionalExtensions(this.config.dshHome, packages)) return;
+      if (!await areEnabledOptionalExtensions(this.config.dshHome, packages)) return 'not-applicable';
       abort.signal.throwIfAborted();
-      if (running !== this.current || session.signal.aborted) return;
+      if (running !== this.current || session.signal.aborted) return 'cancelled';
       this.emit({kind: "stopping", workspacePath: running.workspacePath});
       try {
         await this.stopRunningProcess(running, true);
@@ -253,6 +253,10 @@ export class HarnessProcessSupervisor {
       }
       abort.signal.throwIfAborted();
       await this.startInternal(running.workspacePath, {}, abort.signal, {message, packages});
+      return abort.signal.aborted ? 'cancelled' : 'recovered';
+    } catch (error) {
+      if (abort.signal.aborted) return 'cancelled';
+      throw error;
     } finally {
       if (this.startupAbort === abort) this.startupAbort = null;
     }

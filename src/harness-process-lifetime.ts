@@ -74,14 +74,26 @@ export interface HarnessProcessReceipt {
   windowsCreationTime?: string;
 }
 interface WindowsProcessIdentity { creationTime: string; commandLine: string | null; }
-const identityUnverified = 'Cannot verify previous Harness exit; recovery is blocked';
+const WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS = 30_000;
+// Leave time to persist the receipt and deliver the start grant after a slow query.
+const PROCESS_GUARD_START_TIMEOUT_MS = process.platform === 'win32'
+  ? WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS + 15_000 : 30_000;
 function validCreationTime(value: unknown): value is string {
   return typeof value === 'string' && /^[1-9][0-9]{16,19}$/.test(value);
 }
 
 type IdentityOperation = 'register-new' | 'verify-previous' | 'clear-exited';
 function identityFailure(operation: IdentityOperation, diagnosticReason: string, started = Date.now(), nativeHresult?: number): Error {
-  return annotateHarnessFailure(new Error(identityUnverified), {operation, diagnosticReason, elapsedMs: Math.max(0, Date.now() - started), ...(nativeHresult === undefined ? {} : {nativeHresult})});
+  const messages = diagnosticReason === 'query-timeout' ? {
+    'register-new': '查询新启动的 Harness 进程身份超时（30 秒），本次启动已中止。',
+    'verify-previous': '检查上一次运行的 Harness 进程超时（30 秒），暂时无法确认其是否已退出。',
+    'clear-exited': '清理 Harness 进程记录时查询超时（30 秒），暂时无法确认进程是否已退出。',
+  } : {
+    'register-new': '无法确认新启动的 Harness 进程身份，本次启动已中止。',
+    'verify-previous': '无法确认上一次运行的 Harness 进程是否已退出，暂时无法继续启动。',
+    'clear-exited': '无法确认待清理的 Harness 进程是否已退出，已保留进程记录。',
+  };
+  return annotateHarnessFailure(new Error(messages[operation]), {operation, diagnosticReason, elapsedMs: Math.max(0, Date.now() - started), ...(nativeHresult === undefined ? {} : {nativeHresult})});
 }
 async function readWindowsProcessIdentity(pid: number, operation: IdentityOperation): Promise<WindowsProcessIdentity | null> {
   const started = Date.now();
@@ -97,7 +109,7 @@ async function readWindowsProcessIdentity(pid: number, operation: IdentityOperat
     const output = await new Promise<string>((resolve, reject) => {
       execFile(path.win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
         ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
-        {windowsHide:true, timeout:5000, maxBuffer:256 * 1024, encoding:'utf8'},
+        {windowsHide:true, timeout:WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS, maxBuffer:256 * 1024, encoding:'utf8'},
         (error, stdout) => error ? reject(identityFailure(operation, error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 'query-output-limit' : error.killed ? 'query-timeout' : error.code === 'ENOENT' ? 'query-unavailable' : 'query-failed', started)) : resolve(stdout));
     });
     let value: unknown;
@@ -239,7 +251,7 @@ if (isMainThread && generation !== undefined && typeof process.send === 'functio
   const disconnected = () => { if (terminating) return; terminating = true; terminateOrphanGroup(); };
   process.once('disconnect',disconnected);
   await new Promise<void>((resolve) => {
-    const timer = setTimeout(disconnected,30_000);
+    const timer = setTimeout(disconnected,PROCESS_GUARD_START_TIMEOUT_MS);
     process.on('message',message => {
       const value = message as {type?:unknown;generation?:unknown} | null;
       if (terminating || value?.type !== 'arkme-harness-start' || value.generation !== generation) return;

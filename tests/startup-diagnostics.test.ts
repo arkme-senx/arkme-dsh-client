@@ -161,3 +161,33 @@ test('keeps safe process/auth diagnosis through telemetry tail and rejects raw i
  const tail=await startupLifecycleTail(file);
  expect(tail).toContain('register-new');expect(tail).toContain('query-timeout');expect(tail).toContain('authenticated-page');expect(tail).toContain('ECONNRESET');expect(tail).not.toContain('private');
 });
+
+test.each(['recovered','not-applicable','cancelled','failed'] as const)('correlates Web recovery %s without intermediate duplicate failures',async outcome=>{
+ const {reporter,directory}=await fixture();
+ const run=reporter.reportWebBootRecovery('web boot: 1 entry did not activate\nexample: failed',async()=>{
+  reporter.cancel();reporter.starting();reporter.fail('intermediate supervisor error');
+  if(outcome==='failed')throw Error('retry failed token=private');
+  return outcome;
+ });
+ if(outcome==='failed')await expect(run).rejects.toThrow('retry failed');else await run;
+ await reporter.settled();
+ const reports=await Promise.all((await readdir(directory)).map(async f=>JSON.parse(await readFile(path.join(directory,f),'utf8'))));
+ expect(reports).toHaveLength(2);
+ const markers=reports.map(r=>JSON.parse(r.log.match(/\[startup-report\] web-recovery (\{[^\n]+\})/)[1]));
+ expect(new Set(markers.map(m=>m.attemptId)).size).toBe(1);
+ const result=reports.find(r=>r.log.includes('"phase":"outcome"'));
+ expect(result.recovery).toBe(outcome==='recovered'?'completed':outcome==='failed'?'failed':'unknown');
+ expect(result.log).toContain('"outcome":"'+outcome+'"');
+ expect(JSON.stringify(reports)).not.toContain('token=private');
+ reporter.starting();reporter.fail('independent later failure');await reporter.settled();
+ expect(await readdir(directory)).toHaveLength(3);
+});
+
+test('keeps correlation and completed recovery on offline resend',async()=>{
+ const f=await fixture();await f.reporter.reportWebBootRecovery('plugin failed',async()=> 'recovered');await f.reporter.settled();
+ const saved=await Promise.all((await readdir(f.directory)).map(async file=>JSON.parse(await readFile(path.join(f.directory,file),'utf8'))));
+ const sent:any[]=[];
+ const reporter=new StartupDiagnostics({directory:f.directory,serviceOrigin:'https://jotmo.senguo.me',metadata:()=>{throw Error('unused');},fetcher:async(_u,o)=>{sent.push(JSON.parse(o!.body as string));return new Response(null,{status:202});}});
+ reporter.begin();await reporter.settled();expect(sent).toHaveLength(2);
+ expect(sent.find(r=>r.recovery==='completed')).toEqual(saved.find(r=>r.recovery==='completed'));
+});

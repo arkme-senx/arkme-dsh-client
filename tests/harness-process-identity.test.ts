@@ -27,10 +27,10 @@ test('legacy guarded process stays protected',async()=>{
  await expect(assertPreviousHarnessExited(file)).rejects.toThrow('still running');await access(file);
 });
 test.each([null,''])('legacy inaccessible command line %s fails closed',async commandLine=>{
- answer({creationTime:'133000000000000000',commandLine});await expect(assertPreviousHarnessExited(file)).rejects.toThrow('Cannot verify');await access(file);
+ answer({creationTime:'133000000000000000',commandLine});await expect(assertPreviousHarnessExited(file)).rejects.toThrow('无法确认上一次运行的 Harness 进程是否已退出');await access(file);
 });
 test('process inspection failure preserves receipt',async()=>{
- answer(null,new Error('access denied'));await expect(assertPreviousHarnessExited(file)).rejects.toThrow('Cannot verify');await access(file);
+ answer(null,new Error('access denied'));await expect(assertPreviousHarnessExited(file)).rejects.toThrow('无法确认上一次运行的 Harness 进程是否已退出');await access(file);
 });
 test('new receipt records process creation time before allowing startup',async()=>{
  await writeHarnessProcessReceipt(file,oldReceipt);
@@ -73,4 +73,47 @@ test('CIM failure keeps only numeric HRESULT, not private provider output',async
  answer({failure:'cim-query',hresult:-2147024891,private:'secret command'});
  try{await writeHarnessProcessReceipt(file,oldReceipt);throw new Error('expected failure');}
  catch(error){expect(harnessFailureDiagnostic(error)).toMatchObject({operation:'register-new',diagnosticReason:'query-failed',nativeHresult:-2147024891});expect(JSON.stringify(harnessFailureDiagnostic(error))).not.toContain('secret');}
+});
+
+test.each(['register-new','verify-previous'] as const)('%s permits a successful identity query taking more than five seconds', async operation => {
+ vi.useFakeTimers();
+ try {
+  probe.mockImplementation((_exe, _args, options, callback) => {
+   const timeout = setTimeout(() => callback(Object.assign(new Error('private'), {killed:true}), '', ''), options.timeout);
+   setTimeout(() => { clearTimeout(timeout); callback(null, JSON.stringify({creationTime:'133000000000000000', commandLine:'node.exe'}), ''); }, 6000);
+   return {};
+  });
+  const result = (operation === 'register-new' ? writeHarnessProcessReceipt(file,oldReceipt) : assertPreviousHarnessExited(file)).then(()=>'ok', e=>e.message);
+  // Let the receipt read finish before advancing the external process timers.
+  await vi.waitFor(() => expect(probe).toHaveBeenCalled());
+  await vi.advanceTimersByTimeAsync(6000);
+  expect(await result).toBe('ok');
+  expect(probe.mock.calls.at(-1)?.[2].timeout).toBe(30000);
+ } finally { vi.useRealTimers(); }
+});
+
+test.each([
+ ['register-new','查询新启动的 Harness 进程身份超时（30 秒），本次启动已中止。'],
+ ['verify-previous','检查上一次运行的 Harness 进程超时（30 秒），暂时无法确认其是否已退出。'],
+ ['clear-exited','清理 Harness 进程记录时查询超时（30 秒），暂时无法确认进程是否已退出。'],
+] as const)('%s reports its own timeout and preserves the receipt',async (operation,message)=>{
+ const {harnessFailureDiagnostic,clearExitedHarnessProcessReceipt}=await import('../src/harness-process-lifetime.js');
+ answer(null,Object.assign(new Error('private command'),{killed:true}));
+ const run=()=>operation==='register-new'?writeHarnessProcessReceipt(file,{...oldReceipt,generation:'new'}):operation==='verify-previous'?assertPreviousHarnessExited(file):clearExitedHarnessProcessReceipt(file,'old');
+ await expect(run()).rejects.toThrow(message);
+ await run().catch(error=>expect(harnessFailureDiagnostic(error)).toMatchObject({operation,diagnosticReason:'query-timeout'}));
+ expect(probe.mock.calls.at(-1)?.[2].timeout).toBe(30000);
+ expect(JSON.parse(await readFile(file,'utf8'))).toEqual(oldReceipt);
+});
+
+test.each([
+ ['register-new','无法确认新启动的 Harness 进程身份，本次启动已中止。'],
+ ['verify-previous','无法确认上一次运行的 Harness 进程是否已退出，暂时无法继续启动。'],
+ ['clear-exited','无法确认待清理的 Harness 进程是否已退出，已保留进程记录。'],
+] as const)('%s reports its own non-timeout failure without private output',async(operation,message)=>{
+ const {clearExitedHarnessProcessReceipt}=await import('../src/harness-process-lifetime.js');
+ answer(null,new Error('private command stderr'));
+ const result=operation==='register-new'?writeHarnessProcessReceipt(file,oldReceipt):operation==='verify-previous'?assertPreviousHarnessExited(file):clearExitedHarnessProcessReceipt(file,'old');
+ await expect(result).rejects.toThrow(message);
+ expect(JSON.parse(await readFile(file,'utf8'))).toEqual(oldReceipt);
 });
